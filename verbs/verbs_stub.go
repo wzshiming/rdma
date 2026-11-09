@@ -51,3 +51,52 @@ func (c *Context) QueryPort(port uint8) (*PortAttr, error) {
 func (c *Context) GIDTable(port uint8) ([]GIDEntry, error) {
 	return nil, unsupported("ibv_query_gid_table")
 }
+
+// PD is a protection domain; libibverbs is unavailable on this platform.
+type PD struct{}
+
+// AllocPD allocates a protection domain.
+func (c *Context) AllocPD() (*PD, error) { return nil, unsupported("ibv_alloc_pd") }
+
+// PDFromPointer wraps a struct ibv_pd pointer without owning it.
+func PDFromPointer(p unsafe.Pointer) *PD { return &PD{} }
+
+// Pointer returns the underlying struct ibv_pd pointer.
+func (p *PD) Pointer() unsafe.Pointer { return nil }
+
+// Close deallocates the protection domain.
+func (p *PD) Close() error { return nil }
+
+// RegisterMemory registers the Go slice b for RDMA access.
+func (p *PD) RegisterMemory(b []byte, access AccessFlags) (*MR, error) {
+	return nil, unsupported("ibv_reg_mr")
+}
+
+// AllocMemory maps and registers page-aligned memory outside the Go heap.
+func (p *PD) AllocMemory(size int, access AccessFlags) (*MR, error) {
+	return nil, unsupported("ibv_reg_mr")
+}
+
+// MR is a registered memory region; libibverbs is unavailable on this platform.
+type MR struct{}
+
+// MRFromPointer wraps a struct ibv_mr pointer without owning it.
+func MRFromPointer(p unsafe.Pointer) *MR { return &MR{} }
+
+// Pointer returns the underlying struct ibv_mr pointer.
+func (m *MR) Pointer() unsafe.Pointer { return nil }
+
+// Bytes returns the registered memory.
+func (m *MR) Bytes() []byte { return nil }
+
+// LKey returns the local key of the region.
+func (m *MR) LKey() uint32 { return 0 }
+
+// RKey returns the remote key of the region.
+func (m *MR) RKey() uint32 { return 0 }
+
+// SGE builds a scatter/gather element for a sub-slice of Bytes.
+func (m *MR) SGE(b []byte) SGE { return SGE{} }
+
+// Close deregisters the region.
+func (m *MR) Close() error { return nil }

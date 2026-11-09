@@ -3,10 +3,13 @@
 package verbs_test
 
 import (
+	"bytes"
 	"errors"
 	"net/netip"
+	"os"
 	"syscall"
 	"testing"
+	"unsafe"
 
 	"github.com/wzshiming/rdma/internal/rdmatest"
 	"github.com/wzshiming/rdma/verbs"
@@ -122,5 +125,90 @@ func TestDevice(t *testing.T) {
 	}
 	if _, err := ctx.QueryDevice(); err != nil {
 		t.Errorf("QueryDevice() after closing the alias error: %v", err)
+	}
+}
+
+func allocPD(t *testing.T, ctx *verbs.Context) *verbs.PD {
+	t.Helper()
+	pd, err := ctx.AllocPD()
+	if err != nil {
+		t.Fatalf("AllocPD() error: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := pd.Close(); err != nil {
+			t.Errorf("PD.Close() error: %v", err)
+		}
+	})
+	return pd
+}
+
+func TestRegisterMemory(t *testing.T) {
+	_, ctx := openDevice(t)
+	pd := allocPD(t, ctx)
+
+	buf := bytes.Repeat([]byte("go"), 2048)
+	mr, err := pd.RegisterMemory(buf, verbs.AccessLocalWrite|verbs.AccessRemoteWrite|verbs.AccessRemoteRead)
+	if err != nil {
+		t.Fatalf("RegisterMemory() error: %v", err)
+	}
+	if got := mr.Bytes(); unsafe.SliceData(got) != unsafe.SliceData(buf) || len(got) != len(buf) {
+		t.Errorf("Bytes() does not alias the registered slice")
+	}
+	if mr.LKey() == 0 || mr.RKey() == 0 {
+		t.Errorf("LKey() = %d, RKey() = %d, want non-zero keys", mr.LKey(), mr.RKey())
+	}
+	sub := buf[1024:1536]
+	sge := mr.SGE(sub)
+	if sge.Addr != uint64(uintptr(unsafe.Pointer(unsafe.SliceData(sub)))) || sge.Length != 512 || sge.LKey != mr.LKey() {
+		t.Errorf("SGE() = %+v, want addr %#x, length 512, lkey %d", sge, uintptr(unsafe.Pointer(unsafe.SliceData(sub))), mr.LKey())
+	}
+	t.Run("SGEOutsideRegionPanics", func(t *testing.T) {
+		defer func() {
+			if recover() == nil {
+				t.Error("SGE() of a slice outside the region did not panic")
+			}
+		}()
+		mr.SGE(make([]byte, 8))
+	})
+	if mr.Pointer() == nil {
+		t.Error("Pointer() = nil")
+	}
+	if err := mr.Close(); err != nil {
+		t.Fatalf("Close() error: %v", err)
+	}
+	if err := mr.Close(); err != nil {
+		t.Errorf("second Close() error: %v", err)
+	}
+	if _, err := pd.RegisterMemory(nil, verbs.AccessLocalWrite); !errors.Is(err, syscall.EINVAL) {
+		t.Errorf("RegisterMemory(nil) error = %v, want EINVAL", err)
+	}
+}
+
+func TestAllocMemory(t *testing.T) {
+	_, ctx := openDevice(t)
+	pd := allocPD(t, ctx)
+
+	mr, err := pd.AllocMemory(3*os.Getpagesize()/2, verbs.AccessLocalWrite|verbs.AccessRemoteWrite)
+	if err != nil {
+		t.Fatalf("AllocMemory() error: %v", err)
+	}
+	b := mr.Bytes()
+	if len(b) != 3*os.Getpagesize()/2 {
+		t.Errorf("len(Bytes()) = %d, want %d", len(b), 3*os.Getpagesize()/2)
+	}
+	if addr := uintptr(unsafe.Pointer(unsafe.SliceData(b))); addr%uintptr(os.Getpagesize()) != 0 {
+		t.Errorf("Bytes() starts at %#x, want page alignment", addr)
+	}
+	for i := range b {
+		b[i] = byte(i)
+	}
+	if mr.SGE(b[:16]).Length != 16 || mr.LKey() == 0 {
+		t.Errorf("SGE/LKey of allocated memory: %+v, %d", mr.SGE(b[:16]), mr.LKey())
+	}
+	if err := mr.Close(); err != nil {
+		t.Fatalf("Close() error: %v", err)
+	}
+	if _, err := pd.AllocMemory(0, verbs.AccessLocalWrite); !errors.Is(err, syscall.EINVAL) {
+		t.Errorf("AllocMemory(0) error = %v, want EINVAL", err)
 	}
 }
