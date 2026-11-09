@@ -368,30 +368,40 @@ func connParam(p ConnParam) (*C.struct_rdma_conn_param, func()) {
 // out of reach, and ctx.Err() when ctx ends first, after which the only
 // sensible call on the ID is Close.
 func (id *ID) Connect(ctx context.Context, param *ConnParam) (*ConnInfo, error) {
-	if err := checkConnParam("rdma_connect", param, MaxConnectPrivateData); err != nil {
+	ev, err := id.establish(ctx, "rdma_connect", param, MaxConnectPrivateData, func(cp *C.struct_rdma_conn_param) (C.int, error) {
+		rc, err := C.rdma_connect(id.id, cp)
+		return rc, err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &ConnInfo{PrivateData: ev.privateData, ResponderResources: ev.responderResources, InitiatorDepth: ev.initiatorDepth}, nil
+}
+
+// establish runs call, an rdma_connect or rdma_accept named op, with the
+// parameters of param, whose private data may have max bytes, and waits for
+// the ESTABLISHED event.
+func (id *ID) establish(ctx context.Context, op string, param *ConnParam, max int, call func(*C.struct_rdma_conn_param) (C.int, error)) (*cmEvent, error) {
+	if err := checkConnParam(op, param, max); err != nil {
 		return nil, err
 	}
 	id.mu.Lock()
 	if id.closed {
 		id.mu.Unlock()
-		return nil, errClosed("rdma_connect")
+		return nil, errClosed(op)
 	}
 	if id.qp == nil {
 		id.mu.Unlock()
-		return nil, invalidArg("rdma_connect", "no queue pair, call CreateQP first")
+		return nil, invalidArg(op, "no queue pair, call CreateQP first")
 	}
 	cp, free := connParam(param.withDefaults())
-	rc, err := C.rdma_connect(id.id, cp)
+	rc, err := call(cp)
 	free()
 	id.mu.Unlock()
 	if rc != 0 {
-		return nil, opError("rdma_connect", err)
+		return nil, opError(op, err)
 	}
-	ev, err := id.awaitEvent(ctx, "rdma_connect", EventEstablished)
-	if err != nil {
-		return nil, err
-	}
-	return &ConnInfo{PrivateData: ev.privateData, ResponderResources: ev.responderResources, InitiatorDepth: ev.initiatorDepth}, nil
+	return id.awaitEvent(ctx, op, EventEstablished)
 }
 
 // awaitEvent reads events until want arrives and returns it; an event that
@@ -616,27 +626,11 @@ func (l *Listener) Close() error {
 // until the connection is established; param may be nil for the defaults.
 // The private data goes to the peer's Connect.
 func (r *Request) Accept(ctx context.Context, param *ConnParam) error {
-	if err := checkConnParam("rdma_accept", param, MaxAcceptPrivateData); err != nil {
-		return err
-	}
 	id := r.ID
-	id.mu.Lock()
-	if id.closed {
-		id.mu.Unlock()
-		return errClosed("rdma_accept")
-	}
-	if id.qp == nil {
-		id.mu.Unlock()
-		return invalidArg("rdma_accept", "no queue pair, call CreateQP first")
-	}
-	cp, free := connParam(param.withDefaults())
-	rc, err := C.rdma_accept(id.id, cp)
-	free()
-	id.mu.Unlock()
-	if rc != 0 {
-		return opError("rdma_accept", err)
-	}
-	_, err = id.awaitEvent(ctx, "rdma_accept", EventEstablished)
+	_, err := id.establish(ctx, "rdma_accept", param, MaxAcceptPrivateData, func(cp *C.struct_rdma_conn_param) (C.int, error) {
+		rc, err := C.rdma_accept(id.id, cp)
+		return rc, err
+	})
 	return err
 }
 
