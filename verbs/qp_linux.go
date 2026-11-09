@@ -3,7 +3,17 @@
 package verbs
 
 /*
+#include <stddef.h>
+#include <stdlib.h>
 #include <infiniband/verbs.h>
+
+// imm_data lives in an anonymous union and the rdma fields in a union member,
+// which cgo cannot address by name.
+enum {
+	VERBS_SEND_WR_IMM_OFFSET = offsetof(struct ibv_send_wr, imm_data),
+	VERBS_SEND_WR_RADDR_OFFSET = offsetof(struct ibv_send_wr, wr.rdma.remote_addr),
+	VERBS_SEND_WR_RKEY_OFFSET = offsetof(struct ibv_send_wr, wr.rdma.rkey),
+};
 */
 import "C"
 
@@ -89,16 +99,95 @@ func (q *QP) Query(mask QPAttrMask) (*QPAttr, error) {
 	return attr, nil
 }
 
-// PostSend posts send work requests as one chain; after it returns the C side
+// PostSend posts send work requests as one chain. The chain and its SGE arrays
+// are built in C memory for the duration of the call; afterwards the C side
 // keeps no reference to Go memory.
 func (q *QP) PostSend(wrs ...SendWR) error {
-	return &OpError{Op: "ibv_post_send", Err: syscall.ENOSYS}
+	if len(wrs) == 0 {
+		return nil
+	}
+	nsge := 0
+	for i := range wrs {
+		nsge += len(wrs[i].SGE)
+	}
+	const wrSize = unsafe.Sizeof(C.struct_ibv_send_wr{})
+	mem := C.calloc(1, C.size_t(uintptr(len(wrs))*wrSize+uintptr(nsge)*sgeSize))
+	if mem == nil {
+		return &OpError{Op: "ibv_post_send", Err: syscall.ENOMEM}
+	}
+	defer C.free(mem)
+	cwrs := unsafe.Slice((*C.struct_ibv_send_wr)(mem), len(wrs))
+	sges := unsafe.Slice((*C.struct_ibv_sge)(unsafe.Add(mem, uintptr(len(wrs))*wrSize)), nsge)
+	for i := range wrs {
+		w, cw := &wrs[i], &cwrs[i]
+		cw.wr_id = C.uint64_t(w.ID)
+		if i+1 < len(wrs) {
+			cw.next = &cwrs[i+1]
+		}
+		if len(w.SGE) > 0 {
+			cw.sg_list = &sges[0]
+			cw.num_sge = C.int(len(w.SGE))
+			sges = fillSGEs(sges, w.SGE)
+		}
+		cw.opcode = uint32(w.Op)
+		cw.send_flags = C.uint(w.Flags)
+		p := unsafe.Pointer(cw)
+		*(*uint32)(unsafe.Add(p, C.VERBS_SEND_WR_IMM_OFFSET)) = w.Imm
+		*(*uint64)(unsafe.Add(p, C.VERBS_SEND_WR_RADDR_OFFSET)) = w.RemoteAddr
+		*(*uint32)(unsafe.Add(p, C.VERBS_SEND_WR_RKEY_OFFSET)) = w.RKey
+	}
+	var bad *C.struct_ibv_send_wr
+	if rc := C.ibv_post_send(q.qp, &cwrs[0], &bad); rc != 0 {
+		return opErrorRC("ibv_post_send", rc)
+	}
+	return nil
 }
 
-// PostRecv posts receive work requests as one chain; after it returns the C
-// side keeps no reference to Go memory.
+// PostRecv posts receive work requests as one chain, built in C memory like
+// PostSend does.
 func (q *QP) PostRecv(wrs ...RecvWR) error {
-	return &OpError{Op: "ibv_post_recv", Err: syscall.ENOSYS}
+	if len(wrs) == 0 {
+		return nil
+	}
+	nsge := 0
+	for i := range wrs {
+		nsge += len(wrs[i].SGE)
+	}
+	const wrSize = unsafe.Sizeof(C.struct_ibv_recv_wr{})
+	mem := C.calloc(1, C.size_t(uintptr(len(wrs))*wrSize+uintptr(nsge)*sgeSize))
+	if mem == nil {
+		return &OpError{Op: "ibv_post_recv", Err: syscall.ENOMEM}
+	}
+	defer C.free(mem)
+	cwrs := unsafe.Slice((*C.struct_ibv_recv_wr)(mem), len(wrs))
+	sges := unsafe.Slice((*C.struct_ibv_sge)(unsafe.Add(mem, uintptr(len(wrs))*wrSize)), nsge)
+	for i := range wrs {
+		w, cw := &wrs[i], &cwrs[i]
+		cw.wr_id = C.uint64_t(w.ID)
+		if i+1 < len(wrs) {
+			cw.next = &cwrs[i+1]
+		}
+		if len(w.SGE) > 0 {
+			cw.sg_list = &sges[0]
+			cw.num_sge = C.int(len(w.SGE))
+			sges = fillSGEs(sges, w.SGE)
+		}
+	}
+	var bad *C.struct_ibv_recv_wr
+	if rc := C.ibv_post_recv(q.qp, &cwrs[0], &bad); rc != 0 {
+		return opErrorRC("ibv_post_recv", rc)
+	}
+	return nil
+}
+
+const sgeSize = unsafe.Sizeof(C.struct_ibv_sge{})
+
+// fillSGEs copies src to the front of dst and returns the rest of dst.
+func fillSGEs(dst []C.struct_ibv_sge, src []SGE) []C.struct_ibv_sge {
+	for i, s := range src {
+		dst[i] = C.struct_ibv_sge{addr: C.uint64_t(s.Addr), length: C.uint32_t(s.Length), lkey: C.uint32_t(s.LKey)}
+	}
+	return dst[len(src):]
 }
 
 // Close destroys the queue pair. A second Close is a no-op.

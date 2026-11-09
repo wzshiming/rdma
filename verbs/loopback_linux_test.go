@@ -39,13 +39,14 @@ func newRCPair(t *testing.T) *rcPair {
 	if p.ch, err = ctx.CreateCompChannel(); err != nil {
 		t.Fatalf("CreateCompChannel() error: %v", err)
 	}
-	p.cqA = createCQ(t, ctx, p.ch)
-	p.cqB = createCQ(t, ctx, p.ch)
+	// Registered before the CQs so that it runs after they are gone.
 	t.Cleanup(func() {
 		if err := p.ch.Close(); err != nil {
 			t.Errorf("CompChannel.Close() error: %v", err)
 		}
 	})
+	p.cqA = createCQ(t, ctx, p.ch)
+	p.cqB = createCQ(t, ctx, p.ch)
 	p.a, p.inline = createRC(t, p.pd, p.cqA)
 	p.b, _ = createRC(t, p.pd, p.cqB)
 	p.connect(t, p.a, p.b)
