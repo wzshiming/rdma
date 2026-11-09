@@ -80,6 +80,12 @@ func TestDeviceFromSysfs(t *testing.T) {
 			addrs:  map[string][]netip.Addr{"eth0": {ip}},
 			want:   Dev{Name: "rxe0", Port: 1, Netdev: "eth0", IP: ip, GIDIndex: 4},
 		},
+		{
+			name:  "software device sharing its IPv4 with a hardware one",
+			root:  "testdata/mana",
+			addrs: map[string][]netip.Addr{"eth0": {ip}},
+			want:  Dev{Name: "rxe0", Port: 1, Netdev: "eth0", IP: ip, GIDIndex: 4},
+		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("RDMA_TEST_REQUIRE", "")

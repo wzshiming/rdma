@@ -3,7 +3,8 @@
 // Two environment variables steer [Device]:
 //
 //   - RDMA_TEST_DEVICE names the device to use, e.g. "rxe0"; when it is unset,
-//     the alphabetically first usable device wins.
+//     software devices (rxe, siw) are preferred over hardware ones, and the
+//     alphabetically first usable device of a kind wins.
 //   - RDMA_TEST_REQUIRE=1 fails a test that finds no usable device instead of
 //     skipping it.
 package rdmatest
@@ -80,17 +81,23 @@ func find(root, name string, addrs func(netdev string) ([]netip.Addr, error)) (D
 }
 
 // candidates returns the device directories to try: only the one name picks
-// when it is set, otherwise all of them in alphabetical order.
+// when it is set, otherwise software devices (rxe, siw) ahead of hardware
+// ones, each group in alphabetical order.
 func candidates(root, name string) []string {
 	if name != "" {
 		return []string{filepath.Join(root, name)}
 	}
 	entries, _ := os.ReadDir(root)
-	dirs := make([]string, 0, len(entries))
+	var software, hardware []string
 	for _, e := range entries {
-		dirs = append(dirs, filepath.Join(root, e.Name()))
+		dir := filepath.Join(root, e.Name())
+		if readFile(dir, "parent") != "" {
+			software = append(software, dir)
+		} else {
+			hardware = append(hardware, dir)
+		}
 	}
-	return dirs
+	return append(software, hardware...)
 }
 
 // netdevs returns the network interfaces of an RDMA device: software devices
