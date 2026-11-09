@@ -109,9 +109,24 @@ func encodeReject(code uint8) []byte {
 	return b
 }
 
+// handshakeError is a rejection by the peer that carried our reject frame:
+// it matches ErrProtocol and, through the wrapped *cm.RejectedError, the
+// ECONNREFUSED any refused connection reports.
+type handshakeError struct {
+	msg string
+	rej *cm.RejectedError
+}
+
+func (e *handshakeError) Error() string { return "protocol error: handshake rejected, " + e.msg }
+
+// Is reports whether target is ErrProtocol.
+func (e *handshakeError) Is(target error) bool { return target == ErrProtocol }
+
+// Unwrap returns the rejection as cm reported it.
+func (e *handshakeError) Unwrap() error { return e.rej }
+
 // rejectedError translates a rejection by the peer: one carrying our reject
-// frame becomes an error matching ErrProtocol, anything else is returned as
-// it is.
+// frame becomes a *handshakeError, anything else is returned as it is.
 func rejectedError(rej *cm.RejectedError) error {
 	b := rej.PrivateData
 	if len(b) < rejectSize || [4]byte(b[:4]) != handshakeMagic {
@@ -119,11 +134,11 @@ func rejectedError(rej *cm.RejectedError) error {
 	}
 	switch b[5] {
 	case rejectVersion:
-		return fmt.Errorf("%w: handshake rejected, peer speaks protocol version %d, want %d", ErrProtocol, b[4], protocolVersion)
+		return &handshakeError{fmt.Sprintf("peer speaks protocol version %d, want %d", b[4], protocolVersion), rej}
 	case rejectMalformed:
-		return fmt.Errorf("%w: handshake rejected as malformed by the peer", ErrProtocol)
+		return &handshakeError{"peer found the proposal malformed", rej}
 	case rejectResources:
-		return fmt.Errorf("%w: handshake rejected, peer could not set the connection up", ErrProtocol)
+		return &handshakeError{"peer could not set the connection up", rej}
 	}
-	return fmt.Errorf("%w: handshake rejected with reason %d", ErrProtocol, b[5])
+	return &handshakeError{fmt.Sprintf("reason %d", b[5]), rej}
 }
