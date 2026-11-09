@@ -82,7 +82,7 @@ func (e *RejectedError) Error() string {
 }
 
 // Is reports whether target is syscall.ECONNREFUSED.
-func (e *RejectedError) Is(target error) bool { return target == syscall.ECONNREFUSED }
+func (e *RejectedError) Is(target error) bool { return target == errConnRefused }
 
 // Event is the type of a connection manager event (RDMA_CM_EVENT_*).
 type Event int
