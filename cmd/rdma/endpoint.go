@@ -84,10 +84,9 @@ func (e *endpoint) serve(conns int, stdout, stderr io.Writer, handle func(*rdma.
 
 // serveRun accepts conns connections, handles each on its own goroutine and
 // waits for all of them; failed is the first handler error, err a failed
-// Accept.
+// Accept, which returns at once.
 func serveRun(ln *rdma.Listener, conns int, handle func(*rdma.Conn) error) (failed, err error) {
 	var wg sync.WaitGroup
-	defer wg.Wait()
 	errs := make(chan error, conns)
 	for i := 0; i < conns; i++ {
 		conn, err := ln.AcceptRDMA()
