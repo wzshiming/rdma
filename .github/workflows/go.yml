@@ -76,6 +76,12 @@ jobs:
   integration:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    env:
+      # Soft-RoCE gets a netdev of its own: some runners carry a hardware RDMA
+      # device on eth0 (Microsoft MANA) that would share eth0's IP, and rdma_cm
+      # picks the device by source IP.
+      RXE_NETDEV: rxe-dummy0
+      RXE_IP: 10.200.0.1
     steps:
     - uses: actions/checkout@v7
 
@@ -107,23 +113,26 @@ jobs:
 
     - name: Add rxe0
       run: |
-        NETDEV=$(ip -o route get 1.1.1.1 | awk '{for (i = 1; i < NF; i++) if ($i == "dev") print $(i + 1)}')
-        echo "NETDEV=$NETDEV" >> "$GITHUB_ENV"
-        sudo rdma link add rxe0 type rxe netdev "$NETDEV"
+        sudo ip link add "$RXE_NETDEV" type dummy
+        sudo ip addr add "$RXE_IP/24" dev "$RXE_NETDEV"
+        sudo ip link set "$RXE_NETDEV" up
+        sudo rdma link add rxe0 type rxe netdev "$RXE_NETDEV"
+        ip -o -4 addr
         rdma link
         ibv_devinfo -v
         ls -l /dev/infiniband
 
     - name: rping loopback
       run: |
-        IP=$(ip -o -4 addr show dev "$NETDEV" | awk '{print $4}' | cut -d/ -f1)
-        timeout 60 rping -s -a "$IP" -C 5 -v &
+        timeout 60 rping -s -a "$RXE_IP" -C 5 -v &
         server=$!
         sleep 1
-        timeout 60 rping -c -a "$IP" -C 5 -v
+        timeout 60 rping -c -a "$RXE_IP" -C 5 -v
         wait "$server" || echo "rping server exited with $?"
 
     - name: Test
+      env:
+        RDMA_TEST_DEVICE: rxe0
       run: |
         RDMA_TEST_REQUIRE=1 go test -race -count=1 ./...
         RDMA_TEST_REQUIRE=1 GOEXPERIMENT=cgocheck2 go test -count=1 ./...
