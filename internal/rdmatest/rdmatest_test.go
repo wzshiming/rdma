@@ -1,9 +1,11 @@
 package rdmatest
 
 import (
+	"fmt"
 	"net"
 	"net/netip"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -11,11 +13,12 @@ import (
 type recordTB struct {
 	testing.TB
 	skipped, failed bool
+	msg             string
 }
 
 func (r *recordTB) Helper()           {}
-func (r *recordTB) Skip(args ...any)  { r.skipped = true }
-func (r *recordTB) Fatal(args ...any) { r.failed = true }
+func (r *recordTB) Skip(args ...any)  { r.skipped, r.msg = true, fmt.Sprint(args...) }
+func (r *recordTB) Fatal(args ...any) { r.failed, r.msg = true, fmt.Sprint(args...) }
 
 func noAddrs(string) ([]netip.Addr, error) { return nil, nil }
 
@@ -30,10 +33,11 @@ func TestDevice(t *testing.T) {
 func TestDeviceFromSysfs(t *testing.T) {
 	ip := netip.MustParseAddr("10.0.0.1")
 	for _, tt := range []struct {
-		name  string
-		root  string
-		addrs map[string][]netip.Addr
-		want  Dev // the zero Dev means none is found
+		name   string
+		root   string
+		device string // RDMA_TEST_DEVICE
+		addrs  map[string][]netip.Addr
+		want   Dev // the zero Dev means none is found
 	}{
 		{
 			name:  "RoCE device",
@@ -69,9 +73,17 @@ func TestDeviceFromSysfs(t *testing.T) {
 			addrs: map[string][]netip.Addr{"ib0": {ip}},
 			want:  Dev{Name: "mlx5_0", Port: 1, Netdev: "ib0", IP: ip, GIDIndex: 0},
 		},
+		{
+			name:   "pinned device behind an alphabetically earlier hardware one",
+			root:   "testdata/mana",
+			device: "rxe0",
+			addrs:  map[string][]netip.Addr{"eth0": {ip}},
+			want:   Dev{Name: "rxe0", Port: 1, Netdev: "eth0", IP: ip, GIDIndex: 4},
+		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("RDMA_TEST_REQUIRE", "")
+			t.Setenv("RDMA_TEST_DEVICE", tt.device)
 			tb := &recordTB{TB: t}
 			got := device(tb, tt.root, func(netdev string) ([]netip.Addr, error) {
 				return tt.addrs[netdev], nil
@@ -95,10 +107,37 @@ func TestDeviceWithoutDevice(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("RDMA_TEST_REQUIRE", tt.require)
+			t.Setenv("RDMA_TEST_DEVICE", "")
 			tb := &recordTB{TB: t}
 			device(tb, t.TempDir(), noAddrs)
 			if tb.skipped != tt.wantSkip || tb.failed != tt.wantFail {
 				t.Errorf("skipped=%v failed=%v, want skipped=%v failed=%v", tb.skipped, tb.failed, tt.wantSkip, tt.wantFail)
+			}
+		})
+	}
+}
+
+// Pinning a device that is absent must not fall back to another one.
+func TestDevicePinnedToAbsentDevice(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		require  string
+		wantSkip bool
+		wantFail bool
+	}{
+		{name: "skips by default", wantSkip: true},
+		{name: "fails with RDMA_TEST_REQUIRE=1", require: "1", wantFail: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("RDMA_TEST_REQUIRE", tt.require)
+			t.Setenv("RDMA_TEST_DEVICE", "rxe9")
+			tb := &recordTB{TB: t}
+			got := device(tb, "testdata/mana", func(string) ([]netip.Addr, error) {
+				return []netip.Addr{netip.MustParseAddr("10.0.0.1")}, nil
+			})
+			if got != (Dev{}) || tb.skipped != tt.wantSkip || tb.failed != tt.wantFail || !strings.Contains(tb.msg, "rxe9") {
+				t.Errorf("device() = %+v skipped=%v failed=%v msg=%q, want zero Dev, skipped=%v failed=%v and a message naming rxe9",
+					got, tb.skipped, tb.failed, tb.msg, tt.wantSkip, tt.wantFail)
 			}
 		})
 	}

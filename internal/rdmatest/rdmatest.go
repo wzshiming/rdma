@@ -1,4 +1,11 @@
 // Package rdmatest finds an RDMA device for integration tests.
+//
+// Two environment variables steer [Device]:
+//
+//   - RDMA_TEST_DEVICE names the device to use, e.g. "rxe0"; when it is unset,
+//     the alphabetically first usable device wins.
+//   - RDMA_TEST_REQUIRE=1 fails a test that finds no usable device instead of
+//     skipping it.
 package rdmatest
 
 import (
@@ -20,9 +27,10 @@ type Dev struct {
 	GIDIndex int        // RoCE v2 GID index of IP; 0 on InfiniBand, -1 on iWARP
 }
 
-// Device returns the first device under /sys/class/infiniband with an ACTIVE
-// port whose network interface has an IPv4 address. Without one it skips t,
-// or fails t when the environment sets RDMA_TEST_REQUIRE=1.
+// Device returns a device under /sys/class/infiniband with an ACTIVE port
+// whose network interface has an IPv4 address, chosen as the package comment
+// describes. Without one it skips t, or fails t when the environment sets
+// RDMA_TEST_REQUIRE=1.
 func Device(t testing.TB) Dev {
 	t.Helper()
 	return device(t, "/sys/class/infiniband", interfaceAddrs)
@@ -30,10 +38,14 @@ func Device(t testing.TB) Dev {
 
 func device(t testing.TB, root string, addrs func(netdev string) ([]netip.Addr, error)) Dev {
 	t.Helper()
-	if d, ok := find(root, addrs); ok {
+	name := os.Getenv("RDMA_TEST_DEVICE")
+	if d, ok := find(root, name, addrs); ok {
 		return d
 	}
 	msg := "rdmatest: no RDMA device with an ACTIVE port and an IPv4 address under " + root
+	if name != "" {
+		msg = "rdmatest: no ACTIVE port with an IPv4 address on RDMA device " + name + " (RDMA_TEST_DEVICE) under " + root
+	}
 	if os.Getenv("RDMA_TEST_REQUIRE") == "1" {
 		t.Fatal(msg + " (RDMA_TEST_REQUIRE=1)")
 	} else {
@@ -42,10 +54,8 @@ func device(t testing.TB, root string, addrs func(netdev string) ([]netip.Addr, 
 	return Dev{}
 }
 
-func find(root string, addrs func(netdev string) ([]netip.Addr, error)) (Dev, bool) {
-	devs, _ := os.ReadDir(root)
-	for _, d := range devs {
-		dir := filepath.Join(root, d.Name())
+func find(root, name string, addrs func(netdev string) ([]netip.Addr, error)) (Dev, bool) {
+	for _, dir := range candidates(root, name) {
 		ports, _ := os.ReadDir(filepath.Join(dir, "ports"))
 		for _, p := range ports {
 			portDir := filepath.Join(dir, "ports", p.Name())
@@ -60,13 +70,27 @@ func find(root string, addrs func(netdev string) ([]netip.Addr, error)) (Dev, bo
 					}
 					if i, ok := gidIndex(dir, portDir, ip); ok {
 						port, _ := strconv.Atoi(p.Name())
-						return Dev{Name: d.Name(), Port: port, Netdev: netdev, IP: ip, GIDIndex: i}, true
+						return Dev{Name: filepath.Base(dir), Port: port, Netdev: netdev, IP: ip, GIDIndex: i}, true
 					}
 				}
 			}
 		}
 	}
 	return Dev{}, false
+}
+
+// candidates returns the device directories to try: only the one name picks
+// when it is set, otherwise all of them in alphabetical order.
+func candidates(root, name string) []string {
+	if name != "" {
+		return []string{filepath.Join(root, name)}
+	}
+	entries, _ := os.ReadDir(root)
+	dirs := make([]string, 0, len(entries))
+	for _, e := range entries {
+		dirs = append(dirs, filepath.Join(root, e.Name()))
+	}
+	return dirs
 }
 
 // netdevs returns the network interfaces of an RDMA device: software devices
