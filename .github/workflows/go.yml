@@ -1,0 +1,127 @@
+name: Go
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+        - ubuntu-latest
+        - macos-latest
+        - windows-latest
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+    # Windows checks out CRLF by default, which gofmt reports as unformatted.
+    - name: Keep LF line endings
+      if: runner.os == 'Windows'
+      run: git config --global core.autocrlf false
+
+    - uses: actions/checkout@v7
+
+    - name: Set up Go
+      uses: actions/setup-go@v7
+      with:
+        go-version: stable
+
+    - name: Install RDMA libraries
+      if: runner.os == 'Linux'
+      run: sudo apt-get update && sudo apt-get install -y libibverbs-dev librdmacm-dev
+
+    - name: Format
+      run: test -z "$(gofmt -l . | tee /dev/stderr)"
+
+    - name: Vet
+      run: go vet ./...
+
+    - name: Test
+      run: go test -race -count=1 ./...
+
+  check:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Set up Go
+      uses: actions/setup-go@v7
+      with:
+        go-version: stable
+
+    - name: Build without cgo
+      run: CGO_ENABLED=0 go build ./...
+
+    - name: Cross-platform vet
+      # The default shell (bash -e) stops the loop at the first failing target.
+      # CGO_ENABLED=0 keeps the native target on the stub path too.
+      run: |
+        for target in \
+          linux/amd64 linux/386 linux/arm64 darwin/amd64 darwin/arm64 \
+          windows/amd64 windows/386 windows/arm64 \
+          freebsd/amd64 openbsd/amd64 netbsd/amd64 dragonfly/amd64 \
+          solaris/amd64 illumos/amd64 aix/ppc64 plan9/amd64 \
+          js/wasm wasip1/wasm android/arm64; do
+          echo "$target"
+          CGO_ENABLED=0 GOOS=${target%/*} GOARCH=${target#*/} go vet ./...
+        done
+
+  integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Set up Go
+      uses: actions/setup-go@v7
+      with:
+        go-version: stable
+
+    - name: Install rdma-core
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y rdma-core ibverbs-utils rdmacm-utils libibverbs-dev librdmacm-dev ibverbs-providers iproute2
+        # rdma_rxe.ko ships in linux-modules-extra on Ubuntu.
+        sudo apt-get install -y "linux-modules-extra-$(uname -r)" || true
+
+    - name: Load rdma_rxe
+      run: |
+        if ! sudo modprobe rdma_rxe; then
+          uname -a
+          modinfo rdma_rxe || true
+          siw_rc=0
+          sudo modprobe siw || siw_rc=$?
+          echo "siw_rc=$siw_rc"
+          ls "/lib/modules/$(uname -r)/kernel/drivers/infiniband/" || true
+          ls "/lib/modules/$(uname -r)/kernel/drivers/infiniband/sw/" || true
+          exit 1
+        fi
+        sudo modprobe rdma_ucm || true
+
+    - name: Add rxe0
+      run: |
+        NETDEV=$(ip -o route get 1.1.1.1 | awk '{for (i = 1; i < NF; i++) if ($i == "dev") print $(i + 1)}')
+        echo "NETDEV=$NETDEV" >> "$GITHUB_ENV"
+        sudo rdma link add rxe0 type rxe netdev "$NETDEV"
+        rdma link
+        ibv_devinfo -v
+        ls -l /dev/infiniband
+
+    - name: rping loopback
+      run: |
+        IP=$(ip -o -4 addr show dev "$NETDEV" | awk '{print $4}' | cut -d/ -f1)
+        timeout 60 rping -s -a "$IP" -C 5 -v &
+        server=$!
+        sleep 1
+        timeout 60 rping -c -a "$IP" -C 5 -v
+        wait "$server" || echo "rping server exited with $?"
+
+    - name: Test
+      run: RDMA_TEST_REQUIRE=1 go test -race -count=1 ./...
