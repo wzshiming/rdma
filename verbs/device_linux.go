@@ -113,6 +113,7 @@ func ForkInit() error {
 type Context struct {
 	ctx   *C.struct_ibv_context
 	owned bool
+	async fdWaiter
 }
 
 // ContextFromPointer wraps a struct ibv_context pointer owned by someone else,
@@ -124,12 +125,14 @@ func ContextFromPointer(p unsafe.Pointer) *Context {
 // Pointer returns the underlying struct ibv_context pointer.
 func (c *Context) Pointer() unsafe.Pointer { return unsafe.Pointer(c.ctx) }
 
-// Close closes the device. A second Close is a no-op.
+// Close closes the device and wakes a pending WaitAsyncEvent with an error.
+// A second Close is a no-op.
 func (c *Context) Close() error {
 	ctx := c.ctx
 	if ctx == nil {
 		return nil
 	}
+	c.async.close()
 	c.ctx = nil
 	if !c.owned {
 		return nil

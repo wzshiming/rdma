@@ -13,7 +13,6 @@ enum { VERBS_WC_IMM_OFFSET = offsetof(struct ibv_wc, imm_data) };
 import "C"
 
 import (
-	"context"
 	"os"
 	"sync"
 	"syscall"
@@ -29,8 +28,9 @@ var cqs sync.Map
 
 // CompChannel is a completion event channel (struct ibv_comp_channel).
 type CompChannel struct {
-	ch    *C.struct_ibv_comp_channel
-	owned bool
+	ch     *C.struct_ibv_comp_channel
+	owned  bool
+	waiter fdWaiter
 }
 
 // CreateCompChannel creates a completion event channel.
@@ -51,25 +51,14 @@ func CompChannelFromPointer(p unsafe.Pointer) *CompChannel {
 // Pointer returns the underlying struct ibv_comp_channel pointer.
 func (c *CompChannel) Pointer() unsafe.Pointer { return unsafe.Pointer(c.ch) }
 
-// Wait waits for the next completion event, acknowledges it and returns the
-// CQ it belongs to. It returns ctx.Err() when ctx ends first.
-func (c *CompChannel) Wait(ctx context.Context) (*CQ, error) {
-	return nil, &OpError{Op: "ibv_get_cq_event", Err: syscall.ENOSYS}
-}
-
-// WaitAsyncEvent waits for the next asynchronous event of the device,
-// acknowledges it and returns it. It returns ctx.Err() when ctx ends first.
-func (c *Context) WaitAsyncEvent(ctx context.Context) (*AsyncEvent, error) {
-	return nil, &OpError{Op: "ibv_get_async_event", Err: syscall.ENOSYS}
-}
-
-// Close destroys the channel, which fails with EBUSY while a CQ still uses it.
-// A second Close is a no-op.
+// Close destroys the channel, which fails with EBUSY while a CQ still uses it,
+// and wakes a pending Wait with an error. A second Close is a no-op.
 func (c *CompChannel) Close() error {
 	ch := c.ch
 	if ch == nil {
 		return nil
 	}
+	c.waiter.close()
 	if c.owned {
 		if rc := C.ibv_destroy_comp_channel(ch); rc != 0 {
 			return opErrorRC("ibv_destroy_comp_channel", rc)
