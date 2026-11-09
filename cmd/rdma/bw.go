@@ -28,13 +28,13 @@ as "key: value" lines, with one line per connection before the aggregate when
 there are several:
 
   connections: 2
-  size: 65536
-  connection 0: bytes 1744830464 duration 2.001s MiB/s 831.56 Gbit/s 6.976
-  connection 1: bytes 1711276032 duration 2.001s MiB/s 815.57 Gbit/s 6.842
-  bytes: 3456106496
-  duration: 2.001s
-  MiB/s: 1647.13
-  Gbit/s: 13.817
+  size: 4096
+  connection 0: bytes 241020928 duration 1.000612985s MiB/s 229.71 Gbit/s 1.927
+  connection 1: bytes 234930176 duration 1.000687635s MiB/s 223.89 Gbit/s 1.878
+  bytes: 475951104
+  duration: 1.000687635s
+  MiB/s: 453.59
+  Gbit/s: 3.805
 
 A connection's duration runs from its first write to the server's
 confirmation; the aggregate counts every byte over the longest of them.

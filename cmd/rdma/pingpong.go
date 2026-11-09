@@ -27,11 +27,11 @@ prints the statistics as "key: value" lines:
 
   size: 64
   iterations: 1000
-  min: 9.75µs
-  median: 11.2µs
-  p99: 19.8µs
-  max: 112µs
-  msg/s: 85241.19
+  min: 24.204µs
+  median: 67.912µs
+  p99: 806.728µs
+  max: 1.877701ms
+  msg/s: 10417.54
 
 Round trips are timed one by one; median and p99 are nearest-rank
 percentiles of the sorted samples, msg/s the round trips per second over the
