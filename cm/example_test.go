@@ -12,8 +12,8 @@ import (
 	"github.com/wzshiming/rdma/verbs"
 )
 
-// createQP gives id a queue pair on a protection domain of its device.
-func createQP(id *cm.ID) (*verbs.QP, error) {
+// newQP gives id a queue pair on a protection domain of its device.
+func newQP(id *cm.ID) (*verbs.QP, error) {
 	pd, err := id.Device().AllocPD()
 	if err != nil {
 		return nil, err
@@ -40,7 +40,7 @@ func Example() {
 		log.Fatal(err)
 	}
 	defer id.Close()
-	qp, err := createQP(id)
+	qp, err := newQP(id)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -83,7 +83,7 @@ func ExampleListen() {
 		}
 		return
 	}
-	if _, err := createQP(req.ID); err != nil {
+	if _, err := newQP(req.ID); err != nil {
 		log.Fatal(err)
 	}
 	if err := req.Accept(ctx, &cm.ConnParam{PrivateData: []byte("welcome")}); err != nil {
