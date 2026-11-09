@@ -353,7 +353,7 @@ var wcStatusNames = []string{
 	"transport retry counter exceeded",
 	"RNR retry counter exceeded",
 	"local RDD violation error",
-	"remove invalid RD request",
+	"remote invalid RD request",
 	"aborted error",
 	"invalid EE context number",
 	"invalid EE context state",
@@ -361,7 +361,7 @@ var wcStatusNames = []string{
 	"response timeout error",
 	"general error",
 	"TM error",
-	"TM rendezvous incomplete",
+	"TM software rendezvous",
 }
 
 func (s WCStatus) String() string { return enumString("WCStatus", int(s), wcStatusNames) }
@@ -557,6 +557,17 @@ type QPCap struct {
 	MaxInlineData uint32
 }
 
+// QPInitAttr describes a queue pair to create (struct ibv_qp_init_attr).
+// PD.CreateQP overwrites Cap with the capacities actually granted, which is
+// how libibverbs reports the maximum inline size.
+type QPInitAttr struct {
+	SendCQ    *CQ
+	RecvCQ    *CQ
+	Type      QPType
+	Cap       QPCap
+	SignalAll bool // every send work request generates a completion
+}
+
 // GlobalRoute is the GRH part of an address (struct ibv_global_route).
 type GlobalRoute struct {
 	DGID         GID
@@ -660,6 +671,15 @@ func (wc WC) Err() error {
 		return nil
 	}
 	return &WCError{Status: wc.Status, VendorErr: wc.VendorErr}
+}
+
+// AsyncEvent is an asynchronous event (struct ibv_async_event). QP, CQ or Port
+// identifies the affected object according to Type; the others are zero.
+type AsyncEvent struct {
+	Type EventType
+	QP   *QP
+	CQ   *CQ
+	Port uint8
 }
 
 type flagName struct {

@@ -3,6 +3,7 @@
 package verbs
 
 import (
+	"context"
 	"errors"
 	"unsafe"
 )
@@ -100,3 +101,87 @@ func (m *MR) SGE(b []byte) SGE { return SGE{} }
 
 // Close deregisters the region.
 func (m *MR) Close() error { return nil }
+
+// CompChannel is a completion event channel; libibverbs is unavailable on
+// this platform.
+type CompChannel struct{}
+
+// CreateCompChannel creates a completion event channel.
+func (c *Context) CreateCompChannel() (*CompChannel, error) {
+	return nil, unsupported("ibv_create_comp_channel")
+}
+
+// CompChannelFromPointer wraps a struct ibv_comp_channel pointer without owning it.
+func CompChannelFromPointer(p unsafe.Pointer) *CompChannel { return &CompChannel{} }
+
+// Pointer returns the underlying struct ibv_comp_channel pointer.
+func (c *CompChannel) Pointer() unsafe.Pointer { return nil }
+
+// Wait waits for the next completion event.
+func (c *CompChannel) Wait(ctx context.Context) (*CQ, error) {
+	return nil, unsupported("ibv_get_cq_event")
+}
+
+// Close destroys the channel.
+func (c *CompChannel) Close() error { return nil }
+
+// WaitAsyncEvent waits for the next asynchronous event of the device.
+func (c *Context) WaitAsyncEvent(ctx context.Context) (*AsyncEvent, error) {
+	return nil, unsupported("ibv_get_async_event")
+}
+
+// CQ is a completion queue; libibverbs is unavailable on this platform.
+type CQ struct{}
+
+// CreateCQ creates a completion queue.
+func (c *Context) CreateCQ(cqe int, ch *CompChannel) (*CQ, error) {
+	return nil, unsupported("ibv_create_cq")
+}
+
+// CQFromPointer wraps a struct ibv_cq pointer without owning it.
+func CQFromPointer(p unsafe.Pointer) *CQ { return &CQ{} }
+
+// Pointer returns the underlying struct ibv_cq pointer.
+func (q *CQ) Pointer() unsafe.Pointer { return nil }
+
+// Poll removes completions from the queue.
+func (q *CQ) Poll(wcs []WC) (int, error) { return 0, unsupported("ibv_poll_cq") }
+
+// RequestNotify arms the completion channel for the next completion.
+func (q *CQ) RequestNotify(solicitedOnly bool) error { return unsupported("ibv_req_notify_cq") }
+
+// Close destroys the completion queue.
+func (q *CQ) Close() error { return nil }
+
+// QP is a queue pair; libibverbs is unavailable on this platform.
+type QP struct{}
+
+// CreateQP creates a queue pair.
+func (p *PD) CreateQP(attr *QPInitAttr) (*QP, error) { return nil, unsupported("ibv_create_qp") }
+
+// QPFromPointer wraps a struct ibv_qp pointer without owning it.
+func QPFromPointer(p unsafe.Pointer) *QP { return &QP{} }
+
+// Pointer returns the underlying struct ibv_qp pointer.
+func (q *QP) Pointer() unsafe.Pointer { return nil }
+
+// Num returns the queue pair number.
+func (q *QP) Num() uint32 { return 0 }
+
+// Type returns the transport service type.
+func (q *QP) Type() QPType { return 0 }
+
+// Modify applies the attr fields selected by mask.
+func (q *QP) Modify(attr *QPAttr, mask QPAttrMask) error { return unsupported("ibv_modify_qp") }
+
+// Query returns the attributes selected by mask.
+func (q *QP) Query(mask QPAttrMask) (*QPAttr, error) { return nil, unsupported("ibv_query_qp") }
+
+// PostSend posts send work requests.
+func (q *QP) PostSend(wrs ...SendWR) error { return unsupported("ibv_post_send") }
+
+// PostRecv posts receive work requests.
+func (q *QP) PostRecv(wrs ...RecvWR) error { return unsupported("ibv_post_recv") }
+
+// Close destroys the queue pair.
+func (q *QP) Close() error { return nil }
