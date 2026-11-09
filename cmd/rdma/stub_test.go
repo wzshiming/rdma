@@ -17,6 +17,8 @@ func TestStubUnsupported(t *testing.T) {
 		{"devices", []string{"devices"}},
 		{"pingpong server", []string{"pingpong", "-listen", "10.200.0.1:0"}},
 		{"pingpong client", []string{"pingpong", "-connect", "10.200.0.1:4791"}},
+		{"bw server", []string{"bw", "-listen", "10.200.0.1:0"}},
+		{"bw client", []string{"bw", "-connect", "10.200.0.1:4791", "-duration", "1s"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
