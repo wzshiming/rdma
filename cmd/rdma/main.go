@@ -38,7 +38,7 @@ type command struct {
 	run     func(args []string, stdout, stderr io.Writer) int
 }
 
-var commands []*command
+var commands = []*command{devicesCommand}
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
