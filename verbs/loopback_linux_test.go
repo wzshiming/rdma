@@ -166,30 +166,40 @@ func allocMR(t *testing.T, pd *verbs.PD, size int) *verbs.MR {
 	return mr
 }
 
-// pollOne polls cq until it yields exactly one successful completion.
-func pollOne(t *testing.T, cq *verbs.CQ) verbs.WC {
+// pollN polls cq until it has collected n successful completions, in the
+// order they were polled; completions may arrive in one batch or several.
+func pollN(t *testing.T, cq *verbs.CQ, n int) []verbs.WC {
 	t.Helper()
-	var wcs [4]verbs.WC
+	var got []verbs.WC
+	buf := make([]verbs.WC, n+1)
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		n, err := cq.Poll(wcs[:])
+		k, err := cq.Poll(buf)
 		if err != nil {
 			t.Fatalf("Poll() error: %v", err)
 		}
-		if n == 0 {
-			time.Sleep(100 * time.Microsecond)
-			continue
+		for _, wc := range buf[:k] {
+			if err := wc.Err(); err != nil {
+				t.Fatalf("completion %v of request %d failed: %v", wc.Opcode, wc.ID, err)
+			}
 		}
-		if n != 1 {
-			t.Fatalf("Poll() = %d completions, want 1: %+v", n, wcs[:n])
+		got = append(got, buf[:k]...)
+		if len(got) > n {
+			t.Fatalf("Poll() yielded %d completions, want %d: %+v", len(got), n, got)
 		}
-		if err := wcs[0].Err(); err != nil {
-			t.Fatalf("completion %v of request %d failed: %v", wcs[0].Opcode, wcs[0].ID, err)
+		if len(got) == n {
+			return got
 		}
-		return wcs[0]
+		time.Sleep(100 * time.Microsecond)
 	}
-	t.Fatal("Poll() yielded no completion within 10s")
-	return verbs.WC{}
+	t.Fatalf("Poll() yielded %d of %d completions within 10s: %+v", len(got), n, got)
+	return nil
+}
+
+// pollOne polls cq until it yields one successful completion.
+func pollOne(t *testing.T, cq *verbs.CQ) verbs.WC {
+	t.Helper()
+	return pollN(t, cq, 1)[0]
 }
 
 func pattern(b []byte, seed byte) {
@@ -346,14 +356,13 @@ func TestRCLoopback(t *testing.T) {
 		if err := p.a.PostSend(sends...); err != nil {
 			t.Fatalf("PostSend() error: %v", err)
 		}
-		if wc := pollOne(t, p.cqB); wc.ID != 11 || wc.Len != 16 {
-			t.Errorf("first receive completion = %+v, want id 11, 16 bytes", wc)
+		recvs2 := pollN(t, p.cqB, 2)
+		if recvs2[0].ID != 11 || recvs2[0].Len != 16 || recvs2[1].ID != 12 || recvs2[1].Len != 16 {
+			t.Errorf("receive completions = %+v, want ids 11 and 12 with 16 bytes each", recvs2)
 		}
-		if wc := pollOne(t, p.cqB); wc.ID != 12 || wc.Len != 16 {
-			t.Errorf("second receive completion = %+v, want id 12, 16 bytes", wc)
+		if sends2 := pollN(t, p.cqA, 2); sends2[0].ID != 13 || sends2[1].ID != 14 {
+			t.Errorf("send completions = %+v, want ids 13 and 14", sends2)
 		}
-		pollOne(t, p.cqA)
-		pollOne(t, p.cqA)
 		if !bytes.Equal(bufB[:32], bufA[:32]) {
 			t.Error("chained work requests did not transfer the bytes")
 		}
