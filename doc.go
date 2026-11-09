@@ -41,8 +41,10 @@
 // Data is copied into registered send buffers by Write and out of registered
 // receive buffers by Read; the number of messages in flight is bounded by
 // credits the receiver grants as its buffers are read, so no message is ever
-// sent without a buffer waiting for it. Every wait, for completions and for
-// connection events alike, goes through the Go runtime poller: idle
+// sent without a buffer waiting for it. Each connection pins
+// (SendDepth+ReceiveDepth+2) x MessageSize bytes, about 1 MiB with the
+// defaults, which count against RLIMIT_MEMLOCK. Every wait, for completions
+// and for connection events alike, goes through the Go runtime poller: idle
 // connections neither spin nor occupy threads.
 //
 // Semantics follow the net package. The peer reads io.EOF once a side has

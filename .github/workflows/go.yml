@@ -133,6 +133,10 @@ jobs:
     - name: Test
       env:
         RDMA_TEST_DEVICE: rxe0
+      # Registered memory is pinned and counts against RLIMIT_MEMLOCK, whose
+      # 8 MiB default holds a handful of connections at most.
       run: |
+        sudo prlimit --pid $$ --memlock=unlimited:unlimited
+        ulimit -l
         RDMA_TEST_REQUIRE=1 go test -race -count=1 ./...
         RDMA_TEST_REQUIRE=1 GOEXPERIMENT=cgocheck2 go test -count=1 ./...

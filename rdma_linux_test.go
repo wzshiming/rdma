@@ -123,7 +123,8 @@ func TestRXETransfer(t *testing.T) {
 				start := time.Now()
 				transfer(t, client, server, total, 64<<10, client.CloseWrite)
 				elapsed := time.Since(start)
-				t.Logf("%d MiB in %v (%.0f MiB/s)", total>>20, elapsed.Round(time.Millisecond), float64(total>>20)/elapsed.Seconds())
+				// Printed rather than logged so that the timing shows without -v.
+				fmt.Printf("%s: %d MiB in %v (%.0f MiB/s)\n", t.Name(), total>>20, elapsed.Round(time.Millisecond), float64(total>>20)/elapsed.Seconds())
 			})
 		}
 	}
@@ -140,7 +141,9 @@ func TestRXEConcurrentConnections(t *testing.T) {
 			defer wg.Done()
 			server, err := ln.AcceptRDMA()
 			if err != nil {
-				t.Errorf("AcceptRDMA() error: %v", err)
+				if !errors.Is(err, net.ErrClosed) {
+					t.Errorf("AcceptRDMA() error: %v", err)
+				}
 				return
 			}
 			defer server.Close()
@@ -159,6 +162,7 @@ func TestRXEConcurrentConnections(t *testing.T) {
 			client, err := d.Dial("rdma", ln.Addr().String())
 			if err != nil {
 				t.Errorf("Dial() #%d error: %v", i, err)
+				ln.Close() // frees the acceptor waiting for this dial
 				return
 			}
 			defer client.Close()
@@ -510,6 +514,7 @@ func TestRXEIdleConnectionsAreCheap(t *testing.T) {
 	time.Sleep(time.Second)
 	threadsAfter, cpuAfter := threadCount(t), cpuTime(t)
 	t.Logf("%d idle connections for 1s: CPU time +%v, threads %d -> %d", conns, cpuAfter-cpu, threads, threadsAfter)
+	fmt.Printf("%s: %d idle connections for 1s: CPU time +%v, threads %d -> %d\n", t.Name(), conns, cpuAfter-cpu, threads, threadsAfter)
 	if cpuAfter-cpu >= 50*time.Millisecond {
 		t.Errorf("CPU time grew by %v with %d idle connections, want < 50ms", cpuAfter-cpu, conns)
 	}
