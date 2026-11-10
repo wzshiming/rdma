@@ -528,10 +528,12 @@ func TestRXEIdleConnectionsAreCheap(t *testing.T) {
 }
 
 // TestRXEBufferedDataPrecedesEOF checks that what a peer wrote before closing
-// arrives in full ahead of io.EOF.
+// arrives in full ahead of io.EOF. The write stays within the half of the
+// receive buffer a fresh rsocket advertises, since the peer reads nothing
+// until the close.
 func TestRXEBufferedDataPrecedesEOF(t *testing.T) {
 	client, server := rxePair(t, Config{})
-	want := make([]byte, 100000)
+	want := make([]byte, 32<<10)
 	newStream(7).rng.Read(want)
 	if _, err := client.Write(want); err != nil {
 		t.Fatalf("Write error: %v", err)
