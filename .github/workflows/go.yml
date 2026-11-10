@@ -206,7 +206,10 @@ jobs:
         ls -l /dev/infiniband
 
     - name: Show the rdma-core in use
-      # Everything RDMA the tests touch must come from the source build.
+      # Everything RDMA the tests touch must come from the source build: the
+      # tools on PATH and the files the dynamic loader resolves the two
+      # sonames to, which is what a process gets however it links them.
+      shell: bash
       run: |
         arch=$(dpkg-architecture -qDEB_HOST_MULTIARCH)
         ldconfig -p | grep -E 'librdmacm|libibverbs'
@@ -214,10 +217,16 @@ jobs:
         command -v rstream
         test "$(command -v rstream)" = /usr/local/bin/rstream
         ibv_devinfo -d rxe0 | head
-        go test -c -o /tmp/rdma.test .
-        ldd /tmp/rdma.test | grep -E 'rdmacm|ibverbs'
-        if ldd /tmp/rdma.test | grep -E 'rdmacm|ibverbs' | grep -v "/usr/local/lib/$arch/"; then
-          echo "the test binary loads an RDMA library from outside /usr/local/lib/$arch" >&2
+        python3 - <<'EOF' | tee /tmp/libraries
+        import ctypes
+        for soname in "libibverbs.so.1", "librdmacm.so.1":
+            ctypes.CDLL(soname)
+        paths = {line.split()[-1] for line in open("/proc/self/maps") if "/libibverbs.so" in line or "/librdmacm.so" in line}
+        print("\n".join(sorted(paths)))
+        EOF
+        test "$(grep -c . /tmp/libraries)" -eq 2
+        if grep -v "^/usr/local/lib/$arch/" /tmp/libraries; then
+          echo "the dynamic loader resolves an RDMA library outside /usr/local/lib/$arch" >&2
           exit 1
         fi
 
