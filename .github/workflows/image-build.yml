@@ -70,10 +70,13 @@ jobs:
       run: |
         docker run --rm rdma:smoke help | tee "$RUNNER_TEMP/help"
         grep -q '^Usage: rdma' "$RUNNER_TEMP/help"
-        docker run --rm --entrypoint ldd rdma:smoke /usr/local/bin/rdma | tee "$RUNNER_TEMP/ldd"
-        grep -q libibverbs "$RUNNER_TEMP/ldd"
-        grep -q librdmacm "$RUNNER_TEMP/ldd"
-        if grep 'not found' "$RUNNER_TEMP/ldd"; then exit 1; fi
+        # The container gets no /dev/infiniband, so libibverbs lists no device
+        # and librdmacm's rsocket() answers ENODEV: the binary reaches both
+        # libraries at run time, whatever the host carries.
+        docker run --rm rdma:smoke devices | tee "$RUNNER_TEMP/devices"
+        grep -qx 'no RDMA devices' "$RUNNER_TEMP/devices"
+        timeout 60 docker run --rm rdma:smoke pingpong -listen 127.0.0.1:0 2>&1 | tee "$RUNNER_TEMP/pingpong" || true
+        grep -q '^rdma pingpong: .* rsocket: no such device$' "$RUNNER_TEMP/pingpong"
         docker run --rm --entrypoint id rdma:smoke | tee "$RUNNER_TEMP/id"
         grep -q '^uid=10001(' "$RUNNER_TEMP/id"
         if [ -e /dev/infiniband ]; then
@@ -92,7 +95,16 @@ jobs:
         cache-to: type=gha,mode=max
 
     - name: Smoke test the arm64 image
-      run: docker run --rm --platform linux/arm64 rdma:smoke-arm64 help
+      # The same run-time proofs as for amd64; the host's device stays out,
+      # QEMU cannot drive it.
+      shell: bash
+      run: |
+        docker run --rm --platform linux/arm64 rdma:smoke-arm64 help | tee "$RUNNER_TEMP/help"
+        grep -q '^Usage: rdma' "$RUNNER_TEMP/help"
+        docker run --rm --platform linux/arm64 rdma:smoke-arm64 devices | tee "$RUNNER_TEMP/devices"
+        grep -qx 'no RDMA devices' "$RUNNER_TEMP/devices"
+        timeout 60 docker run --rm --platform linux/arm64 rdma:smoke-arm64 pingpong -listen 127.0.0.1:0 2>&1 | tee "$RUNNER_TEMP/pingpong" || true
+        grep -q '^rdma pingpong: .* rsocket: no such device$' "$RUNNER_TEMP/pingpong"
 
     - name: Build and push
       uses: docker/build-push-action@v7
