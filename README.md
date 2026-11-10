@@ -8,7 +8,7 @@ Reliable byte streams over RDMA with the vocabulary of the `net` package: `Dial`
 ## Requirements
 
 - Linux with the kernel's RDMA stack (`ib_uverbs`, `rdma_ucm`) and either an RDMA device or Soft-RoCE (the `rdma_rxe` kernel module) over any Ethernet interface; see [Soft-RoCE](#soft-roce) for a one-host setup.
-- rdma-core: the headers `libibverbs-dev` and `librdmacm-dev` to build, the libraries `libibverbs1`, `librdmacm1t64` and `ibverbs-providers` to run (Debian and Ubuntu package names; the library is `librdmacm1` before Debian trixie and Ubuntu 24.04).
+- rdma-core: the headers `libibverbs-dev` and `librdmacm-dev` to build, the libraries `libibverbs1`, `librdmacm1t64` and `ibverbs-providers` to run (Debian and Ubuntu package names; the library is `librdmacm1` before Debian trixie and Ubuntu 24.04). Release 53 or later holds more than three connections in one process reliably: earlier releases, the 50.0 of Ubuntu 24.04 among them, have the rsockets `cm_svc_run` bug, a service thread polling a freed descriptor array once a fourth rsocket registers, which hangs connections or crashes the process.
 - A locked-memory limit that holds the registered buffers, which are pinned: about 256 KiB per connection with the rsockets defaults, so the usual 8 MiB limit holds a few dozen connections. `ulimit -l unlimited` raises it for a shell.
 
 Everywhere else the module compiles to stubs; see [Platforms](#platforms).
@@ -139,7 +139,7 @@ Build the image from a checkout with `docker build -t rdma .`.
 
 ## Soft-RoCE
 
-Soft-RoCE runs RDMA over any Ethernet interface with the `rdma_rxe` kernel module, so one Linux host is enough to try the package; the CI workflow does exactly this on a stock Ubuntu runner. Give rxe a dummy interface with a private address of its own: rdma_cm picks the device by the local IP, and a hardware RDMA device on the same host would otherwise claim the address of a shared interface.
+Soft-RoCE runs RDMA over any Ethernet interface with the `rdma_rxe` kernel module, so one Linux host is enough to try the package; the CI workflow does exactly this on a stock Ubuntu runner, where it also builds rdma-core from source, since the 50.0 that Ubuntu 24.04 ships falls under the caveat in [Requirements](#requirements). Give rxe a dummy interface with a private address of its own: rdma_cm picks the device by the local IP, and a hardware RDMA device on the same host would otherwise claim the address of a shared interface.
 
 ```sh
 sudo apt-get install -y rdma-core ibverbs-utils rdmacm-utils libibverbs-dev librdmacm-dev ibverbs-providers iproute2
