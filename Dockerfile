@@ -36,6 +36,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -r -u 10001 -g rdma rdma
 COPY --from=build /out/rdma /usr/local/bin/rdma
-USER rdma
+# Numeric so runAsNonRoot-style checks can verify it; useradd above gives the id its name and group.
+USER 10001
 ENTRYPOINT ["rdma"]
 CMD ["help"]
