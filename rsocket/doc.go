@@ -33,7 +33,12 @@
 // configuration (10 µs by default), then sleeps in poll(2) in slices of
 // wake_up_interval (5 s by default), so a call without a timeout wakes
 // briefly now and then; an interrupted sleep is retried for the time left.
-// Plain descriptors are checked in both phases.
+// Plain descriptors are checked in both phases. A positive timeout runs on
+// a timerfd polled along with the descriptors rather than on rpoll's own
+// timeout: in rdma-core up to v60 an rpoll whose timeout expires leaks its
+// poller count, after which every rpoll that has to wait spins instead of
+// sleeping and never times out (fixed upstream after v60 by "librdmacm: Fix
+// rpoll in case of timeout").
 //
 // # Options
 //

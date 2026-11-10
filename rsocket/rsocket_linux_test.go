@@ -66,6 +66,43 @@ func TestPollWithoutTimeoutWaitsForWrite(t *testing.T) {
 	}
 }
 
+// TestPollTimesOutAfterAnEarlierTimeout runs the sequence of an event loop:
+// a wait that times out, a wait ended by an event, and a wait that must time
+// out again. In rdma-core up to v60 the first rpoll timeout leaks its poller
+// count and the third call spins forever.
+func TestPollTimesOutAfterAnEarlierTimeout(t *testing.T) {
+	r, w := pipe(t)
+	fds := []rsocket.PollFD{{Fd: r, Events: rsocket.PollIn}}
+	if n, err := rsocket.Poll(fds, 20*time.Millisecond); n != 0 || err != nil {
+		t.Fatalf("first Poll() = %d, %v; want 0, nil", n, err)
+	}
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		syscall.Write(w, []byte{1})
+	}()
+	if n, err := rsocket.Poll(fds, -1); n != 1 || err != nil {
+		t.Fatalf("second Poll() = %d, %v; want 1, nil", n, err)
+	}
+	if _, err := syscall.Read(r, make([]byte, 1)); err != nil {
+		t.Fatalf("Read() from the pipe error: %v", err)
+	}
+	done := make(chan struct{})
+	var n int
+	var err error
+	go func() {
+		n, err = rsocket.Poll(fds, 100*time.Millisecond)
+		close(done)
+	}()
+	select {
+	case <-done:
+		if n != 0 || err != nil {
+			t.Fatalf("third Poll() = %d, %v; want 0, nil", n, err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("third Poll(100ms) did not return: an earlier timeout broke rpoll")
+	}
+}
+
 func TestPollWithoutDescriptorsIsInvalid(t *testing.T) {
 	n, err := rsocket.Poll(nil, 0)
 	var opErr *verbs.OpError

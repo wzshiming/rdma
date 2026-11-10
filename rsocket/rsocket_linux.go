@@ -9,14 +9,32 @@ package rsocket
 #include <poll.h>
 #include <stdint.h>
 #include <string.h>
+#include <unistd.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/timerfd.h>
 #include <rdma/rsocket.h>
 
 // rfcntl is variadic, which cgo cannot call.
 static int rs_getfl(int fd) { return rfcntl(fd, F_GETFL); }
 static int rs_setfl(int fd, int flags) { return rfcntl(fd, F_SETFL, flags); }
+
+// rs_timerfd returns a descriptor that becomes readable after ns nanoseconds,
+// or -1 with errno set.
+static int rs_timerfd(int64_t ns) {
+	struct itimerspec its = { .it_value = { .tv_sec = ns / 1000000000, .tv_nsec = ns % 1000000000 } };
+	int fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
+	if (fd < 0)
+		return -1;
+	if (timerfd_settime(fd, 0, &its, NULL) < 0) {
+		int saved = errno;
+		close(fd);
+		errno = saved;
+		return -1;
+	}
+	return fd;
+}
 
 static int rs_setsockopt_int(int fd, int level, int name, int value) {
 	return rsetsockopt(fd, level, name, &value, sizeof value);
@@ -437,38 +455,41 @@ func Poll(fds []PollFD, timeout time.Duration) (int, error) {
 	if len(fds) == 0 {
 		return 0, &verbs.OpError{Op: "rpoll", Err: syscall.EINVAL}
 	}
-	cfds := make([]C.struct_pollfd, len(fds))
+	cfds := make([]C.struct_pollfd, len(fds), len(fds)+1)
 	for i, fd := range fds {
 		cfds[i] = C.struct_pollfd{fd: C.int(fd.Fd), events: C.short(fd.Events)}
 	}
-	var deadline time.Time
-	if timeout > 0 {
-		deadline = time.Now().Add(timeout)
+	// The timeout runs on a timerfd polled along with fds while rpoll waits
+	// without limit: in rdma-core up to v60 an rpoll whose own timeout
+	// expires leaks its poller count, after which every rpoll that has to
+	// wait spins instead of sleeping and never times out.
+	wait := C.int(-1)
+	switch {
+	case timeout == 0:
+		wait = 0
+	case timeout > 0:
+		tfd, err := C.rs_timerfd(C.int64_t(timeout))
+		if tfd < 0 {
+			return 0, opError("timerfd_create", err)
+		}
+		defer C.close(tfd)
+		cfds = append(cfds, C.struct_pollfd{fd: tfd, events: C.POLLIN})
 	}
 	for {
-		n, err := C.rpoll(&cfds[0], C.nfds_t(len(cfds)), pollTimeout(timeout))
-		if n >= 0 {
-			for i := range fds {
-				fds[i].Revents = Events(cfds[i].revents)
+		n, err := C.rpoll(&cfds[0], C.nfds_t(len(cfds)), wait)
+		if n < 0 {
+			if err == syscall.EINTR {
+				continue
 			}
-			return int(n), nil
-		}
-		if err != syscall.EINTR {
 			return 0, opError("rpoll", err)
 		}
-		// Past the deadline, one last immediate check fills in the Revents.
-		if timeout > 0 {
-			timeout = max(time.Until(deadline), 0)
+		ready := 0
+		for i := range fds {
+			fds[i].Revents = Events(cfds[i].revents)
+			if fds[i].Revents != 0 {
+				ready++
+			}
 		}
+		return ready, nil
 	}
-}
-
-// pollTimeout converts d to the milliseconds of rpoll: -1 for no limit, and
-// rounded up so that a short wait does not become an immediate return.
-func pollTimeout(d time.Duration) C.int {
-	if d < 0 {
-		return -1
-	}
-	ms := (d + time.Millisecond - 1) / time.Millisecond
-	return C.int(min(ms, 1<<31-1))
 }
