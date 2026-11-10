@@ -8,7 +8,7 @@ Reliable byte streams over RDMA with the vocabulary of the `net` package: `Dial`
 ## Requirements
 
 - Linux with the kernel's RDMA stack (`ib_uverbs`, `rdma_ucm`) and either an RDMA device or Soft-RoCE (the `rdma_rxe` kernel module) over any Ethernet interface; see [Soft-RoCE](#soft-roce) for a one-host setup.
-- rdma-core: the headers `libibverbs-dev` and `librdmacm-dev` to build, the libraries `libibverbs1`, `librdmacm1` and `ibverbs-providers` to run (Debian and Ubuntu package names).
+- rdma-core: the headers `libibverbs-dev` and `librdmacm-dev` to build, the libraries `libibverbs1`, `librdmacm1t64` and `ibverbs-providers` to run (Debian and Ubuntu package names; the library is `librdmacm1` before Debian trixie and Ubuntu 24.04).
 - A locked-memory limit that holds the registered buffers, which are pinned: about 1 MiB per connection with the defaults, so the usual 8 MiB limit holds a handful of connections. `ulimit -l unlimited` raises it for a shell.
 
 Everywhere else the module compiles to stubs; see [Platforms](#platforms).
