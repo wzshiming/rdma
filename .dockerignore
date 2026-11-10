@@ -1,0 +1,9 @@
+# Allowlist: only the module manifest and the packages the Dockerfile builds reach the build context.
+*
+!go.mod
+!go.sum
+!*.go
+!cm
+!cmd
+!verbs
+**/*_test.go
