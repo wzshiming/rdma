@@ -5,5 +5,6 @@
 !*.go
 !cm
 !cmd
+!rsocket
 !verbs
 **/*_test.go
