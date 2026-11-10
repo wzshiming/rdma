@@ -9,7 +9,6 @@ import (
 	"io"
 	"net"
 	"os"
-	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -29,48 +28,40 @@ const rxeTimeout = 20 * time.Second
 // so that back-pressure and credit returns happen all the time.
 var smallConfig = Config{SendBufferSize: 16 << 10, ReceiveBufferSize: 16 << 10, SendQueueSize: 8, ReceiveQueueSize: 8}
 
-// manyConnections skips a test that keeps more than three connections alive
-// in this process on rdma-core before 53: once a fourth rsocket is registered
-// with one of librdmacm's service threads, the thread keeps polling the
-// descriptor array it has just freed and reallocated (fixed upstream by
-// 24061f015bd9, "rsockets: Fix for cm_svc_run thread"), after which
-// rsockets hang in raccept and rclose or crash. RDMA_TEST_MANY_CONNS=1 runs
-// the test regardless.
+// manyConnections gates a test that keeps more than three connections alive
+// in this process by the rdma-core release in use, as manyConnectionsVerdict
+// decides: a skip before 53, a failure under RDMA_TEST_REQUIRE=1, and a run
+// under RDMA_TEST_MANY_CONNS=1 regardless.
 func manyConnections(t *testing.T) {
 	t.Helper()
 	rdmatest.Device(t)
-	if os.Getenv("RDMA_TEST_MANY_CONNS") == "1" {
-		return
-	}
-	if v, ok := rdmaCoreRelease(); ok && v < 53 {
-		t.Skipf("rdma-core %d corrupts its service threads beyond three registered rsockets (fixed in 53); RDMA_TEST_MANY_CONNS=1 runs the test anyway", v)
+	release := rdmaCoreRelease()
+	msg := "rdma-core " + strconv.Itoa(release) + " corrupts its service threads beyond three registered rsockets (fixed in 53); RDMA_TEST_MANY_CONNS=1 runs the test anyway"
+	switch manyConnectionsVerdict(release, os.Getenv) {
+	case verdictSkip:
+		t.Skip(msg)
+	case verdictFatal:
+		t.Fatal(msg + " (RDMA_TEST_REQUIRE=1)")
 	}
 }
 
-// rdmaCoreRelease reads the rdma-core release from the file name librdmacm's
-// soname links to, librdmacm.so.1.3.<release>.<minor>.
-func rdmaCoreRelease() (int, bool) {
-	for _, dir := range []string{"/usr/lib/x86_64-linux-gnu", "/usr/lib/aarch64-linux-gnu", "/usr/lib64", "/usr/lib"} {
-		path, err := filepath.EvalSymlinks(filepath.Join(dir, "librdmacm.so.1"))
-		if err != nil {
-			continue
-		}
-		parts := strings.Split(filepath.Base(path), ".")
-		if len(parts) < 5 {
-			continue
-		}
-		if v, err := strconv.Atoi(parts[4]); err == nil {
-			return v, true
-		}
+// rdmaCoreRelease reads the rdma-core release from the file name of the
+// librdmacm this process has loaded, librdmacm.so.1.<minor>.<release>.<patch>,
+// which is the library the tests run against whichever directory holds it;
+// it returns 0 when none is mapped.
+func rdmaCoreRelease() int {
+	maps, err := os.ReadFile("/proc/self/maps")
+	if err != nil {
+		return 0
 	}
-	return 0, false
+	return rdmaCoreReleaseIn(string(maps))
 }
 
 // TestRXELibraryRelease records the rdma-core release the tests run against.
 func TestRXELibraryRelease(t *testing.T) {
-	v, ok := rdmaCoreRelease()
-	if !ok {
-		t.Skip("librdmacm.so.1 not found")
+	v := rdmaCoreRelease()
+	if v == 0 {
+		t.Skip("librdmacm.so.1 not mapped")
 	}
 	t.Logf("rdma-core release %d", v)
 }
