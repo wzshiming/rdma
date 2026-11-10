@@ -56,7 +56,10 @@ func listener(t *testing.T, setup func(*rsocket.Socket)) (rdmatest.Dev, *rsocket
 }
 
 // dial starts a non-blocking connect from the device's IP to remote, which
-// reports EINPROGRESS; the attempt goes on as the socket is polled.
+// reports EINPROGRESS and goes on as the socket is polled; now and then
+// rdma_cm resolves the route at once and the connect completes
+// synchronously, with nil when connected and ECONNREFUSED when refused,
+// which Poll and SocketError report the same way afterwards.
 func dial(t *testing.T, dev rdmatest.Dev, remote netip.AddrPort, setup func(*rsocket.Socket)) *rsocket.Socket {
 	t.Helper()
 	c := newSocket(t)
@@ -69,8 +72,8 @@ func dial(t *testing.T, dev rdmatest.Dev, remote netip.AddrPort, setup func(*rso
 	if err := c.SetNonblock(true); err != nil {
 		t.Fatalf("SetNonblock(true) error: %v", err)
 	}
-	if err := c.Connect(remote); !errors.Is(err, syscall.EINPROGRESS) {
-		t.Fatalf("non-blocking Connect(%v) error = %v, want EINPROGRESS", remote, err)
+	if err := c.Connect(remote); err != nil && !errors.Is(err, syscall.EINPROGRESS) && !errors.Is(err, syscall.ECONNREFUSED) {
+		t.Fatalf("non-blocking Connect(%v) error = %v, want EINPROGRESS, or nil or ECONNREFUSED when it completes at once", remote, err)
 	}
 	return c
 }
