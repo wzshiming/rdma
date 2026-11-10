@@ -85,6 +85,27 @@ func TestREADMEUsageMatchesExamples(t *testing.T) {
 	}
 }
 
+// TestREADMEDescribesTheRsocketsStream checks that the README names the
+// rsockets knobs and their flags, and no longer the credit protocol's.
+func TestREADMEDescribesTheRsocketsStream(t *testing.T) {
+	readme := readREADME(t)
+	for _, stale := range []string{"MessageSize", "ReceiveDepth", "SendDepth", "msgsize", "-depth"} {
+		if strings.Contains(readme, stale) {
+			t.Errorf("README still mentions %q", stale)
+		}
+	}
+	for _, want := range []string{
+		"rsockets", "rstream", "librspreload", "/etc/rdma/rsocket",
+		"https://pkg.go.dev/github.com/wzshiming/rdma/rsocket",
+		"`-sndbuf`", "`-rcvbuf`", "`-sqsize`", "`-rqsize`", "`-inline`",
+		"`Config.SendBufferSize`", "`Config.ReceiveBufferSize`", "`Config.SendQueueSize`", "`Config.ReceiveQueueSize`", "`Config.MaxInline`",
+	} {
+		if !strings.Contains(readme, want) {
+			t.Errorf("README lacks %q", want)
+		}
+	}
+}
+
 // section returns the text from the heading to the next heading of the
 // same level.
 func section(doc, heading string) string {

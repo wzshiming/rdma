@@ -3,13 +3,13 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/wzshiming/rdma.svg)](https://pkg.go.dev/github.com/wzshiming/rdma)
 [![Go](https://github.com/wzshiming/rdma/actions/workflows/go.yml/badge.svg)](https://github.com/wzshiming/rdma/actions/workflows/go.yml)
 
-Reliable byte streams over RDMA with the vocabulary of the `net` package: `Dial` and `Listen` give out `net.Conn` and `net.Listener` values backed by an RC queue pair, addressed by IP address and port like TCP, working over InfiniBand, RoCE and iWARP alike, and depending on nothing but the standard library and rdma-core.
+Reliable byte streams over RDMA with the vocabulary of the `net` package: `Dial` and `Listen` give out `net.Conn` and `net.Listener` values backed by rsockets, the stream sockets of librdmacm, addressed by IP address and port like TCP, working over InfiniBand, RoCE and iWARP alike, and depending on nothing but the standard library and rdma-core.
 
 ## Requirements
 
 - Linux with the kernel's RDMA stack (`ib_uverbs`, `rdma_ucm`) and either an RDMA device or Soft-RoCE (the `rdma_rxe` kernel module) over any Ethernet interface; see [Soft-RoCE](#soft-roce) for a one-host setup.
 - rdma-core: the headers `libibverbs-dev` and `librdmacm-dev` to build, the libraries `libibverbs1`, `librdmacm1t64` and `ibverbs-providers` to run (Debian and Ubuntu package names; the library is `librdmacm1` before Debian trixie and Ubuntu 24.04).
-- A locked-memory limit that holds the registered buffers, which are pinned: about 1 MiB per connection with the defaults, so the usual 8 MiB limit holds a handful of connections. `ulimit -l unlimited` raises it for a shell.
+- A locked-memory limit that holds the registered buffers, which are pinned: about 256 KiB per connection with the rsockets defaults, so the usual 8 MiB limit holds a few dozen connections. `ulimit -l unlimited` raises it for a shell.
 
 Everywhere else the module compiles to stubs; see [Platforms](#platforms).
 
@@ -60,14 +60,15 @@ for {
 }
 ```
 
-The networks are `rdma`, `rdma4` and `rdma6`; the IP address selects the device through rdma_cm. `Dialer` and `ListenConfig` carry the options, including a `Config` that sizes the buffers of a connection, and every error is a `*net.OpError` on net `rdma`, so `errors.Is` matches `syscall.ECONNREFUSED`, `os.ErrDeadlineExceeded` and `net.ErrClosed` as it does for TCP. The [package documentation](https://pkg.go.dev/github.com/wzshiming/rdma) has the rest.
+The networks are `rdma`, `rdma4` and `rdma6`; the IP address selects the device through rdma_cm. `Dialer` and `ListenConfig` carry the options, including a `Config` with the rsockets knobs of a connection, and every error is a `*net.OpError` on net `rdma`, so `errors.Is` matches `syscall.ECONNREFUSED`, `os.ErrDeadlineExceeded` and `net.ErrClosed` as it does for TCP. The stream is the rsockets protocol itself, so the peer may be any rsockets application, `rstream` or a program run under `LD_PRELOAD=librspreload.so` included, and the defaults of a process come from `/etc/rdma/rsocket`. The [package documentation](https://pkg.go.dev/github.com/wzshiming/rdma) has the rest.
 
 ## Packages
 
+- [`rsocket`](https://pkg.go.dev/github.com/wzshiming/rdma/rsocket) binds rsockets, the socket API of librdmacm that the stream above is built on: sockets with Bind, Listen, Accept, Connect, Read, Write and Shutdown, their options, and Poll over rsockets and plain descriptors.
 - [`verbs`](https://pkg.go.dev/github.com/wzshiming/rdma/verbs) binds libibverbs: devices, protection domains, memory regions, completion queues and channels, queue pairs, work requests and completions, with every wait on the Go runtime poller.
 - [`cm`](https://pkg.go.dev/github.com/wzshiming/rdma/cm) binds librdmacm: resolving addresses, connecting and accepting RC connections with private data, and the events of a connection's life.
 
-Both expose their rdma-core handles through `Pointer` methods and `*FromPointer` constructors, so they interoperate with other code built on rdma-core.
+`verbs` and `cm` expose their rdma-core handles through `Pointer` methods and `*FromPointer` constructors, so they interoperate with other code built on rdma-core.
 
 ## Command line
 
@@ -118,7 +119,7 @@ Gbit/s: 4.159
 
 The samples above come from Soft-RoCE on a GitHub Actions runner; hardware is a different league.
 
-`-msgsize` and `-depth` set the message size and queue depth of the connections (`Config.MessageSize`, `Config.ReceiveDepth` and `Config.SendDepth`), and `-keep` makes a server serve run after run.
+`-sndbuf`, `-rcvbuf`, `-sqsize`, `-rqsize` and `-inline` set the rsockets options of the connections (`Config.SendBufferSize`, `Config.ReceiveBufferSize`, `Config.SendQueueSize`, `Config.ReceiveQueueSize` and `Config.MaxInline`; 0 keeps the rsockets default), and `-keep` makes a server serve run after run.
 
 ## Docker
 
@@ -168,7 +169,7 @@ rdma pingpong -connect 10.200.0.1:4791
 
 ## Platforms
 
-Linux with cgo is the real implementation, over libibverbs and librdmacm. Every other GOOS, and Linux built with `CGO_ENABLED=0`, compiles the same API, with `Dial`, `Listen` and the constructors of `verbs` and `cm` returning an error that `errors.Is(err, errors.ErrUnsupported)` matches; a program using the package builds everywhere and fails only where it needs RDMA.
+Linux with cgo is the real implementation, over librdmacm and libibverbs. Every other GOOS, and Linux built with `CGO_ENABLED=0`, compiles the same API, with `Dial`, `Listen` and the constructors of `rsocket`, `verbs` and `cm` returning an error that `errors.Is(err, errors.ErrUnsupported)` matches; a program using the package builds everywhere and fails only where it needs RDMA.
 
 ## License
 
