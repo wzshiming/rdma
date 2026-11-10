@@ -1,45 +1,41 @@
-//go:build linux && cgo
+//go:build linux && !android && (amd64 || arm64 || loong64 || ppc64le || riscv64 || s390x)
 
 package verbs
-
-/*
-#include <infiniband/verbs.h>
-
-// ibv_reg_mr is a macro in recent rdma-core; cgo needs a function.
-static struct ibv_mr *verbs_reg_mr(struct ibv_pd *pd, void *addr, size_t length, unsigned int access)
-{
-	return ibv_reg_mr(pd, addr, length, access);
-}
-*/
-import "C"
 
 import (
 	"runtime"
 	"syscall"
 	"unsafe"
+
+	"github.com/wzshiming/rdma/internal/dynlib"
+	"github.com/wzshiming/rdma/internal/rdmaabi"
 )
 
 // PD is a protection domain (struct ibv_pd).
 type PD struct {
-	pd    *C.struct_ibv_pd
+	pd    unsafe.Pointer // struct ibv_pd *, opaque to the package
 	owned bool
 }
 
 // AllocPD allocates a protection domain.
 func (c *Context) AllocPD() (*PD, error) {
-	pd, err := C.ibv_alloc_pd(c.ctx)
-	if pd == nil {
-		return nil, opError("ibv_alloc_pd", err)
+	f, err := load("ibv_alloc_pd")
+	if err != nil {
+		return nil, err
 	}
-	return &PD{pd: pd, owned: true}, nil
+	pd, errno := f.allocPD.Ptr(caddr(c.ctx), 0, 0, 0, 0, 0)
+	if pd == 0 {
+		return nil, opError("ibv_alloc_pd", errno)
+	}
+	return &PD{pd: unsafe.Pointer(dynlib.Pointer[byte](pd)), owned: true}, nil
 }
 
 // PDFromPointer wraps a struct ibv_pd pointer owned by someone else; Close
 // does not deallocate it.
-func PDFromPointer(p unsafe.Pointer) *PD { return &PD{pd: (*C.struct_ibv_pd)(p)} }
+func PDFromPointer(p unsafe.Pointer) *PD { return &PD{pd: p} }
 
 // Pointer returns the underlying struct ibv_pd pointer.
-func (p *PD) Pointer() unsafe.Pointer { return unsafe.Pointer(p.pd) }
+func (p *PD) Pointer() unsafe.Pointer { return p.pd }
 
 // Close deallocates the protection domain. A second Close is a no-op.
 func (p *PD) Close() error {
@@ -51,7 +47,11 @@ func (p *PD) Close() error {
 	if !p.owned {
 		return nil
 	}
-	if rc := C.ibv_dealloc_pd(pd); rc != 0 {
+	f, err := load("ibv_dealloc_pd")
+	if err != nil {
+		return err
+	}
+	if rc, _ := f.deallocPD.Int(uintptr(pd), 0, 0, 0, 0, 0); rc != 0 {
 		return opErrorRC("ibv_dealloc_pd", rc)
 	}
 	return nil
@@ -59,11 +59,24 @@ func (p *PD) Close() error {
 
 // MR is a registered memory region (struct ibv_mr).
 type MR struct {
-	mr     *C.struct_ibv_mr
+	mr     *rdmaabi.IbvMr
 	buf    []byte
 	pinner runtime.Pinner
 	mapped bool // buf comes from mmap and is unmapped on Close
 	owned  bool
+}
+
+// regMR registers the memory at &b[0] with pd; b is pinned or off-heap.
+func (p *PD) regMR(b []byte, access AccessFlags) (*rdmaabi.IbvMr, error) {
+	f, err := load("ibv_reg_mr")
+	if err != nil {
+		return nil, err
+	}
+	mr, errno := f.regMR.Ptr(uintptr(p.pd), uintptr(unsafe.Pointer(&b[0])), uintptr(len(b)), cint(int32(access)), 0, 0)
+	if mr == 0 {
+		return nil, opError("ibv_reg_mr", errno)
+	}
+	return dynlib.Pointer[rdmaabi.IbvMr](mr), nil
 }
 
 // RegisterMemory registers the Go slice b for RDMA access. Its backing array
@@ -74,10 +87,10 @@ func (p *PD) RegisterMemory(b []byte, access AccessFlags) (*MR, error) {
 	}
 	mr := &MR{buf: b, owned: true}
 	mr.pinner.Pin(&b[0])
-	cmr, err := C.verbs_reg_mr(p.pd, unsafe.Pointer(&b[0]), C.size_t(len(b)), C.uint(access))
-	if cmr == nil {
+	cmr, err := p.regMR(b, access)
+	if err != nil {
 		mr.pinner.Unpin()
-		return nil, opError("ibv_reg_mr", err)
+		return nil, err
 	}
 	mr.mr = cmr
 	return mr, nil
@@ -93,10 +106,10 @@ func (p *PD) AllocMemory(size int, access AccessFlags) (*MR, error) {
 	if err != nil {
 		return nil, &OpError{Op: "mmap", Err: err}
 	}
-	cmr, err := C.verbs_reg_mr(p.pd, unsafe.Pointer(&b[0]), C.size_t(size), C.uint(access))
-	if cmr == nil {
+	cmr, err := p.regMR(b, access)
+	if err != nil {
 		syscall.Munmap(b)
-		return nil, opError("ibv_reg_mr", err)
+		return nil, err
 	}
 	return &MR{mr: cmr, buf: b, mapped: true, owned: true}, nil
 }
@@ -104,9 +117,9 @@ func (p *PD) AllocMemory(size int, access AccessFlags) (*MR, error) {
 // MRFromPointer wraps a struct ibv_mr pointer owned by someone else; Close
 // does not deregister it.
 func MRFromPointer(p unsafe.Pointer) *MR {
-	mr := &MR{mr: (*C.struct_ibv_mr)(p)}
+	mr := &MR{mr: (*rdmaabi.IbvMr)(p)}
 	if mr.mr != nil {
-		mr.buf = unsafe.Slice((*byte)(mr.mr.addr), int(mr.mr.length))
+		mr.buf = unsafe.Slice(dynlib.Pointer[byte](uintptr(mr.mr.Addr)), int(mr.mr.Length))
 	}
 	return mr
 }
@@ -118,10 +131,10 @@ func (m *MR) Pointer() unsafe.Pointer { return unsafe.Pointer(m.mr) }
 func (m *MR) Bytes() []byte { return m.buf }
 
 // LKey returns the local key of the region.
-func (m *MR) LKey() uint32 { return uint32(m.mr.lkey) }
+func (m *MR) LKey() uint32 { return m.mr.Lkey }
 
 // RKey returns the remote key of the region.
-func (m *MR) RKey() uint32 { return uint32(m.mr.rkey) }
+func (m *MR) RKey() uint32 { return m.mr.Rkey }
 
 // SGE builds a scatter/gather element for b, which must be a sub-slice of
 // Bytes; it panics otherwise.
@@ -141,7 +154,11 @@ func (m *MR) Close() error {
 		return nil
 	}
 	if m.owned {
-		if rc := C.ibv_dereg_mr(m.mr); rc != 0 {
+		f, err := load("ibv_dereg_mr")
+		if err != nil {
+			return err
+		}
+		if rc, _ := f.deregMR.Int(caddr(m.mr), 0, 0, 0, 0, 0); rc != 0 {
 			return opErrorRC("ibv_dereg_mr", rc)
 		}
 	}

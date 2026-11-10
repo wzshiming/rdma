@@ -1,4 +1,4 @@
-//go:build linux && cgo
+//go:build linux && !android && !race && (amd64 || arm64 || loong64 || ppc64le || riscv64 || s390x)
 
 package verbs_test
 
@@ -6,6 +6,16 @@ import (
 	"testing"
 
 	"github.com/wzshiming/rdma/verbs"
+)
+
+// The cgo binding allocated this much per call on rxe (Go run 42851838307 of
+// commit f481f61); the run-time loaded one may not allocate more. Under the
+// race detector sync.Pool, which dynlib draws its argument block from, drops
+// entries at random, so these tests stay out of race builds.
+const (
+	maxPostSendAllocs = 1
+	maxPostRecvAllocs = 1
+	maxPollAllocs     = 0
 )
 
 // allocRuns keeps the warm-up post and the measured ones within the 32-deep
@@ -23,6 +33,9 @@ func TestPostSendAllocations(t *testing.T) {
 		}
 	})
 	t.Logf("PostSend: %v allocations per call", n)
+	if n > maxPostSendAllocs {
+		t.Errorf("PostSend() allocates %v times per call, want at most %d", n, maxPostSendAllocs)
+	}
 	// A signaled write behind the measured ones completes after all of them.
 	wr.ID, wr.Flags = 2, verbs.SendSignaled
 	if err := p.a.PostSend(wr); err != nil {
@@ -43,6 +56,9 @@ func TestPostRecvAllocations(t *testing.T) {
 		}
 	})
 	t.Logf("PostRecv: %v allocations per call", n)
+	if n > maxPostRecvAllocs {
+		t.Errorf("PostRecv() allocates %v times per call, want at most %d", n, maxPostRecvAllocs)
+	}
 }
 
 func TestPollAllocations(t *testing.T) {
@@ -54,4 +70,7 @@ func TestPollAllocations(t *testing.T) {
 		}
 	})
 	t.Logf("Poll: %v allocations per call", n)
+	if n > maxPollAllocs {
+		t.Errorf("Poll() allocates %v times per call, want at most %d", n, maxPollAllocs)
+	}
 }

@@ -1,25 +1,18 @@
-//go:build linux && cgo
+//go:build linux && !android && (amd64 || arm64 || loong64 || ppc64le || riscv64 || s390x)
 
 package verbs
 
-/*
-#include <stddef.h>
-#include <stdlib.h>
-#include <infiniband/verbs.h>
-
-// imm_data lives in an anonymous union, which cgo cannot name.
-enum { VERBS_WC_IMM_OFFSET = offsetof(struct ibv_wc, imm_data) };
-*/
-import "C"
-
 import (
+	"encoding/binary"
 	"os"
 	"sync"
-	"syscall"
 	"unsafe"
+
+	"github.com/wzshiming/rdma/internal/dynlib"
+	"github.com/wzshiming/rdma/internal/rdmaabi"
 )
 
-// wcBatch is the size of the per-CQ scratch array ibv_poll_cq fills.
+// wcBatch is the size of the per-CQ scratch array poll_cq fills.
 const wcBatch = 32
 
 // cqs maps struct ibv_cq pointers to the CQs this package created, so that
@@ -28,24 +21,28 @@ var cqs sync.Map
 
 // CompChannel is a completion event channel (struct ibv_comp_channel).
 type CompChannel struct {
-	ch     *C.struct_ibv_comp_channel
+	ch     *rdmaabi.IbvCompChannel
 	owned  bool
 	waiter fdWaiter
 }
 
 // CreateCompChannel creates a completion event channel.
 func (c *Context) CreateCompChannel() (*CompChannel, error) {
-	ch, err := C.ibv_create_comp_channel(c.ctx)
-	if ch == nil {
-		return nil, opError("ibv_create_comp_channel", err)
+	f, err := load("ibv_create_comp_channel")
+	if err != nil {
+		return nil, err
 	}
-	return &CompChannel{ch: ch, owned: true}, nil
+	ch, errno := f.createCompChannel.Ptr(caddr(c.ctx), 0, 0, 0, 0, 0)
+	if ch == 0 {
+		return nil, opError("ibv_create_comp_channel", errno)
+	}
+	return &CompChannel{ch: dynlib.Pointer[rdmaabi.IbvCompChannel](ch), owned: true}, nil
 }
 
 // CompChannelFromPointer wraps a struct ibv_comp_channel pointer owned by
 // someone else; Close does not destroy it.
 func CompChannelFromPointer(p unsafe.Pointer) *CompChannel {
-	return &CompChannel{ch: (*C.struct_ibv_comp_channel)(p)}
+	return &CompChannel{ch: (*rdmaabi.IbvCompChannel)(p)}
 }
 
 // Pointer returns the underlying struct ibv_comp_channel pointer.
@@ -60,7 +57,11 @@ func (c *CompChannel) Close() error {
 	}
 	c.waiter.close()
 	if c.owned {
-		if rc := C.ibv_destroy_comp_channel(ch); rc != 0 {
+		f, err := load("ibv_destroy_comp_channel")
+		if err != nil {
+			return err
+		}
+		if rc, _ := f.destroyCompChannel.Int(caddr(ch), 0, 0, 0, 0, 0); rc != 0 {
 			return opErrorRC("ibv_destroy_comp_channel", rc)
 		}
 	}
@@ -70,39 +71,57 @@ func (c *CompChannel) Close() error {
 
 // CQ is a completion queue (struct ibv_cq).
 type CQ struct {
-	cq    *C.struct_ibv_cq
-	owned bool
-	mu    sync.Mutex
-	wcs   *C.struct_ibv_wc // scratch array of wcBatch entries for Poll
+	cq        *rdmaabi.IbvCq
+	owned     bool
+	pollCQ    dynlib.Func // poll_cq of the device context
+	reqNotify dynlib.Func // req_notify_cq of the device context
+	mu        sync.Mutex
+	wcs       []rdmaabi.IbvWc // scratch array of wcBatch entries for Poll
+}
+
+// newCQ wraps cq, taking the inline verbs from its context's ops table.
+func newCQ(cq *rdmaabi.IbvCq, owned bool) *CQ {
+	q := &CQ{cq: cq, owned: owned}
+	if cq != nil {
+		ops := contextOps(cq.Context)
+		q.pollCQ = dynlib.FuncAt(uintptr(ops.Poll_cq))
+		q.reqNotify = dynlib.FuncAt(uintptr(ops.Req_notify_cq))
+	}
+	return q
 }
 
 // CreateCQ creates a completion queue with at least cqe entries, delivering
 // its events to ch when ch is not nil.
 func (c *Context) CreateCQ(cqe int, ch *CompChannel) (*CQ, error) {
-	var cch *C.struct_ibv_comp_channel
+	f, err := load("ibv_create_cq")
+	if err != nil {
+		return nil, err
+	}
+	var cch uintptr
 	if ch != nil {
-		cch = ch.ch
+		cch = caddr(ch.ch)
 	}
-	cq, err := C.ibv_create_cq(c.ctx, C.int(cqe), nil, cch, 0)
-	if cq == nil {
-		return nil, opError("ibv_create_cq", err)
+	cq, errno := f.createCQ.Ptr(caddr(c.ctx), cint(int32(cqe)), 0, cch, 0, 0)
+	if cq == 0 {
+		return nil, opError("ibv_create_cq", errno)
 	}
-	q := &CQ{cq: cq, owned: true}
-	cqs.Store(uintptr(unsafe.Pointer(cq)), q)
+	q := newCQ(dynlib.Pointer[rdmaabi.IbvCq](cq), true)
+	cqs.Store(cq, q)
 	return q, nil
 }
 
-// lookupCQ returns the CQ created for cq, or a non-owning wrapper.
-func lookupCQ(cq *C.struct_ibv_cq) *CQ {
-	if v, ok := cqs.Load(uintptr(unsafe.Pointer(cq))); ok {
+// lookupCQ returns the CQ created for the struct ibv_cq at addr, or a
+// non-owning wrapper.
+func lookupCQ(addr uintptr) *CQ {
+	if v, ok := cqs.Load(addr); ok {
 		return v.(*CQ)
 	}
-	return &CQ{cq: cq}
+	return newCQ(dynlib.Pointer[rdmaabi.IbvCq](addr), false)
 }
 
 // CQFromPointer wraps a struct ibv_cq pointer owned by someone else; Close
 // does not destroy it.
-func CQFromPointer(p unsafe.Pointer) *CQ { return &CQ{cq: (*C.struct_ibv_cq)(p)} }
+func CQFromPointer(p unsafe.Pointer) *CQ { return newCQ((*rdmaabi.IbvCq)(p), false) }
 
 // Pointer returns the underlying struct ibv_cq pointer.
 func (q *CQ) Pointer() unsafe.Pointer { return unsafe.Pointer(q.cq) }
@@ -119,21 +138,17 @@ func (q *CQ) Poll(wcs []WC) (int, error) {
 		return 0, &OpError{Op: "ibv_poll_cq", Err: os.ErrClosed}
 	}
 	if q.wcs == nil {
-		q.wcs = (*C.struct_ibv_wc)(C.malloc(wcBatch * C.size_t(unsafe.Sizeof(C.struct_ibv_wc{}))))
-		if q.wcs == nil {
-			return 0, &OpError{Op: "ibv_poll_cq", Err: syscall.ENOMEM}
-		}
+		q.wcs = make([]rdmaabi.IbvWc, wcBatch)
 	}
-	buf := unsafe.Slice(q.wcs, wcBatch)
 	total := 0
 	for total < len(wcs) {
 		n := min(len(wcs)-total, wcBatch)
-		rc, err := C.ibv_poll_cq(q.cq, C.int(n), q.wcs)
+		rc, errno := q.pollCQ.Int(caddr(q.cq), cint(int32(n)), uintptr(unsafe.Pointer(&q.wcs[0])), 0, 0, 0)
 		if rc < 0 {
-			return total, opError("ibv_poll_cq", err)
+			return total, opError("ibv_poll_cq", errno)
 		}
 		for i := range int(rc) {
-			wcs[total+i] = wcFromC(&buf[i])
+			wcs[total+i] = wcFromC(&q.wcs[i])
 		}
 		total += int(rc)
 		if int(rc) < n {
@@ -143,32 +158,32 @@ func (q *CQ) Poll(wcs []WC) (int, error) {
 	return total, nil
 }
 
-func wcFromC(w *C.struct_ibv_wc) WC {
+func wcFromC(w *rdmaabi.IbvWc) WC {
 	return WC{
-		ID:           uint64(w.wr_id),
-		Status:       WCStatus(w.status),
-		Opcode:       WCOpcode(w.opcode),
-		VendorErr:    uint32(w.vendor_err),
-		Len:          uint32(w.byte_len),
-		Imm:          *(*uint32)(unsafe.Add(unsafe.Pointer(w), C.VERBS_WC_IMM_OFFSET)),
-		QPNum:        uint32(w.qp_num),
-		SrcQP:        uint32(w.src_qp),
-		Flags:        WCFlags(w.wc_flags),
-		PkeyIndex:    uint16(w.pkey_index),
-		SLID:         uint16(w.slid),
-		SL:           uint8(w.sl),
-		DLIDPathBits: uint8(w.dlid_path_bits),
+		ID:           w.Wr_id,
+		Status:       WCStatus(w.Status),
+		Opcode:       WCOpcode(w.Opcode),
+		VendorErr:    w.Vendor_err,
+		Len:          w.Byte_len,
+		Imm:          binary.BigEndian.Uint32(w.Imm_data[:]),
+		QPNum:        w.Qp_num,
+		SrcQP:        w.Src_qp,
+		Flags:        WCFlags(w.Wc_flags),
+		PkeyIndex:    w.Pkey_index,
+		SLID:         w.Slid,
+		SL:           w.Sl,
+		DLIDPathBits: w.Dlid_path_bits,
 	}
 }
 
 // RequestNotify arms the completion channel for the next completion, or for
 // the next solicited completion only.
 func (q *CQ) RequestNotify(solicitedOnly bool) error {
-	var s C.int
+	var s int32
 	if solicitedOnly {
 		s = 1
 	}
-	if rc := C.ibv_req_notify_cq(q.cq, s); rc != 0 {
+	if rc, _ := q.reqNotify.Int(caddr(q.cq), cint(s), 0, 0, 0, 0); rc != 0 {
 		return opErrorRC("ibv_req_notify_cq", rc)
 	}
 	return nil
@@ -183,21 +198,27 @@ func (q *CQ) Close() error {
 		return nil
 	}
 	if q.owned {
-		if rc := C.ibv_destroy_cq(cq); rc != 0 {
+		f, err := load("ibv_destroy_cq")
+		if err != nil {
+			return err
+		}
+		if rc, _ := f.destroyCQ.Int(caddr(cq), 0, 0, 0, 0, 0); rc != 0 {
 			return opErrorRC("ibv_destroy_cq", rc)
 		}
-		cqs.Delete(uintptr(unsafe.Pointer(cq)))
+		cqs.Delete(caddr(cq))
 	}
 	q.cq = nil
-	if q.wcs != nil {
-		C.free(unsafe.Pointer(q.wcs))
-		q.wcs = nil
-	}
+	q.wcs = nil
 	return nil
 }
 
 // wcStatusStr returns the libibverbs text of a status; it backs the test that
 // keeps wcStatusNames in step with ibv_wc_status_str.
-func wcStatusStr(s WCStatus) string {
-	return C.GoString(C.ibv_wc_status_str(uint32(s)))
+func wcStatusStr(s WCStatus) (string, error) {
+	f, err := load("ibv_wc_status_str")
+	if err != nil {
+		return "", err
+	}
+	str, _ := f.wcStatusStr.Ptr(cint(int32(s)), 0, 0, 0, 0, 0)
+	return goString(str), nil
 }

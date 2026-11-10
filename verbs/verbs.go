@@ -6,8 +6,9 @@ import (
 )
 
 // OpError is the error returned by every failing rdma-core call: Op names the
-// libibverbs function and Err is the syscall.Errno it produced. On platforms
-// without libibverbs Err is errors.ErrUnsupported.
+// libibverbs function and Err is the syscall.Errno it produced. When
+// libibverbs cannot be loaded, or the platform has no implementation, Err
+// matches errors.ErrUnsupported.
 type OpError struct {
 	Op  string
 	Err error
@@ -627,8 +628,8 @@ type SGE struct {
 }
 
 // SendWR is a send work request (struct ibv_send_wr) for an RC or UC queue
-// pair. Imm is passed through unchanged and read back from WC.Imm on the
-// remote side; RemoteAddr and RKey are used by the RDMA operations.
+// pair. Imm travels in network byte order and arrives as WC.Imm on the remote
+// side; RemoteAddr and RKey are used by the RDMA operations.
 type SendWR struct {
 	ID         uint64
 	Op         WROpcode

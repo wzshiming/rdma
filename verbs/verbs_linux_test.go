@@ -1,4 +1,4 @@
-//go:build linux && cgo
+//go:build linux && !android && (amd64 || arm64 || loong64 || ppc64le || riscv64 || s390x)
 
 package verbs_test
 
@@ -22,6 +22,20 @@ func TestOpErrorErrno(t *testing.T) {
 	}
 	if !errors.Is(err, syscall.ENOMEM) {
 		t.Error("errors.Is(err, syscall.ENOMEM) = false, want true")
+	}
+}
+
+// Devices lists whatever the host has, possibly nothing; only a kernel
+// without the RDMA stack makes ibv_get_device_list fail, with ENOSYS.
+func TestDevicesOnAnyHost(t *testing.T) {
+	devs, err := verbs.Devices()
+	if err != nil && !errors.Is(err, syscall.ENOSYS) {
+		t.Fatalf("Devices() error: %v", err)
+	}
+	for _, d := range devs {
+		if d.Name() == "" {
+			t.Errorf("Devices() has a device without a name: %+v", d)
+		}
 	}
 }
 

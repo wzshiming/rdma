@@ -1,26 +1,14 @@
-//go:build linux && cgo
+//go:build linux && !android && (amd64 || arm64 || loong64 || ppc64le || riscv64 || s390x)
 
 package verbs
 
-/*
-#include <stddef.h>
-#include <stdlib.h>
-#include <infiniband/verbs.h>
-
-// imm_data lives in an anonymous union and the rdma fields in a union member,
-// which cgo cannot address by name.
-enum {
-	VERBS_SEND_WR_IMM_OFFSET = offsetof(struct ibv_send_wr, imm_data),
-	VERBS_SEND_WR_RADDR_OFFSET = offsetof(struct ibv_send_wr, wr.rdma.remote_addr),
-	VERBS_SEND_WR_RKEY_OFFSET = offsetof(struct ibv_send_wr, wr.rdma.rkey),
-};
-*/
-import "C"
-
 import (
+	"encoding/binary"
 	"sync"
-	"syscall"
 	"unsafe"
+
+	"github.com/wzshiming/rdma/internal/dynlib"
+	"github.com/wzshiming/rdma/internal/rdmaabi"
 )
 
 // qps maps struct ibv_qp pointers to the QPs this package created, so that
@@ -29,59 +17,109 @@ var qps sync.Map
 
 // QP is a queue pair (struct ibv_qp).
 type QP struct {
-	qp    *C.struct_ibv_qp
-	owned bool
+	qp       *rdmaabi.IbvQp
+	owned    bool
+	postSend dynlib.Func // post_send of the device context
+	postRecv dynlib.Func // post_recv of the device context
+	send     postBuf[rdmaabi.IbvSendWr]
+	recv     postBuf[rdmaabi.IbvRecvWr]
+}
+
+// postBuf is the memory the work requests of one queue are built in: the
+// C-layout chain, its SGE array and the slot ibv_post_* store the rejected
+// request in. It is kept from post to post, so a steady state allocates
+// nothing, and its mutex serialises the posts of the queue, as the provider
+// does on its own.
+type postBuf[WR rdmaabi.IbvSendWr | rdmaabi.IbvRecvWr] struct {
+	mu   sync.Mutex
+	wrs  []WR
+	sges []rdmaabi.IbvSge
+	bad  uint64
+}
+
+// reserve returns zeroed room for nwr work requests and nsge SGEs; the
+// caller holds mu.
+func (b *postBuf[WR]) reserve(nwr, nsge int) ([]WR, []rdmaabi.IbvSge) {
+	if cap(b.wrs) < nwr {
+		b.wrs = make([]WR, nwr)
+	}
+	if cap(b.sges) < nsge {
+		b.sges = make([]rdmaabi.IbvSge, nsge)
+	}
+	wrs, sges := b.wrs[:nwr], b.sges[:nsge]
+	clear(wrs)
+	return wrs, sges
+}
+
+// newQP wraps qp, taking the inline verbs from its context's ops table.
+func newQP(qp *rdmaabi.IbvQp, owned bool) *QP {
+	q := &QP{qp: qp, owned: owned}
+	if qp != nil {
+		ops := contextOps(qp.Context)
+		q.postSend = dynlib.FuncAt(uintptr(ops.Post_send))
+		q.postRecv = dynlib.FuncAt(uintptr(ops.Post_recv))
+	}
+	return q
 }
 
 // CreateQP creates a queue pair and stores the granted capacities in attr.Cap.
 func (p *PD) CreateQP(attr *QPInitAttr) (*QP, error) {
-	var ia C.struct_ibv_qp_init_attr
+	f, err := load("ibv_create_qp")
+	if err != nil {
+		return nil, err
+	}
+	var ia rdmaabi.IbvQpInitAttr
 	if attr.SendCQ != nil {
-		ia.send_cq = attr.SendCQ.cq
+		ia.Send_cq = uint64(caddr(attr.SendCQ.cq))
 	}
 	if attr.RecvCQ != nil {
-		ia.recv_cq = attr.RecvCQ.cq
+		ia.Recv_cq = uint64(caddr(attr.RecvCQ.cq))
 	}
-	ia.cap = capToC(attr.Cap)
-	ia.qp_type = uint32(attr.Type)
+	ia.Cap = capToC(attr.Cap)
+	ia.Qp_type = uint32(attr.Type)
 	if attr.SignalAll {
-		ia.sq_sig_all = 1
+		ia.Sq_sig_all = 1
 	}
-	qp, err := C.ibv_create_qp(p.pd, &ia)
-	if qp == nil {
-		return nil, opError("ibv_create_qp", err)
+	qp, errno := f.createQP.Ptr(uintptr(p.pd), uintptr(unsafe.Pointer(&ia)), 0, 0, 0, 0)
+	if qp == 0 {
+		return nil, opError("ibv_create_qp", errno)
 	}
-	attr.Cap = capFromC(ia.cap)
-	q := &QP{qp: qp, owned: true}
-	qps.Store(uintptr(unsafe.Pointer(qp)), q)
+	attr.Cap = capFromC(ia.Cap)
+	q := newQP(dynlib.Pointer[rdmaabi.IbvQp](qp), true)
+	qps.Store(qp, q)
 	return q, nil
 }
 
-// lookupQP returns the QP created for qp, or a non-owning wrapper.
-func lookupQP(qp *C.struct_ibv_qp) *QP {
-	if v, ok := qps.Load(uintptr(unsafe.Pointer(qp))); ok {
+// lookupQP returns the QP created for the struct ibv_qp at addr, or a
+// non-owning wrapper.
+func lookupQP(addr uintptr) *QP {
+	if v, ok := qps.Load(addr); ok {
 		return v.(*QP)
 	}
-	return &QP{qp: qp}
+	return newQP(dynlib.Pointer[rdmaabi.IbvQp](addr), false)
 }
 
 // QPFromPointer wraps a struct ibv_qp pointer owned by someone else, such as
 // the queue pair of an rdma_cm id; Close does not destroy it.
-func QPFromPointer(p unsafe.Pointer) *QP { return &QP{qp: (*C.struct_ibv_qp)(p)} }
+func QPFromPointer(p unsafe.Pointer) *QP { return newQP((*rdmaabi.IbvQp)(p), false) }
 
 // Pointer returns the underlying struct ibv_qp pointer.
 func (q *QP) Pointer() unsafe.Pointer { return unsafe.Pointer(q.qp) }
 
 // Num returns the queue pair number.
-func (q *QP) Num() uint32 { return uint32(q.qp.qp_num) }
+func (q *QP) Num() uint32 { return q.qp.Qp_num }
 
 // Type returns the transport service type.
-func (q *QP) Type() QPType { return QPType(q.qp.qp_type) }
+func (q *QP) Type() QPType { return QPType(q.qp.Qp_type) }
 
 // Modify applies the attr fields selected by mask, as ibv_modify_qp does.
 func (q *QP) Modify(attr *QPAttr, mask QPAttrMask) error {
+	f, err := load("ibv_modify_qp")
+	if err != nil {
+		return err
+	}
 	ca := attrToC(attr)
-	if rc := C.ibv_modify_qp(q.qp, &ca, C.int(mask)); rc != 0 {
+	if rc, _ := f.modifyQP.Int(caddr(q.qp), uintptr(unsafe.Pointer(&ca)), cint(int32(mask)), 0, 0, 0); rc != 0 {
 		return opErrorRC("ibv_modify_qp", rc)
 	}
 	return nil
@@ -89,19 +127,23 @@ func (q *QP) Modify(attr *QPAttr, mask QPAttrMask) error {
 
 // Query returns the attributes selected by mask; Cap is always filled.
 func (q *QP) Query(mask QPAttrMask) (*QPAttr, error) {
-	var ca C.struct_ibv_qp_attr
-	var ia C.struct_ibv_qp_init_attr
-	if rc := C.ibv_query_qp(q.qp, &ca, C.int(mask), &ia); rc != 0 {
+	f, err := load("ibv_query_qp")
+	if err != nil {
+		return nil, err
+	}
+	var ca rdmaabi.IbvQpAttr
+	var ia rdmaabi.IbvQpInitAttr
+	if rc, _ := f.queryQP.Int(caddr(q.qp), uintptr(unsafe.Pointer(&ca)), cint(int32(mask)), uintptr(unsafe.Pointer(&ia)), 0, 0); rc != 0 {
 		return nil, opErrorRC("ibv_query_qp", rc)
 	}
 	attr := attrFromC(&ca)
-	attr.Cap = capFromC(ia.cap)
+	attr.Cap = capFromC(ia.Cap)
 	return attr, nil
 }
 
-// PostSend posts send work requests as one chain. The chain and its SGE arrays
-// are built in C memory for the duration of the call; afterwards the C side
-// keeps no reference to Go memory.
+// PostSend posts send work requests as one chain. The chain and its SGE
+// array live in the queue pair's own buffer for the duration of the call;
+// afterwards the library keeps no reference to them.
 func (q *QP) PostSend(wrs ...SendWR) error {
 	if len(wrs) == 0 {
 		return nil
@@ -110,41 +152,42 @@ func (q *QP) PostSend(wrs ...SendWR) error {
 	for i := range wrs {
 		nsge += len(wrs[i].SGE)
 	}
-	const wrSize = unsafe.Sizeof(C.struct_ibv_send_wr{})
-	mem := C.calloc(1, C.size_t(uintptr(len(wrs))*wrSize+uintptr(nsge)*sgeSize))
-	if mem == nil {
-		return &OpError{Op: "ibv_post_send", Err: syscall.ENOMEM}
-	}
-	defer C.free(mem)
-	cwrs := unsafe.Slice((*C.struct_ibv_send_wr)(mem), len(wrs))
-	sges := unsafe.Slice((*C.struct_ibv_sge)(unsafe.Add(mem, uintptr(len(wrs))*wrSize)), nsge)
+	q.send.mu.Lock()
+	defer q.send.mu.Unlock()
+	cwrs, sges := q.send.reserve(len(wrs), nsge)
 	for i := range wrs {
 		w, cw := &wrs[i], &cwrs[i]
-		cw.wr_id = C.uint64_t(w.ID)
+		sendWRToC(cw, w)
 		if i+1 < len(wrs) {
-			cw.next = &cwrs[i+1]
+			cw.Next = uint64(uintptr(unsafe.Pointer(&cwrs[i+1])))
 		}
 		if len(w.SGE) > 0 {
-			cw.sg_list = &sges[0]
-			cw.num_sge = C.int(len(w.SGE))
+			cw.Sg_list = uint64(uintptr(unsafe.Pointer(&sges[0])))
+			cw.Num_sge = int32(len(w.SGE))
 			sges = fillSGEs(sges, w.SGE)
 		}
-		cw.opcode = uint32(w.Op)
-		cw.send_flags = C.uint(w.Flags)
-		p := unsafe.Pointer(cw)
-		*(*uint32)(unsafe.Add(p, C.VERBS_SEND_WR_IMM_OFFSET)) = w.Imm
-		*(*uint64)(unsafe.Add(p, C.VERBS_SEND_WR_RADDR_OFFSET)) = w.RemoteAddr
-		*(*uint32)(unsafe.Add(p, C.VERBS_SEND_WR_RKEY_OFFSET)) = w.RKey
 	}
-	var bad *C.struct_ibv_send_wr
-	if rc := C.ibv_post_send(q.qp, &cwrs[0], &bad); rc != 0 {
+	// &q.send.bad keeps q, and with it the chain, alive for the call.
+	rc, _ := q.postSend.Int(caddr(q.qp), uintptr(unsafe.Pointer(&cwrs[0])), uintptr(unsafe.Pointer(&q.send.bad)), 0, 0, 0)
+	if rc != 0 {
 		return opErrorRC("ibv_post_send", rc)
 	}
 	return nil
 }
 
-// PostRecv posts receive work requests as one chain, built in C memory like
-// PostSend does.
+// sendWRToC fills the fields of cw that come from w; the chain and the SGE
+// list are the caller's. Immediate data goes out in network byte order.
+func sendWRToC(cw *rdmaabi.IbvSendWr, w *SendWR) {
+	cw.Wr_id = w.ID
+	cw.Opcode = uint32(w.Op)
+	cw.Send_flags = uint32(w.Flags)
+	binary.BigEndian.PutUint32(cw.Imm_data[:], w.Imm)
+	cw.Wr.Rdma.Remote_addr = w.RemoteAddr
+	cw.Wr.Rdma.Rkey = w.RKey
+}
+
+// PostRecv posts receive work requests as one chain, built in the queue
+// pair's buffer like PostSend does.
 func (q *QP) PostRecv(wrs ...RecvWR) error {
 	if len(wrs) == 0 {
 		return nil
@@ -153,39 +196,32 @@ func (q *QP) PostRecv(wrs ...RecvWR) error {
 	for i := range wrs {
 		nsge += len(wrs[i].SGE)
 	}
-	const wrSize = unsafe.Sizeof(C.struct_ibv_recv_wr{})
-	mem := C.calloc(1, C.size_t(uintptr(len(wrs))*wrSize+uintptr(nsge)*sgeSize))
-	if mem == nil {
-		return &OpError{Op: "ibv_post_recv", Err: syscall.ENOMEM}
-	}
-	defer C.free(mem)
-	cwrs := unsafe.Slice((*C.struct_ibv_recv_wr)(mem), len(wrs))
-	sges := unsafe.Slice((*C.struct_ibv_sge)(unsafe.Add(mem, uintptr(len(wrs))*wrSize)), nsge)
+	q.recv.mu.Lock()
+	defer q.recv.mu.Unlock()
+	cwrs, sges := q.recv.reserve(len(wrs), nsge)
 	for i := range wrs {
 		w, cw := &wrs[i], &cwrs[i]
-		cw.wr_id = C.uint64_t(w.ID)
+		cw.Wr_id = w.ID
 		if i+1 < len(wrs) {
-			cw.next = &cwrs[i+1]
+			cw.Next = uint64(uintptr(unsafe.Pointer(&cwrs[i+1])))
 		}
 		if len(w.SGE) > 0 {
-			cw.sg_list = &sges[0]
-			cw.num_sge = C.int(len(w.SGE))
+			cw.Sg_list = uint64(uintptr(unsafe.Pointer(&sges[0])))
+			cw.Num_sge = int32(len(w.SGE))
 			sges = fillSGEs(sges, w.SGE)
 		}
 	}
-	var bad *C.struct_ibv_recv_wr
-	if rc := C.ibv_post_recv(q.qp, &cwrs[0], &bad); rc != 0 {
+	rc, _ := q.postRecv.Int(caddr(q.qp), uintptr(unsafe.Pointer(&cwrs[0])), uintptr(unsafe.Pointer(&q.recv.bad)), 0, 0, 0)
+	if rc != 0 {
 		return opErrorRC("ibv_post_recv", rc)
 	}
 	return nil
 }
 
-const sgeSize = unsafe.Sizeof(C.struct_ibv_sge{})
-
 // fillSGEs copies src to the front of dst and returns the rest of dst.
-func fillSGEs(dst []C.struct_ibv_sge, src []SGE) []C.struct_ibv_sge {
+func fillSGEs(dst []rdmaabi.IbvSge, src []SGE) []rdmaabi.IbvSge {
 	for i, s := range src {
-		dst[i] = C.struct_ibv_sge{addr: C.uint64_t(s.Addr), length: C.uint32_t(s.Length), lkey: C.uint32_t(s.LKey)}
+		dst[i] = rdmaabi.IbvSge{Addr: s.Addr, Length: s.Length, Lkey: s.LKey}
 	}
 	return dst[len(src):]
 }
@@ -197,135 +233,141 @@ func (q *QP) Close() error {
 		return nil
 	}
 	if q.owned {
-		if rc := C.ibv_destroy_qp(qp); rc != 0 {
+		f, err := load("ibv_destroy_qp")
+		if err != nil {
+			return err
+		}
+		if rc, _ := f.destroyQP.Int(caddr(qp), 0, 0, 0, 0, 0); rc != 0 {
 			return opErrorRC("ibv_destroy_qp", rc)
 		}
-		qps.Delete(uintptr(unsafe.Pointer(qp)))
+		qps.Delete(caddr(qp))
 	}
 	q.qp = nil
 	return nil
 }
 
-func capToC(c QPCap) C.struct_ibv_qp_cap {
-	return C.struct_ibv_qp_cap{
-		max_send_wr:     C.uint32_t(c.MaxSendWR),
-		max_recv_wr:     C.uint32_t(c.MaxRecvWR),
-		max_send_sge:    C.uint32_t(c.MaxSendSGE),
-		max_recv_sge:    C.uint32_t(c.MaxRecvSGE),
-		max_inline_data: C.uint32_t(c.MaxInlineData),
+func capToC(c QPCap) rdmaabi.IbvQpCap {
+	return rdmaabi.IbvQpCap{
+		Max_send_wr:     c.MaxSendWR,
+		Max_recv_wr:     c.MaxRecvWR,
+		Max_send_sge:    c.MaxSendSGE,
+		Max_recv_sge:    c.MaxRecvSGE,
+		Max_inline_data: c.MaxInlineData,
 	}
 }
 
-func capFromC(c C.struct_ibv_qp_cap) QPCap {
+func capFromC(c rdmaabi.IbvQpCap) QPCap {
 	return QPCap{
-		MaxSendWR:     uint32(c.max_send_wr),
-		MaxRecvWR:     uint32(c.max_recv_wr),
-		MaxSendSGE:    uint32(c.max_send_sge),
-		MaxRecvSGE:    uint32(c.max_recv_sge),
-		MaxInlineData: uint32(c.max_inline_data),
+		MaxSendWR:     c.Max_send_wr,
+		MaxRecvWR:     c.Max_recv_wr,
+		MaxSendSGE:    c.Max_send_sge,
+		MaxRecvSGE:    c.Max_recv_sge,
+		MaxInlineData: c.Max_inline_data,
 	}
 }
 
-func ahToC(a AHAttr) C.struct_ibv_ah_attr {
-	ca := C.struct_ibv_ah_attr{
-		dlid:          C.uint16_t(a.DLID),
-		sl:            C.uint8_t(a.SL),
-		src_path_bits: C.uint8_t(a.SrcPathBits),
-		static_rate:   C.uint8_t(a.StaticRate),
-		port_num:      C.uint8_t(a.Port),
+func ahToC(a AHAttr) rdmaabi.IbvAhAttr {
+	ca := rdmaabi.IbvAhAttr{
+		Grh: rdmaabi.IbvGlobalRoute{
+			Dgid:          rdmaabi.IbvGid(a.GRH.DGID),
+			Flow_label:    a.GRH.FlowLabel,
+			Sgid_index:    a.GRH.SGIDIndex,
+			Hop_limit:     a.GRH.HopLimit,
+			Traffic_class: a.GRH.TrafficClass,
+		},
+		Dlid:          a.DLID,
+		Sl:            a.SL,
+		Src_path_bits: a.SrcPathBits,
+		Static_rate:   a.StaticRate,
+		Port_num:      a.Port,
 	}
 	if a.IsGlobal {
-		ca.is_global = 1
+		ca.Is_global = 1
 	}
-	ca.grh.flow_label = C.uint32_t(a.GRH.FlowLabel)
-	ca.grh.sgid_index = C.uint8_t(a.GRH.SGIDIndex)
-	ca.grh.hop_limit = C.uint8_t(a.GRH.HopLimit)
-	ca.grh.traffic_class = C.uint8_t(a.GRH.TrafficClass)
-	*(*GID)(unsafe.Pointer(&ca.grh.dgid)) = a.GRH.DGID
 	return ca
 }
 
-func ahFromC(ca *C.struct_ibv_ah_attr) AHAttr {
+func ahFromC(ca *rdmaabi.IbvAhAttr) AHAttr {
 	return AHAttr{
 		GRH: GlobalRoute{
-			DGID:         *(*GID)(unsafe.Pointer(&ca.grh.dgid)),
-			FlowLabel:    uint32(ca.grh.flow_label),
-			SGIDIndex:    uint8(ca.grh.sgid_index),
-			HopLimit:     uint8(ca.grh.hop_limit),
-			TrafficClass: uint8(ca.grh.traffic_class),
+			DGID:         GID(ca.Grh.Dgid),
+			FlowLabel:    ca.Grh.Flow_label,
+			SGIDIndex:    ca.Grh.Sgid_index,
+			HopLimit:     ca.Grh.Hop_limit,
+			TrafficClass: ca.Grh.Traffic_class,
 		},
-		DLID:        uint16(ca.dlid),
-		SL:          uint8(ca.sl),
-		SrcPathBits: uint8(ca.src_path_bits),
-		StaticRate:  uint8(ca.static_rate),
-		IsGlobal:    ca.is_global != 0,
-		Port:        uint8(ca.port_num),
+		DLID:        ca.Dlid,
+		SL:          ca.Sl,
+		SrcPathBits: ca.Src_path_bits,
+		StaticRate:  ca.Static_rate,
+		IsGlobal:    ca.Is_global != 0,
+		Port:        ca.Port_num,
 	}
 }
 
-func attrToC(a *QPAttr) C.struct_ibv_qp_attr {
-	ca := C.struct_ibv_qp_attr{
-		qp_state:           uint32(a.State),
-		cur_qp_state:       uint32(a.CurState),
-		path_mtu:           uint32(a.PathMTU),
-		path_mig_state:     uint32(a.PathMigState),
-		qkey:               C.uint32_t(a.QKey),
-		rq_psn:             C.uint32_t(a.RQPSN),
-		sq_psn:             C.uint32_t(a.SQPSN),
-		dest_qp_num:        C.uint32_t(a.DestQPNum),
-		qp_access_flags:    C.uint(a.AccessFlags),
-		cap:                capToC(a.Cap),
-		ah_attr:            ahToC(a.AH),
-		alt_ah_attr:        ahToC(a.AltAH),
-		pkey_index:         C.uint16_t(a.PkeyIndex),
-		alt_pkey_index:     C.uint16_t(a.AltPkeyIndex),
-		max_rd_atomic:      C.uint8_t(a.MaxRDAtomic),
-		max_dest_rd_atomic: C.uint8_t(a.MaxDestRDAtomic),
-		min_rnr_timer:      C.uint8_t(a.MinRNRTimer),
-		port_num:           C.uint8_t(a.Port),
-		timeout:            C.uint8_t(a.Timeout),
-		retry_cnt:          C.uint8_t(a.RetryCnt),
-		rnr_retry:          C.uint8_t(a.RNRRetry),
-		alt_port_num:       C.uint8_t(a.AltPort),
-		alt_timeout:        C.uint8_t(a.AltTimeout),
-		rate_limit:         C.uint32_t(a.RateLimit),
+func attrToC(a *QPAttr) rdmaabi.IbvQpAttr {
+	ca := rdmaabi.IbvQpAttr{
+		Qp_state:           uint32(a.State),
+		Cur_qp_state:       uint32(a.CurState),
+		Path_mtu:           uint32(a.PathMTU),
+		Path_mig_state:     uint32(a.PathMigState),
+		Qkey:               a.QKey,
+		Rq_psn:             a.RQPSN,
+		Sq_psn:             a.SQPSN,
+		Dest_qp_num:        a.DestQPNum,
+		Qp_access_flags:    uint32(a.AccessFlags),
+		Cap:                capToC(a.Cap),
+		Ah_attr:            ahToC(a.AH),
+		Alt_ah_attr:        ahToC(a.AltAH),
+		Pkey_index:         a.PkeyIndex,
+		Alt_pkey_index:     a.AltPkeyIndex,
+		Max_rd_atomic:      a.MaxRDAtomic,
+		Max_dest_rd_atomic: a.MaxDestRDAtomic,
+		Min_rnr_timer:      a.MinRNRTimer,
+		Port_num:           a.Port,
+		Timeout:            a.Timeout,
+		Retry_cnt:          a.RetryCnt,
+		Rnr_retry:          a.RNRRetry,
+		Alt_port_num:       a.AltPort,
+		Alt_timeout:        a.AltTimeout,
+		Rate_limit:         a.RateLimit,
 	}
 	if a.EnSQDAsyncNotify {
-		ca.en_sqd_async_notify = 1
+		ca.En_sqd_async_notify = 1
 	}
 	if a.SQDraining {
-		ca.sq_draining = 1
+		ca.Sq_draining = 1
 	}
 	return ca
 }
 
-func attrFromC(ca *C.struct_ibv_qp_attr) *QPAttr {
+func attrFromC(ca *rdmaabi.IbvQpAttr) *QPAttr {
 	return &QPAttr{
-		State:            QPState(ca.qp_state),
-		CurState:         QPState(ca.cur_qp_state),
-		PathMTU:          MTU(ca.path_mtu),
-		PathMigState:     MigState(ca.path_mig_state),
-		QKey:             uint32(ca.qkey),
-		RQPSN:            uint32(ca.rq_psn),
-		SQPSN:            uint32(ca.sq_psn),
-		DestQPNum:        uint32(ca.dest_qp_num),
-		AccessFlags:      AccessFlags(ca.qp_access_flags),
-		Cap:              capFromC(ca.cap),
-		AH:               ahFromC(&ca.ah_attr),
-		AltAH:            ahFromC(&ca.alt_ah_attr),
-		PkeyIndex:        uint16(ca.pkey_index),
-		AltPkeyIndex:     uint16(ca.alt_pkey_index),
-		EnSQDAsyncNotify: ca.en_sqd_async_notify != 0,
-		SQDraining:       ca.sq_draining != 0,
-		MaxRDAtomic:      uint8(ca.max_rd_atomic),
-		MaxDestRDAtomic:  uint8(ca.max_dest_rd_atomic),
-		MinRNRTimer:      uint8(ca.min_rnr_timer),
-		Port:             uint8(ca.port_num),
-		Timeout:          uint8(ca.timeout),
-		RetryCnt:         uint8(ca.retry_cnt),
-		RNRRetry:         uint8(ca.rnr_retry),
-		AltPort:          uint8(ca.alt_port_num),
-		AltTimeout:       uint8(ca.alt_timeout),
-		RateLimit:        uint32(ca.rate_limit),
+		State:            QPState(ca.Qp_state),
+		CurState:         QPState(ca.Cur_qp_state),
+		PathMTU:          MTU(ca.Path_mtu),
+		PathMigState:     MigState(ca.Path_mig_state),
+		QKey:             ca.Qkey,
+		RQPSN:            ca.Rq_psn,
+		SQPSN:            ca.Sq_psn,
+		DestQPNum:        ca.Dest_qp_num,
+		AccessFlags:      AccessFlags(ca.Qp_access_flags),
+		Cap:              capFromC(ca.Cap),
+		AH:               ahFromC(&ca.Ah_attr),
+		AltAH:            ahFromC(&ca.Alt_ah_attr),
+		PkeyIndex:        ca.Pkey_index,
+		AltPkeyIndex:     ca.Alt_pkey_index,
+		EnSQDAsyncNotify: ca.En_sqd_async_notify != 0,
+		SQDraining:       ca.Sq_draining != 0,
+		MaxRDAtomic:      ca.Max_rd_atomic,
+		MaxDestRDAtomic:  ca.Max_dest_rd_atomic,
+		MinRNRTimer:      ca.Min_rnr_timer,
+		Port:             ca.Port_num,
+		Timeout:          ca.Timeout,
+		RetryCnt:         ca.Retry_cnt,
+		RNRRetry:         ca.Rnr_retry,
+		AltPort:          ca.Alt_port_num,
+		AltTimeout:       ca.Alt_timeout,
+		RateLimit:        ca.Rate_limit,
 	}
 }

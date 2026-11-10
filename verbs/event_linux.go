@@ -1,20 +1,18 @@
-//go:build linux && cgo
+//go:build linux && !android && (amd64 || arm64 || loong64 || ppc64le || riscv64 || s390x)
 
 package verbs
 
-/*
-#include <infiniband/verbs.h>
-*/
-import "C"
-
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"os"
 	"sync"
 	"syscall"
 	"time"
 	"unsafe"
+
+	"github.com/wzshiming/rdma/internal/rdmaabi"
 )
 
 // aLongTimeAgo is a read deadline that is already over.
@@ -116,13 +114,16 @@ func (c *CompChannel) Wait(ctx context.Context) (*CQ, error) {
 	if c.ch == nil {
 		return nil, &OpError{Op: "ibv_get_cq_event", Err: os.ErrClosed}
 	}
-	c.waiter.init(int(c.ch.fd))
+	f, err := load("ibv_get_cq_event")
+	if err != nil {
+		return nil, err
+	}
+	c.waiter.init(int(c.ch.Fd))
 	var cq *CQ
-	err := c.waiter.wait(ctx, "ibv_get_cq_event", func() (bool, error) {
-		var ccq *C.struct_ibv_cq
-		var cqCtx unsafe.Pointer
+	err = c.waiter.wait(ctx, "ibv_get_cq_event", func() (bool, error) {
+		var out struct{ cq, cqContext uint64 } // struct ibv_cq *, void *
 		for {
-			rc, errno := C.ibv_get_cq_event(c.ch, &ccq, &cqCtx)
+			rc, errno := f.getCQEvent.Int(caddr(c.ch), uintptr(unsafe.Pointer(&out.cq)), uintptr(unsafe.Pointer(&out.cqContext)), 0, 0, 0)
 			if rc == 0 {
 				break
 			}
@@ -134,8 +135,8 @@ func (c *CompChannel) Wait(ctx context.Context) (*CQ, error) {
 			}
 			return false, opError("ibv_get_cq_event", errno)
 		}
-		C.ibv_ack_cq_events(ccq, 1)
-		cq = lookupCQ(ccq)
+		f.ackCQEvents.Int(uintptr(out.cq), cint(1), 0, 0, 0, 0)
+		cq = lookupCQ(uintptr(out.cq))
 		return true, nil
 	})
 	if err != nil {
@@ -151,12 +152,16 @@ func (c *Context) WaitAsyncEvent(ctx context.Context) (*AsyncEvent, error) {
 	if c.ctx == nil {
 		return nil, &OpError{Op: "ibv_get_async_event", Err: os.ErrClosed}
 	}
-	c.async.init(int(c.ctx.async_fd))
+	f, err := load("ibv_get_async_event")
+	if err != nil {
+		return nil, err
+	}
+	c.async.init(int(c.ctx.Async_fd))
 	var ev AsyncEvent
-	err := c.async.wait(ctx, "ibv_get_async_event", func() (bool, error) {
-		var cev C.struct_ibv_async_event
+	err = c.async.wait(ctx, "ibv_get_async_event", func() (bool, error) {
+		var cev rdmaabi.IbvAsyncEvent
 		for {
-			rc, errno := C.ibv_get_async_event(c.ctx, &cev)
+			rc, errno := f.getAsyncEvent.Int(caddr(c.ctx), uintptr(unsafe.Pointer(&cev)), 0, 0, 0, 0)
 			if rc == 0 {
 				break
 			}
@@ -169,7 +174,7 @@ func (c *Context) WaitAsyncEvent(ctx context.Context) (*AsyncEvent, error) {
 			return false, opError("ibv_get_async_event", errno)
 		}
 		ev = asyncEventFromC(&cev)
-		C.ibv_ack_async_event(&cev)
+		f.ackAsyncEvent.Int(uintptr(unsafe.Pointer(&cev)), 0, 0, 0, 0, 0)
 		return true, nil
 	})
 	if err != nil {
@@ -178,19 +183,19 @@ func (c *Context) WaitAsyncEvent(ctx context.Context) (*AsyncEvent, error) {
 	return &ev, nil
 }
 
-// asyncEventFromC reads the element union according to the event type.
-func asyncEventFromC(cev *C.struct_ibv_async_event) AsyncEvent {
-	ev := AsyncEvent{Type: EventType(cev.event_type)}
-	elem := unsafe.Pointer(&cev.element)
+// asyncEventFromC reads the element union according to the event type: a
+// pointer for CQ and QP events, an int port number for port events.
+func asyncEventFromC(cev *rdmaabi.IbvAsyncEvent) AsyncEvent {
+	ev := AsyncEvent{Type: EventType(cev.Event_type)}
 	switch ev.Type {
 	case EventCQErr:
-		ev.CQ = lookupCQ(*(**C.struct_ibv_cq)(elem))
+		ev.CQ = lookupCQ(uintptr(binary.NativeEndian.Uint64(cev.Element[:])))
 	case EventQPFatal, EventQPReqErr, EventQPAccessErr, EventCommEst, EventSQDrained,
 		EventPathMig, EventPathMigErr, EventQPLastWQEReached:
-		ev.QP = lookupQP(*(**C.struct_ibv_qp)(elem))
+		ev.QP = lookupQP(uintptr(binary.NativeEndian.Uint64(cev.Element[:])))
 	case EventPortActive, EventPortErr, EventLIDChange, EventPkeyChange, EventSMChange,
 		EventClientReregister, EventGIDChange:
-		ev.Port = uint8(*(*C.int)(elem))
+		ev.Port = uint8(binary.NativeEndian.Uint32(cev.Element[:4]))
 	}
 	return ev
 }

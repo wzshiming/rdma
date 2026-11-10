@@ -5,14 +5,21 @@
 // and channels, queue pairs, work requests, work completions and asynchronous
 // events with Go types only; no C type appears in the exported API.
 //
-// On Linux with cgo the package links against libibverbs (-libverbs, header
-// infiniband/verbs.h). Everywhere else it compiles to stubs whose
-// constructors return an error satisfying errors.Is(err, errors.ErrUnsupported);
-// the types, constants and String methods are available on every platform.
+// On Linux (amd64, arm64, loong64, ppc64le, riscv64 and s390x) the package
+// loads libibverbs.so.1 at run time on first use, with or without cgo, so
+// building needs neither a C compiler nor the rdma-core headers; when the
+// library cannot be loaded, every entry point returns an *OpError that
+// satisfies errors.Is(err, errors.ErrUnsupported). Everywhere else it
+// compiles to stubs whose constructors return the same kind of error; the
+// types, constants and String methods are available on every platform.
 //
 // Every failing rdma-core call is reported as an *OpError whose Err is the
 // syscall.Errno the call produced, so errors.Is(err, syscall.ENOMEM) and
 // friends work. A failed work completion is reported by WC.Err as a *WCError.
+//
+// Immediate data (SendWR.Imm, WC.Imm) travels in network byte order, as the
+// __be32 of the C API does: a C peer reads a value sent from Go with ntohl
+// and sends one for Go with htonl.
 //
 // Waiting for completion events (CompChannel.Wait) and asynchronous events
 // (Context.WaitAsyncEvent) happens on the Go runtime poller: no OS thread is
