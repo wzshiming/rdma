@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -27,6 +28,52 @@ const rxeTimeout = 20 * time.Second
 // smallConfig sizes the buffers and queues well below the rsockets defaults,
 // so that back-pressure and credit returns happen all the time.
 var smallConfig = Config{SendBufferSize: 16 << 10, ReceiveBufferSize: 16 << 10, SendQueueSize: 8, ReceiveQueueSize: 8}
+
+// manyConnections skips a test that keeps more than three connections alive
+// in this process on rdma-core before 53: once a fourth rsocket is registered
+// with one of librdmacm's service threads, the thread keeps polling the
+// descriptor array it has just freed and reallocated (fixed upstream by
+// 24061f015bd9, "rsockets: Fix for cm_svc_run thread"), after which
+// rsockets hang in raccept and rclose or crash. RDMA_TEST_MANY_CONNS=1 runs
+// the test regardless.
+func manyConnections(t *testing.T) {
+	t.Helper()
+	rdmatest.Device(t)
+	if os.Getenv("RDMA_TEST_MANY_CONNS") == "1" {
+		return
+	}
+	if v, ok := rdmaCoreRelease(); ok && v < 53 {
+		t.Skipf("rdma-core %d corrupts its service threads beyond three registered rsockets (fixed in 53); RDMA_TEST_MANY_CONNS=1 runs the test anyway", v)
+	}
+}
+
+// rdmaCoreRelease reads the rdma-core release from the file name librdmacm's
+// soname links to, librdmacm.so.1.3.<release>.<minor>.
+func rdmaCoreRelease() (int, bool) {
+	for _, dir := range []string{"/usr/lib/x86_64-linux-gnu", "/usr/lib/aarch64-linux-gnu", "/usr/lib64", "/usr/lib"} {
+		path, err := filepath.EvalSymlinks(filepath.Join(dir, "librdmacm.so.1"))
+		if err != nil {
+			continue
+		}
+		parts := strings.Split(filepath.Base(path), ".")
+		if len(parts) < 5 {
+			continue
+		}
+		if v, err := strconv.Atoi(parts[4]); err == nil {
+			return v, true
+		}
+	}
+	return 0, false
+}
+
+// TestRXELibraryRelease records the rdma-core release the tests run against.
+func TestRXELibraryRelease(t *testing.T) {
+	v, ok := rdmaCoreRelease()
+	if !ok {
+		t.Skip("librdmacm.so.1 not found")
+	}
+	t.Logf("rdma-core release %d", v)
+}
 
 // rxeListen starts a Listener on port 0 of the rdmatest device's IP.
 func rxeListen(t testing.TB, cfg Config) *Listener {
@@ -53,7 +100,10 @@ func rxeDial(t testing.TB, cfg Config, addr net.Addr) *Conn {
 	return c
 }
 
-// rxePair connects a client to a fresh listener on the device.
+// rxePair connects a client to a fresh listener on the device and closes the
+// listener: rdma-core before 53 (24061f015bd9) polls a stale descriptor array
+// in its listen thread once more than three listeners are registered, so
+// none is kept open longer than needed.
 func rxePair(t testing.TB, cfg Config) (client, server *Conn) {
 	t.Helper()
 	ln := rxeListen(t, cfg)
@@ -64,6 +114,9 @@ func rxePair(t testing.TB, cfg Config) (client, server *Conn) {
 		t.Fatalf("AcceptRDMA() error: %v", r.err)
 	}
 	t.Cleanup(func() { r.c.Close() })
+	if err := ln.Close(); err != nil {
+		t.Fatalf("Listener Close() error: %v", err)
+	}
 	return client, r.c
 }
 
@@ -117,6 +170,7 @@ func TestRXETransfer(t *testing.T) {
 }
 
 func TestRXEConcurrentConnections(t *testing.T) {
+	manyConnections(t)
 	ln := rxeListen(t, Config{})
 	const conns = 32
 	const total = 4 << 20
@@ -421,6 +475,7 @@ func TestRXEResourcesReturnToBaseline(t *testing.T) {
 }
 
 func TestRXEIdleConnectionsAreCheap(t *testing.T) {
+	manyConnections(t)
 	ln := rxeListen(t, smallConfig)
 	const conns = 100
 	var servers []*Conn
