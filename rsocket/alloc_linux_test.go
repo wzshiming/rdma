@@ -19,8 +19,9 @@ import (
 // with the cgo binding.
 func TestReadWriteAllocateNothing(t *testing.T) {
 	client, server := pair(t)
+	const runs = 100 // after AllocsPerRun's warm-up run
 	one := make([]byte, 1)
-	writes := testing.AllocsPerRun(100, func() {
+	writes := testing.AllocsPerRun(runs, func() {
 		if _, err := client.Write(one); err != nil {
 			t.Fatalf("Write() error: %v", err)
 		}
@@ -29,12 +30,15 @@ func TestReadWriteAllocateNothing(t *testing.T) {
 	if writes > 0 {
 		t.Errorf("Write() allocates %v times per call, want 0", writes)
 	}
-	// The writes above are read one byte at a time; the data of one Write
-	// arrives whole, so none of the reads waits.
+	// The bytes written above arrive in as many messages, which trickle in,
+	// so they are drained first; one Write of as many bytes then arrives as
+	// one message, which the reads take a byte at a time without waiting.
+	readFull(t, server, make([]byte, runs+1))
+	writeAll(t, client, make([]byte, runs+1))
 	await(t, []rsocket.PollFD{{Fd: server.Descriptor(), Events: rsocket.PollIn}}, time.Now().Add(timeout))
-	reads := testing.AllocsPerRun(100, func() {
-		if n, err := server.Read(one); n != 1 || err != nil {
-			t.Fatalf("Read() = %d, %v; want 1, nil", n, err)
+	reads := testing.AllocsPerRun(runs, func() {
+		if got, err := server.Read(one); got != 1 || err != nil {
+			t.Fatalf("Read() = %d, %v; want 1, nil", got, err)
 		}
 	})
 	t.Logf("Read of 1 byte: %v allocations per call", reads)
