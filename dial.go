@@ -3,11 +3,10 @@ package rdma
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net"
 	"time"
 
-	"github.com/wzshiming/rdma/cm"
+	"github.com/wzshiming/rdma/rsocket"
 )
 
 // Dialer contains options for connecting to an address, like net.Dialer. The
@@ -23,23 +22,21 @@ type Dialer struct {
 	// LocalAddr is the local address, an *Addr, to dial from; its IP picks
 	// the device and a non-zero port the local port. nil lets rdma_cm pick.
 	LocalAddr net.Addr
-	// Config tunes the connection's buffers; message size and receive depth
-	// are negotiated down with the listener.
+	// Config sets the rsockets options of the connection.
 	Config Config
 
-	fab fabric // tests inject a fabric; nil selects the platform's
+	nw network // tests inject a network; nil selects the platform's
 }
 
 // Dial connects to the address on the named network, which must be "rdma",
-// "rdma4" or "rdma6", with the zero Dialer. See func Dial for the address
-// syntax.
+// "rdma4" or "rdma6", with the zero Dialer.
 //
 // The address is host:port; the host is an IP address or a name resolved
 // with net.DefaultResolver, and the local device is chosen by rdma_cm for
-// the route to it. Errors are *net.OpError values: errors.Is reports
-// syscall.ECONNREFUSED when nobody listens on the port, ErrProtocol when the
-// listener does not speak this protocol version, the context's error when
-// it ends first, and errors.ErrUnsupported on platforms without librdmacm.
+// the route to it. The peer may be any rsockets application. Errors are
+// *net.OpError values: errors.Is reports syscall.ECONNREFUSED when nobody
+// listens on the port, the context's error when it ends first, and
+// errors.ErrUnsupported on platforms without librdmacm.
 func Dial(network, address string) (*Conn, error) {
 	var d Dialer
 	return d.DialContext(context.Background(), network, address)
@@ -81,24 +78,55 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (*Con
 			return fail(&net.AddrError{Err: "mismatched local address type", Addr: d.LocalAddr.String()})
 		}
 	}
-	cfg := d.Config.withDefaults()
-	if err := cfg.validate(); err != nil {
+	if err := d.Config.validate(); err != nil {
 		return fail(err)
 	}
-	t, reply, err := d.fabric().dial(ctx, laddr.addrPort(), raddr.addrPort(), cfg, encodeHello(cfg))
+	nw := d.network()
+	s, err := nw.socket(domain(raddr))
 	if err != nil {
-		var rej *cm.RejectedError
-		if errors.As(err, &rej) {
-			err = rejectedError(rej)
+		return fail(err)
+	}
+	if err := d.Config.apply(s); err != nil {
+		s.Close()
+		return fail(err)
+	}
+	if laddr != nil {
+		if err := s.Bind(laddr.addrPort()); err != nil {
+			s.Close()
+			return fail(err)
 		}
+	}
+	if err := s.SetNonblock(true); err != nil {
+		s.Close()
 		return fail(err)
 	}
-	negotiated, err := acceptReply(cfg, reply)
-	if err != nil {
-		t.close()
+	if err := nw.attach(s); err != nil {
+		s.Close()
 		return fail(err)
 	}
-	return newConn(t, negotiated), nil
+	if err := connect(ctx, nw, s, raddr); err != nil {
+		nw.detach(s)
+		s.Close()
+		return fail(err)
+	}
+	return newConn(nw, s), nil
+}
+
+// connect starts a non-blocking connect to raddr and waits for its end, or
+// for ctx, through the poller; s is attached.
+func connect(ctx context.Context, nw network, s socket, raddr *Addr) error {
+	err := s.Connect(raddr.addrPort())
+	if !errors.Is(err, errInProgress) {
+		return err
+	}
+	ready, cancel := nw.wait(s, rsocket.PollOut)
+	select {
+	case <-ready:
+		return s.SocketError()
+	case <-ctx.Done():
+		cancel()
+		return ctx.Err()
+	}
 }
 
 // withDeadline bounds ctx by the Dialer's Timeout and Deadline; the error of
@@ -117,29 +145,9 @@ func (d *Dialer) withDeadline(ctx context.Context) (context.Context, context.Can
 	return context.WithDeadline(ctx, deadline)
 }
 
-func (d *Dialer) fabric() fabric {
-	if d.fab != nil {
-		return d.fab
+func (d *Dialer) network() network {
+	if d.nw != nil {
+		return d.nw
 	}
-	return platformFabric()
-}
-
-// acceptReply checks the listener's reply against our proposal and returns
-// the negotiated configuration.
-func acceptReply(cfg Config, reply []byte) (Config, error) {
-	h, err := decodeHello(reply)
-	if err != nil {
-		return Config{}, err
-	}
-	switch {
-	case h.version != protocolVersion:
-		return Config{}, fmt.Errorf("%w: peer replied with protocol version %d, want %d", ErrProtocol, h.version, protocolVersion)
-	case h.messageSize < minMessageSize || int(h.messageSize) > cfg.MessageSize:
-		return Config{}, fmt.Errorf("%w: peer replied with message size %d after a proposal of %d", ErrProtocol, h.messageSize, cfg.MessageSize)
-	case h.receiveDepth < 1 || int(h.receiveDepth) > cfg.ReceiveDepth:
-		return Config{}, fmt.Errorf("%w: peer replied with receive depth %d after a proposal of %d", ErrProtocol, h.receiveDepth, cfg.ReceiveDepth)
-	}
-	cfg.MessageSize = int(h.messageSize)
-	cfg.ReceiveDepth = int(h.receiveDepth)
-	return cfg, nil
+	return platformNetwork()
 }

@@ -4,9 +4,10 @@ package rdma
 
 import "syscall"
 
-// Errors reported with the errno a socket would produce; Plan 9 has no
-// ECONNRESET or EPIPE.
+// Errors of the socket layer, with the errno rsockets use; Plan 9 has no
+// errnos.
 var (
-	errConnReset error = syscall.NewError("connection reset by peer")
-	errPipe      error = syscall.NewError("broken pipe")
+	errAgain      error = syscall.NewError("resource temporarily unavailable")
+	errInProgress error = syscall.NewError("operation now in progress")
+	errPipe       error = syscall.NewError("broken pipe")
 )

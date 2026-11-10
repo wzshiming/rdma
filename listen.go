@@ -6,19 +6,22 @@ import (
 	"net"
 	"os"
 	"sync"
+	"time"
+
+	"github.com/wzshiming/rdma/rsocket"
 )
 
 // ListenConfig contains options for listening to an address, like
 // net.ListenConfig. The zero value is ready to use.
 type ListenConfig struct {
-	// Config tunes the buffers of accepted connections; message size and
-	// receive depth are negotiated down with each dialer.
+	// Config sets the rsockets options of the listening socket, which the
+	// accepted connections inherit.
 	Config Config
 	// Backlog bounds the connection requests waiting to be accepted; 0
 	// means the kernel's default.
 	Backlog int
 
-	fab fabric // tests inject a fabric; nil selects the platform's
+	nw network // tests inject a network; nil selects the platform's
 }
 
 // Listen announces on the local network address with the zero ListenConfig.
@@ -48,37 +51,64 @@ func (lc *ListenConfig) Listen(ctx context.Context, network, address string) (*L
 	fail := func(err error) (*Listener, error) {
 		return nil, &net.OpError{Op: "listen", Net: "rdma", Addr: addr, Err: err}
 	}
-	cfg := lc.Config.withDefaults()
-	if err := cfg.validate(); err != nil {
+	if err := lc.Config.validate(); err != nil {
 		return fail(err)
 	}
-	fab := lc.fab
-	if fab == nil {
-		fab = platformFabric()
-	}
-	acc, err := fab.listen(addr.addrPort(), lc.Backlog)
+	nw := lc.network()
+	s, err := nw.socket(domain(addr))
 	if err != nil {
 		return fail(err)
 	}
-	l := &Listener{acc: acc, addr: addrFromAddrPort(acc.addr()), cfg: cfg}
-	if l.addr == nil {
-		l.addr = addr
+	for _, step := range []func() error{
+		func() error { return lc.Config.apply(s) },
+		func() error { return s.Bind(addr.addrPort()) },
+		func() error { return s.Listen(lc.Backlog) },
+		func() error { return s.SetNonblock(true) },
+		func() error { return nw.attach(s) },
+	} {
+		if err := step(); err != nil {
+			s.Close()
+			return fail(err)
+		}
 	}
-	l.ctx, l.cancel = context.WithCancel(context.Background())
+	l := &Listener{nw: nw, s: s, addr: addr, closing: make(chan struct{})}
+	if a, err := s.LocalAddr(); err == nil {
+		if bound := addrFromAddrPort(a); bound != nil {
+			l.addr = bound
+		}
+	}
 	return l, nil
+}
+
+func (lc *ListenConfig) network() network {
+	if lc.nw != nil {
+		return lc.nw
+	}
+	return platformNetwork()
 }
 
 // Listener is an RDMA stream listener. It implements net.Listener.
 type Listener struct {
-	acc  acceptor
+	nw   network
+	s    socket
 	addr *Addr
-	cfg  Config
 
-	ctx    context.Context // ends when the Listener closes
-	cancel context.CancelFunc
+	mu      sync.Mutex
+	closed  bool
+	closing chan struct{} // closed by Close, waking every Accept
+}
 
-	mu     sync.Mutex
-	closed bool
+func (l *Listener) opError(op string, err error) error {
+	if errors.Is(err, os.ErrClosed) {
+		err = net.ErrClosed
+	}
+	return &net.OpError{Op: op, Net: "rdma", Addr: l.addr, Err: err}
+}
+
+func (l *Listener) isClosed() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.closed
 }
 
 // Accept waits for and returns the next connection to the listener. The
@@ -91,57 +121,70 @@ func (l *Listener) Accept() (net.Conn, error) {
 	return c, nil
 }
 
-// AcceptRDMA waits for and returns the next connection to the listener. A
-// dialer that does not speak this protocol version is rejected and never
-// returned; one that disappears during the handshake is dropped silently.
+// AcceptRDMA waits for and returns the next connection to the listener.
 // After Close it returns an error matching net.ErrClosed.
 func (l *Listener) AcceptRDMA() (*Conn, error) {
+	// rpoll sleeps on a listener's event channel, which a new request
+	// stirs, but the librdmacm thread then completes the handshake and
+	// queues the connection without waking pollers, so one interest stays
+	// armed while the queue is asked again now and then.
+	var ready <-chan rsocket.Events
+	cancel := func() {}
+	defer func() { cancel() }()
+	retry := time.NewTimer(acceptRetry)
+	defer retry.Stop()
 	for {
-		req, err := l.acc.accept(l.ctx)
-		if err != nil {
-			if l.ctx.Err() != nil || errors.Is(err, net.ErrClosed) || errors.Is(err, os.ErrClosed) {
-				err = net.ErrClosed
+		if l.isClosed() {
+			return nil, l.opError("accept", net.ErrClosed)
+		}
+		s, _, err := l.s.Accept()
+		if err == nil {
+			// rsockets hand out blocking sockets whatever the listener is.
+			if err := s.SetNonblock(true); err != nil {
+				s.Close()
+				return nil, l.opError("accept", err)
 			}
-			return nil, &net.OpError{Op: "accept", Net: "rdma", Addr: l.addr, Err: err}
-		}
-		h, err := decodeHello(req.hello())
-		if err != nil {
-			req.reject(encodeReject(rejectMalformed))
-			continue
-		}
-		cfg, err := negotiate(l.cfg, h)
-		if err != nil {
-			code := rejectMalformed
-			var rej *rejection
-			if errors.As(err, &rej) {
-				code = rej.code
+			if err := l.nw.attach(s); err != nil {
+				s.Close()
+				return nil, l.opError("accept", err)
 			}
-			req.reject(encodeReject(code))
-			continue
+			return newConn(l.nw, s), nil
 		}
-		t, err := req.accept(l.ctx, cfg, encodeHello(cfg))
-		if err != nil {
-			if l.ctx.Err() != nil {
-				return nil, &net.OpError{Op: "accept", Net: "rdma", Addr: l.addr, Err: net.ErrClosed}
-			}
-			continue
+		if !errors.Is(err, errAgain) {
+			return nil, l.opError("accept", err)
 		}
-		return newConn(t, cfg), nil
+		if ready == nil {
+			ready, cancel = l.nw.wait(l.s, rsocket.PollIn)
+		}
+		retry.Reset(acceptRetry)
+		select {
+		case <-ready:
+			ready = nil
+		case <-retry.C:
+		case <-l.closing:
+			return nil, l.opError("accept", net.ErrClosed)
+		}
 	}
 }
+
+// acceptRetry is how long Accept lets the poller wait before it asks the
+// listening socket again.
+const acceptRetry = 5 * time.Millisecond
 
 // Close stops listening; a blocked Accept returns an error matching
 // net.ErrClosed. Established connections are not affected.
 func (l *Listener) Close() error {
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	if l.closed {
-		return &net.OpError{Op: "close", Net: "rdma", Addr: l.addr, Err: net.ErrClosed}
+		l.mu.Unlock()
+		return l.opError("close", net.ErrClosed)
 	}
 	l.closed = true
-	l.cancel()
-	if err := l.acc.close(); err != nil {
-		return &net.OpError{Op: "close", Net: "rdma", Addr: l.addr, Err: err}
+	close(l.closing)
+	l.mu.Unlock()
+	l.nw.detach(l.s)
+	if err := l.s.Close(); err != nil {
+		return l.opError("close", err)
 	}
 	return nil
 }

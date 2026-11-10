@@ -11,70 +11,72 @@ import (
 	"time"
 )
 
-// TestErrorShapes pins the error contract on the fake fabric: every failure
-// is a *net.OpError on net "rdma" with the right Op, and matches the
-// sentinel a net package user would test for.
+// TestErrorShapes pins the error contract on the fake network: every failure
+// is a *net.OpError on net "rdma" with the right Op and addresses, and
+// matches the sentinel a net package user would test for.
 func TestErrorShapes(t *testing.T) {
-	f := newFakeFabric(t)
-	ln := listenFake(t, f, Config{})
+	nw := newFakeNet(t)
+	ln := listenFake(t, nw, Config{})
 	addr := ln.Addr().String()
-	accepted := acceptAsync(ln)
-	client := dialFake(t, f, Config{}, addr)
-	r := <-accepted
+	acc := acceptAsync(ln)
+	client := dialFake(t, nw, Config{}, addr)
+	r := <-acc
 	if r.err != nil {
-		t.Fatalf("Accept() error: %v", r.err)
+		t.Fatalf("AcceptRDMA() error: %v", r.err)
 	}
-	server := r.c.(*Conn)
+	server := r.c
 	defer server.Close()
 
 	refusedAddr := func() string {
-		dead := listenFake(t, f, Config{})
+		dead := listenFake(t, nw, Config{})
 		a := dead.Addr().String()
 		dead.Close()
 		return a
 	}()
-	closedLn := listenFake(t, f, Config{})
+	closedLn := listenFake(t, nw, Config{})
 	closedLn.Close()
 
-	timedOut, _ := fakePipe(t, f, Config{})
-	defer timedOut.Close()
+	timedOut, _ := fakePipe(t, nw, Config{})
 	timedOut.SetDeadline(time.Now().Add(-time.Second))
 
-	shut, shutPeer := fakePipe(t, f, Config{})
-	defer shutPeer.Close()
-	defer shut.Close()
+	shut, _ := fakePipe(t, nw, Config{})
 	if err := shut.CloseWrite(); err != nil {
 		t.Fatalf("CloseWrite() error: %v", err)
 	}
 
-	closed, closedPeer := fakePipe(t, f, Config{})
-	defer closedPeer.Close()
+	closed, _ := fakePipe(t, nw, Config{})
 	if err := closed.Close(); err != nil {
 		t.Fatalf("Close() error: %v", err)
 	}
-
-	reset, resetPeer := fakePipe(t, f, Config{})
-	defer reset.Close()
-	resetPeer.t.close() // the peer vanished without sending EOF
 
 	tests := []struct {
 		name    string
 		call    func() error
 		op      string
+		addr    string // the OpError's Addr, "" for nil
 		target  error
 		timeout bool
 	}{
-		{"dial refused", func() error { _, err := (&Dialer{fab: f}).Dial("rdma", refusedAddr); return err }, "dial", syscall.ECONNREFUSED, false},
-		{"accept closed", func() error { _, err := closedLn.Accept(); return err }, "accept", net.ErrClosed, false},
-		{"read closed", func() error { _, err := closed.Read(make([]byte, 1)); return err }, "read", net.ErrClosed, false},
-		{"write closed", func() error { _, err := closed.Write([]byte("x")); return err }, "write", net.ErrClosed, false},
-		{"close closed", func() error { return closed.Close() }, "close", net.ErrClosed, false},
-		{"set deadline closed", func() error { return closed.SetDeadline(time.Time{}) }, "set", net.ErrClosed, false},
-		{"read timeout", func() error { _, err := timedOut.Read(make([]byte, 1)); return err }, "read", os.ErrDeadlineExceeded, true},
-		{"write timeout", func() error { _, err := timedOut.Write([]byte("x")); return err }, "write", os.ErrDeadlineExceeded, true},
-		{"write after CloseWrite", func() error { _, err := shut.Write([]byte("x")); return err }, "write", syscall.EPIPE, false},
-		{"read from vanished peer", func() error { _, err := reset.Read(make([]byte, 1)); return err }, "read", syscall.ECONNRESET, false},
-		{"write to vanished peer", func() error { _, err := reset.Write([]byte("x")); return err }, "write", syscall.ECONNRESET, false},
+		{"dial refused", func() error { _, err := (&Dialer{nw: nw}).Dial("rdma", refusedAddr); return err }, "dial", refusedAddr, syscall.ECONNREFUSED, false},
+		{"dial negative config", func() error {
+			_, err := (&Dialer{Config: Config{SendQueueSize: -1}, nw: nw}).Dial("rdma", addr)
+			return err
+		}, "dial", addr, errConfig, false},
+		{"listen negative config", func() error {
+			lc := ListenConfig{Config: Config{ReceiveBufferSize: -1}, nw: nw}
+			_, err := lc.Listen(t.Context(), "rdma", "10.99.0.1:0")
+			return err
+		}, "listen", "10.99.0.1:0", errConfig, false},
+		{"accept closed", func() error { _, err := closedLn.Accept(); return err }, "accept", closedLn.Addr().String(), net.ErrClosed, false},
+		{"listener close closed", func() error { return closedLn.Close() }, "close", closedLn.Addr().String(), net.ErrClosed, false},
+		{"read closed", func() error { _, err := closed.Read(make([]byte, 1)); return err }, "read", closed.RemoteAddr().String(), net.ErrClosed, false},
+		{"write closed", func() error { _, err := closed.Write([]byte("x")); return err }, "write", closed.RemoteAddr().String(), net.ErrClosed, false},
+		{"close closed", func() error { return closed.Close() }, "close", closed.RemoteAddr().String(), net.ErrClosed, false},
+		{"close write closed", func() error { return closed.CloseWrite() }, "close", closed.RemoteAddr().String(), net.ErrClosed, false},
+		{"set deadline closed", func() error { return closed.SetDeadline(time.Time{}) }, "set", closed.RemoteAddr().String(), net.ErrClosed, false},
+		{"read timeout", func() error { _, err := timedOut.Read(make([]byte, 1)); return err }, "read", timedOut.RemoteAddr().String(), os.ErrDeadlineExceeded, true},
+		{"write timeout", func() error { _, err := timedOut.Write([]byte("x")); return err }, "write", timedOut.RemoteAddr().String(), os.ErrDeadlineExceeded, true},
+		{"write after CloseWrite", func() error { _, err := shut.Write([]byte("x")); return err }, "write", shut.RemoteAddr().String(), syscall.EPIPE, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -86,6 +88,9 @@ func TestErrorShapes(t *testing.T) {
 			if opErr.Op != tt.op || opErr.Net != "rdma" {
 				t.Errorf("OpError{Op: %q, Net: %q}, want Op %q on net rdma", opErr.Op, opErr.Net, tt.op)
 			}
+			if got := addrString(opErr.Addr); got != tt.addr {
+				t.Errorf("OpError.Addr = %q, want %q", got, tt.addr)
+			}
 			if !errors.Is(err, tt.target) {
 				t.Errorf("errors.Is(%v, %v) = false", err, tt.target)
 			}
@@ -94,8 +99,21 @@ func TestErrorShapes(t *testing.T) {
 			}
 		})
 	}
-	// The vanished peer's EOF would have made Read return io.EOF instead.
+	// The connection the table did not touch still works.
 	if _, err := client.Write([]byte("still fine")); err != nil {
 		t.Errorf("Write on the healthy connection error: %v", err)
 	}
+	// Source and Addr of a connection's errors are its two ends.
+	_, err := closed.Read(make([]byte, 1))
+	var opErr *net.OpError
+	if !errors.As(err, &opErr) || addrString(opErr.Source) != closed.LocalAddr().String() {
+		t.Errorf("read error Source = %v, want the local address %v", opErr.Source, closed.LocalAddr())
+	}
+}
+
+func addrString(a net.Addr) string {
+	if a == nil {
+		return ""
+	}
+	return a.String()
 }

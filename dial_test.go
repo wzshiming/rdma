@@ -1,79 +1,31 @@
 package rdma
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"io"
 	"net"
-	"net/netip"
 	"runtime"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
-
-	"github.com/wzshiming/rdma/cm"
 )
 
-// listenFake starts a Listener on the fake fabric.
-func listenFake(t *testing.T, f *fakeFabric, cfg Config) *Listener {
-	t.Helper()
-	lc := ListenConfig{Config: cfg, fab: f}
-	ln, err := lc.Listen(context.Background(), "rdma", "10.99.0.1:0")
-	if err != nil {
-		t.Fatalf("Listen() error: %v", err)
-	}
-	t.Cleanup(func() { ln.Close() })
-	return ln
-}
-
-// dialFake dials addr on the fake fabric.
-func dialFake(t *testing.T, f *fakeFabric, cfg Config, addr string) *Conn {
-	t.Helper()
-	d := Dialer{Config: cfg, fab: f}
-	c, err := d.Dial("rdma", addr)
-	if err != nil {
-		t.Fatalf("Dial(%s) error: %v", addr, err)
-	}
-	t.Cleanup(func() { c.Close() })
-	return c
-}
-
-// acceptAsync runs ln.Accept in the background.
-func acceptAsync(ln *Listener) <-chan struct {
-	c   net.Conn
-	err error
-} {
-	ch := make(chan struct {
-		c   net.Conn
-		err error
-	}, 1)
-	go func() {
-		c, err := ln.Accept()
-		ch <- struct {
-			c   net.Conn
-			err error
-		}{c, err}
-	}()
-	return ch
-}
-
-func TestDialAndListenOnFakeFabric(t *testing.T) {
-	f := newFakeFabric(t)
-	ln := listenFake(t, f, Config{})
+func TestDialAndListenOnFakeNetwork(t *testing.T) {
+	nw := newFakeNet(t)
+	ln := listenFake(t, nw, Config{})
 	addr, ok := ln.Addr().(*Addr)
 	if !ok || addr.Port == 0 || addr.IP.String() != "10.99.0.1" {
 		t.Fatalf("Listener.Addr() = %v (%T), want *Addr 10.99.0.1 with a real port", ln.Addr(), ln.Addr())
 	}
-	accepted := acceptAsync(ln)
-	client := dialFake(t, f, Config{}, addr.String())
-	r := <-accepted
+	acc := acceptAsync(ln)
+	client := dialFake(t, nw, Config{}, addr.String())
+	r := <-acc
 	if r.err != nil {
-		t.Fatalf("Accept() error: %v", r.err)
+		t.Fatalf("AcceptRDMA() error: %v", r.err)
 	}
-	server, ok := r.c.(*Conn)
-	if !ok {
-		t.Fatalf("Accept() returned a %T, want *Conn", r.c)
-	}
+	server := r.c
 	defer server.Close()
 	if client.RemoteAddr().String() != addr.String() || server.LocalAddr().String() != addr.String() {
 		t.Errorf("client remote %v, server local %v; want both %v", client.RemoteAddr(), server.LocalAddr(), addr)
@@ -91,103 +43,71 @@ func TestDialAndListenOnFakeFabric(t *testing.T) {
 	}
 }
 
-func TestDialNegotiatesTheSmallerConfig(t *testing.T) {
-	f := newFakeFabric(t)
-	ln := listenFake(t, f, Config{MessageSize: 16384, ReceiveDepth: 32})
-	accepted := acceptAsync(ln)
-	client := dialFake(t, f, Config{MessageSize: 4096, ReceiveDepth: 64, SendDepth: 3}, ln.Addr().String())
-	r := <-accepted
+// TestConfigReachesTheSockets checks that every Config field is set on the
+// dialing socket and on the listening socket, which the accepted socket
+// inherits, and that zero fields are left alone.
+func TestConfigReachesTheSockets(t *testing.T) {
+	nw := newFakeNet(t)
+	full := Config{SendBufferSize: 1 << 16, ReceiveBufferSize: 1 << 17, SendQueueSize: 128, ReceiveQueueSize: 256, MaxInline: 128}
+	want := fakeOptions{sndbuf: 1 << 16, rcvbuf: 1 << 17, sqsize: 128, rqsize: 256, inline: 128}
+	ln := listenFake(t, nw, full)
+	if got := nw.options(ln.s); got != want {
+		t.Errorf("listening socket options = %+v, want %+v", got, want)
+	}
+	acc := acceptAsync(ln)
+	client := dialFake(t, nw, Config{SendBufferSize: 4096}, ln.Addr().String())
+	if got := nw.options(client.s); got != (fakeOptions{sndbuf: 4096}) {
+		t.Errorf("dialing socket options = %+v, want only sndbuf 4096", got)
+	}
+	r := <-acc
 	if r.err != nil {
-		t.Fatalf("Accept() error: %v", r.err)
+		t.Fatalf("AcceptRDMA() error: %v", r.err)
 	}
-	server := r.c.(*Conn)
-	defer server.Close()
-	for name, c := range map[string]*Conn{"client": client, "server": server} {
-		if c.msgSize != 4096 || c.recvDepth != 32 {
-			t.Errorf("%s negotiated message size %d, receive depth %d; want 4096, 32", name, c.msgSize, c.recvDepth)
-		}
-	}
-	if client.sendDepth != 3 || server.sendDepth != DefaultSendDepth {
-		t.Errorf("send depths = %d, %d; want the local values 3 and %d", client.sendDepth, server.sendDepth, DefaultSendDepth)
+	defer r.c.Close()
+	if got := nw.options(r.c.s); got != want {
+		t.Errorf("accepted socket options = %+v, want the listener's %+v", got, want)
 	}
 }
 
-func TestListenerRejectsForeignVersionAndKeepsServing(t *testing.T) {
-	f := newFakeFabric(t)
-	ln := listenFake(t, f, Config{})
-	accepted := acceptAsync(ln)
-
-	// A dialer speaking the next protocol version is turned away with our
-	// reject frame...
-	cfg := Config{}.withDefaults()
-	hello := encodeHello(cfg)
-	hello[4] = protocolVersion + 1
-	_, _, err := f.dial(context.Background(), netip.AddrPort{}, ln.addr.addrPort(), cfg, hello)
-	var rej *cm.RejectedError
-	if !errors.As(err, &rej) || len(rej.PrivateData) != cm.MaxRejectPrivateData || !bytes.Equal(rej.PrivateData[:rejectSize], encodeReject(rejectVersion)) {
-		t.Fatalf("foreign dial error = %v, want a *cm.RejectedError carrying %x", err, encodeReject(rejectVersion))
-	}
-	// ...and something that is not our handshake at all likewise...
-	_, _, err = f.dial(context.Background(), netip.AddrPort{}, ln.addr.addrPort(), cfg, []byte("GET / HTTP/1.0"))
-	if !errors.As(err, &rej) || !bytes.Equal(rej.PrivateData[:rejectSize], encodeReject(rejectMalformed)) {
-		t.Fatalf("malformed dial error = %v, want a *cm.RejectedError carrying %x", err, encodeReject(rejectMalformed))
-	}
-	// ...while the listener goes on serving well-behaved dialers.
-	client := dialFake(t, f, Config{}, ln.Addr().String())
-	r := <-accepted
-	if r.err != nil {
-		t.Fatalf("Accept() error: %v", r.err)
-	}
-	r.c.Close()
-	client.Close()
-}
-
-func TestDialSurfacesAVersionRejectAsProtocolError(t *testing.T) {
-	f := newFakeFabric(t)
-	acc, err := f.listen(netip.AddrPortFrom(fakeIP, 0), 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer acc.close()
-	go func() {
-		req, err := acc.accept(context.Background())
-		if err != nil {
-			t.Errorf("fake accept: %v", err)
-			return
-		}
-		frame := encodeReject(rejectVersion)
-		frame[4] = protocolVersion + 1
-		req.reject(frame)
-	}()
-	d := Dialer{fab: f}
-	c, err := d.Dial("rdma", acc.addr().String())
+func TestDialRefusedWithoutListener(t *testing.T) {
+	nw := newFakeNet(t)
+	dead := listenFake(t, nw, Config{})
+	addr := dead.Addr().String()
+	dead.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	d := Dialer{nw: nw}
+	c, err := d.DialContext(ctx, "rdma", addr)
 	if err == nil {
 		c.Close()
-		t.Fatal("Dial() to a rejecting listener succeeded")
+		t.Fatalf("DialContext(%s) succeeded without a listener", addr)
 	}
 	var opErr *net.OpError
-	if !errors.As(err, &opErr) || opErr.Op != "dial" || !errors.Is(err, ErrProtocol) {
-		t.Fatalf("Dial() error = %v, want a dial *net.OpError matching ErrProtocol", err)
+	if !errors.As(err, &opErr) || opErr.Op != "dial" || !errors.Is(err, errRefused) {
+		t.Fatalf("DialContext(%s) error = %v, want a dial *net.OpError with ECONNREFUSED", addr, err)
 	}
-	if !errors.Is(err, errRefused) {
-		t.Errorf("Dial() error = %v, want it to match ECONNREFUSED too, like any reject", err)
+	if opErr.Addr == nil || opErr.Addr.String() != addr {
+		t.Errorf("OpError.Addr = %v, want %s", opErr.Addr, addr)
+	}
+	if nw.openSockets() != 0 {
+		t.Errorf("%d sockets left open by the refused dial", nw.openSockets())
 	}
 }
 
 func TestDialContextCancelReturnsContextError(t *testing.T) {
-	f := newFakeFabric(t)
-	ln := listenFake(t, f, Config{}) // never accepts
+	nw := newFakeNet(t)
+	goroutines := runtime.NumGoroutine()
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
 		time.Sleep(50 * time.Millisecond)
 		cancel()
 	}()
-	d := Dialer{fab: f}
+	d := Dialer{nw: nw}
 	start := time.Now()
-	c, err := d.DialContext(ctx, "rdma", ln.Addr().String())
+	c, err := d.DialContext(ctx, "rdma", fakeNowhere)
 	if err == nil {
 		c.Close()
-		t.Fatal("DialContext() succeeded without an accept")
+		t.Fatal("DialContext() to an unanswered host succeeded")
 	}
 	var opErr *net.OpError
 	if !errors.As(err, &opErr) || opErr.Op != "dial" || !errors.Is(err, context.Canceled) {
@@ -196,17 +116,26 @@ func TestDialContextCancelReturnsContextError(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Errorf("DialContext() took %v to notice the cancel", elapsed)
 	}
+	if open := nw.openSockets(); open != 0 {
+		t.Errorf("%d sockets open after the cancelled dial, want 0", open)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for runtime.NumGoroutine() > goroutines && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if after := runtime.NumGoroutine(); after > goroutines {
+		t.Errorf("goroutines: %d before the dial, %d after its cancel", goroutines, after)
+	}
 }
 
 func TestDialerTimeoutAndDeadline(t *testing.T) {
-	f := newFakeFabric(t)
-	ln := listenFake(t, f, Config{}) // never accepts
+	nw := newFakeNet(t)
 	for name, d := range map[string]Dialer{
-		"timeout":  {Timeout: 50 * time.Millisecond, fab: f},
-		"deadline": {Deadline: time.Now().Add(50 * time.Millisecond), fab: f},
+		"timeout":  {Timeout: 50 * time.Millisecond, nw: nw},
+		"deadline": {Deadline: time.Now().Add(50 * time.Millisecond), nw: nw},
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := d.Dial("rdma", ln.Addr().String())
+			_, err := d.Dial("rdma", fakeNowhere)
 			var opErr *net.OpError
 			if !errors.As(err, &opErr) || !opErr.Timeout() {
 				t.Fatalf("Dial() error = %v, want a *net.OpError with Timeout() true", err)
@@ -216,10 +145,10 @@ func TestDialerTimeoutAndDeadline(t *testing.T) {
 }
 
 func TestDialerLocalAddrPinsTheSource(t *testing.T) {
-	f := newFakeFabric(t)
-	ln := listenFake(t, f, Config{})
-	accepted := acceptAsync(ln)
-	d := Dialer{LocalAddr: &Addr{IP: net.IPv4(10, 99, 0, 7), Port: 1234}, fab: f}
+	nw := newFakeNet(t)
+	ln := listenFake(t, nw, Config{})
+	acc := acceptAsync(ln)
+	d := Dialer{LocalAddr: &Addr{IP: net.IPv4(10, 99, 0, 7), Port: 1234}, nw: nw}
 	c, err := d.Dial("rdma", ln.Addr().String())
 	if err != nil {
 		t.Fatalf("Dial() error: %v", err)
@@ -228,13 +157,16 @@ func TestDialerLocalAddrPinsTheSource(t *testing.T) {
 	if c.LocalAddr().String() != "10.99.0.7:1234" {
 		t.Errorf("LocalAddr() = %v, want 10.99.0.7:1234", c.LocalAddr())
 	}
-	r := <-accepted
+	r := <-acc
 	if r.err != nil {
-		t.Fatalf("Accept() error: %v", r.err)
+		t.Fatalf("AcceptRDMA() error: %v", r.err)
 	}
-	r.c.Close()
+	defer r.c.Close()
+	if r.c.RemoteAddr().String() != "10.99.0.7:1234" {
+		t.Errorf("peer RemoteAddr() = %v, want the pinned 10.99.0.7:1234", r.c.RemoteAddr())
+	}
 
-	wrong := Dialer{LocalAddr: &net.TCPAddr{IP: net.IPv4(10, 99, 0, 7)}, fab: f}
+	wrong := Dialer{LocalAddr: &net.TCPAddr{IP: net.IPv4(10, 99, 0, 7)}, nw: nw}
 	_, err = wrong.Dial("rdma", ln.Addr().String())
 	var addrErr *net.AddrError
 	if !errors.As(err, &addrErr) {
@@ -242,24 +174,34 @@ func TestDialerLocalAddrPinsTheSource(t *testing.T) {
 	}
 }
 
-func TestInvalidConfigIsReportedBeforeDialing(t *testing.T) {
-	f := newFakeFabric(t)
-	d := Dialer{Config: Config{MessageSize: 100}, fab: f}
-	_, err := d.Dial("rdma", "10.99.0.1:1")
-	var opErr *net.OpError
-	if !errors.As(err, &opErr) || opErr.Op != "dial" || errors.Is(err, errRefused) {
-		t.Errorf("Dial() with MessageSize 100 error = %v, want a dial *net.OpError about the Config", err)
+func TestNegativeConfigIsReportedBeforeDialing(t *testing.T) {
+	nw := newFakeNet(t)
+	for _, cfg := range []Config{
+		{SendBufferSize: -1},
+		{ReceiveBufferSize: -1},
+		{SendQueueSize: -1},
+		{ReceiveQueueSize: -1},
+		{MaxInline: -1},
+	} {
+		d := Dialer{Config: cfg, nw: nw}
+		_, err := d.Dial("rdma", "10.99.0.1:1")
+		var opErr *net.OpError
+		if !errors.As(err, &opErr) || opErr.Op != "dial" || errors.Is(err, errRefused) {
+			t.Errorf("Dial() with %+v error = %v, want a dial *net.OpError about the Config", cfg, err)
+		}
+		lc := ListenConfig{Config: cfg, nw: nw}
+		if _, err = lc.Listen(context.Background(), "rdma", "10.99.0.1:0"); !errors.As(err, &opErr) || opErr.Op != "listen" {
+			t.Errorf("Listen() with %+v error = %v, want a listen *net.OpError", cfg, err)
+		}
 	}
-	lc := ListenConfig{Config: Config{ReceiveDepth: -1}, fab: f}
-	_, err = lc.Listen(context.Background(), "rdma", "10.99.0.1:0")
-	if !errors.As(err, &opErr) || opErr.Op != "listen" {
-		t.Errorf("Listen() with ReceiveDepth -1 error = %v, want a listen *net.OpError", err)
+	if open := nw.openSockets(); open != 0 {
+		t.Errorf("%d sockets created for configurations rejected up front", open)
 	}
 }
 
 func TestListenWildcardAndUnknownNetwork(t *testing.T) {
-	f := newFakeFabric(t)
-	lc := ListenConfig{fab: f}
+	nw := newFakeNet(t)
+	lc := ListenConfig{nw: nw}
 	ln, err := lc.Listen(context.Background(), "rdma", ":0")
 	if err != nil {
 		t.Fatalf("Listen(:0) error: %v", err)
@@ -268,84 +210,39 @@ func TestListenWildcardAndUnknownNetwork(t *testing.T) {
 	if a := ln.Addr().(*Addr); !a.IP.IsUnspecified() || a.Port == 0 {
 		t.Errorf("Listen(:0).Addr() = %v, want the unspecified address with a real port", a)
 	}
+	// A wildcard listener takes dials to any address of its port.
+	acc := acceptAsync(ln)
+	c := dialFake(t, nw, Config{}, net.JoinHostPort(fakeIP.String(), strconv.Itoa(ln.Addr().(*Addr).Port)))
+	defer c.Close()
+	if r := <-acc; r.err != nil {
+		t.Errorf("AcceptRDMA() on the wildcard listener error: %v", r.err)
+	} else {
+		r.c.Close()
+	}
 	if _, err := lc.Listen(context.Background(), "tcp", ":0"); err == nil {
 		t.Error("Listen(tcp) succeeded")
 	}
 	if _, err := Listen("rdma", "10.99.0.1:0"); err == nil && runtime.GOOS != "linux" {
-		t.Error("Listen on the platform fabric succeeded without a device")
-	}
-}
-
-func TestIdleReadDeadlineTimesOutWithinTolerance(t *testing.T) {
-	f := newFakeFabric(t)
-	a, b := fakePipe(t, f, Config{})
-	defer a.Close()
-	defer b.Close()
-	const d = 50 * time.Millisecond
-	a.SetReadDeadline(time.Now().Add(d))
-	start := time.Now()
-	n, err := a.Read(make([]byte, 1))
-	elapsed := time.Since(start)
-	if n != 0 || !errors.Is(err, context.DeadlineExceeded) && !isTimeout(err) {
-		t.Fatalf("Read() = %d, %v; want 0 and a timeout", n, err)
-	}
-	if elapsed < d || elapsed > d+200*time.Millisecond {
-		t.Errorf("Read() timed out after %v, want about %v", elapsed, d)
-	}
-}
-
-func isTimeout(err error) bool {
-	var nerr net.Error
-	return errors.As(err, &nerr) && nerr.Timeout()
-}
-
-func TestCloseWakesBlockedReadAndWrite(t *testing.T) {
-	f := newFakeFabric(t)
-	a, b := fakePipe(t, f, Config{MessageSize: 256, ReceiveDepth: 1, SendDepth: 1})
-	defer b.Close()
-	readErr := make(chan error, 1)
-	go func() {
-		_, err := a.Read(make([]byte, 1))
-		readErr <- err
-	}()
-	writeErr := make(chan error, 1)
-	go func() {
-		// The peer never reads, so the second message waits for a credit.
-		_, err := a.Write(make([]byte, 1000))
-		writeErr <- err
-	}()
-	time.Sleep(50 * time.Millisecond)
-	if err := a.Close(); err != nil {
-		t.Fatalf("Close() error: %v", err)
-	}
-	for name, ch := range map[string]chan error{"Read": readErr, "Write": writeErr} {
-		select {
-		case err := <-ch:
-			if !errors.Is(err, net.ErrClosed) {
-				t.Errorf("%s after Close() error = %v, want net.ErrClosed", name, err)
-			}
-		case <-time.After(5 * time.Second):
-			t.Errorf("%s did not return after Close()", name)
-		}
+		t.Error("Listen on the platform network succeeded without a device")
 	}
 }
 
 func TestListenerCloseUnblocksAccept(t *testing.T) {
-	f := newFakeFabric(t)
-	ln := listenFake(t, f, Config{})
-	accepted := acceptAsync(ln)
+	nw := newFakeNet(t)
+	ln := listenFake(t, nw, Config{})
+	acc := acceptAsync(ln)
 	time.Sleep(20 * time.Millisecond)
 	if err := ln.Close(); err != nil {
 		t.Fatalf("Close() error: %v", err)
 	}
 	select {
-	case r := <-accepted:
+	case r := <-acc:
 		var opErr *net.OpError
 		if !errors.As(r.err, &opErr) || opErr.Op != "accept" || !errors.Is(r.err, net.ErrClosed) {
-			t.Errorf("Accept() after Close() = %v, %v; want an accept *net.OpError with net.ErrClosed", r.c, r.err)
+			t.Errorf("AcceptRDMA() after Close() = %v, %v; want an accept *net.OpError with net.ErrClosed", r.c, r.err)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("Accept() did not return after Close()")
+		t.Fatal("AcceptRDMA() did not return after Close()")
 	}
 	if _, err := ln.Accept(); !errors.Is(err, net.ErrClosed) {
 		t.Errorf("second Accept() error = %v, want net.ErrClosed", err)
@@ -355,43 +252,17 @@ func TestListenerCloseUnblocksAccept(t *testing.T) {
 	}
 }
 
-func TestResourcesReturnToBaseline(t *testing.T) {
-	f := newFakeFabric(t)
-	ln := listenFake(t, f, Config{})
-	before := runtime.NumGoroutine()
-	const n = 16
-	for range n {
-		accepted := acceptAsync(ln)
-		d := Dialer{fab: f}
-		client, err := d.Dial("rdma", ln.Addr().String())
-		if err != nil {
-			t.Fatalf("Dial() error: %v", err)
-		}
-		r := <-accepted
-		if r.err != nil {
-			t.Fatalf("Accept() error: %v", r.err)
-		}
-		if _, err := client.Write([]byte("x")); err != nil {
-			t.Fatalf("Write error: %v", err)
-		}
-		if _, err := r.c.Read(make([]byte, 1)); err != nil {
-			t.Fatalf("Read error: %v", err)
-		}
-		if err := client.Close(); err != nil {
-			t.Errorf("client Close() error: %v", err)
-		}
-		if err := r.c.Close(); err != nil {
-			t.Errorf("server Close() error: %v", err)
-		}
+// TestDialErrorsNameTheirCause checks the messages of the failures a user
+// sees first.
+func TestDialErrorsNameTheirCause(t *testing.T) {
+	nw := newFakeNet(t)
+	d := Dialer{Config: Config{MaxInline: -1}, nw: nw}
+	_, err := d.Dial("rdma", "10.99.0.1:1")
+	if err == nil || !strings.Contains(err.Error(), "MaxInline") {
+		t.Errorf("Dial() with MaxInline -1 error = %v, want it to name the field", err)
 	}
-	if got := f.registered.Load(); got != 0 {
-		t.Errorf("%d bytes of buffer memory still registered after closing %d connections", got, n)
-	}
-	deadline := time.Now().Add(5 * time.Second)
-	for runtime.NumGoroutine() > before && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
-	if after := runtime.NumGoroutine(); after > before {
-		t.Errorf("goroutines: %d before, %d after closing %d connections", before, after, n)
+	_, err = d.Dial("rdma", ":1")
+	if err == nil || !strings.Contains(err.Error(), "missing IP address") {
+		t.Errorf("Dial() without a host error = %v, want \"missing IP address\"", err)
 	}
 }

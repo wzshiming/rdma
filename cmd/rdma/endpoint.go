@@ -12,20 +12,26 @@ import (
 )
 
 // endpoint holds the flags the measurement commands share: the side to take
-// and the connection's buffers.
+// and the rsockets options of the connections.
 type endpoint struct {
 	listen  string
 	connect string
-	msgSize int
-	depth   int
+	sndbuf  int
+	rcvbuf  int
+	sqsize  int
+	rqsize  int
+	inline  int
 	keep    bool
 }
 
 func (e *endpoint) bind(fs *flag.FlagSet) {
 	fs.StringVar(&e.listen, "listen", "", "serve at this `ip:port`; port 0 picks a free one")
 	fs.StringVar(&e.connect, "connect", "", "measure against the server at this `host:port`")
-	fs.IntVar(&e.msgSize, "msgsize", 0, "message size on the wire in `bytes`, rdma.Config.MessageSize (0: the default, 16 KiB)")
-	fs.IntVar(&e.depth, "depth", 0, "`messages` in flight per direction, rdma.Config.ReceiveDepth and SendDepth (0: the default, 32)")
+	fs.IntVar(&e.sndbuf, "sndbuf", 0, "send buffer size in `bytes`, rdma.Config.SendBufferSize (0: the rsockets default)")
+	fs.IntVar(&e.rcvbuf, "rcvbuf", 0, "receive buffer size in `bytes`, rdma.Config.ReceiveBufferSize (0: the rsockets default)")
+	fs.IntVar(&e.sqsize, "sqsize", 0, "send queue depth in `entries`, rdma.Config.SendQueueSize (0: the rsockets default)")
+	fs.IntVar(&e.rqsize, "rqsize", 0, "receive queue depth in `entries`, rdma.Config.ReceiveQueueSize (0: the rsockets default)")
+	fs.IntVar(&e.inline, "inline", 0, "largest send posted inline in `bytes`, rdma.Config.MaxInline (0: the rsockets default)")
 	fs.BoolVar(&e.keep, "keep", false, "keep serving after the first client run")
 }
 
@@ -37,17 +43,21 @@ func (e *endpoint) check() error {
 		return errors.New("-listen and -connect are mutually exclusive")
 	case e.keep && e.listen == "":
 		return errors.New("-keep applies to -listen")
-	case e.msgSize < 0:
-		return errors.New("-msgsize must not be negative")
-	case e.depth < 0:
-		return errors.New("-depth must not be negative")
+	}
+	for _, f := range []struct {
+		name  string
+		value int
+	}{{"sndbuf", e.sndbuf}, {"rcvbuf", e.rcvbuf}, {"sqsize", e.sqsize}, {"rqsize", e.rqsize}, {"inline", e.inline}} {
+		if f.value < 0 {
+			return fmt.Errorf("-%s must not be negative", f.name)
+		}
 	}
 	return nil
 }
 
-// config returns the connection buffers the flags ask for.
+// config returns the rsockets options the flags ask for.
 func (e *endpoint) config() rdma.Config {
-	return rdma.Config{MessageSize: e.msgSize, ReceiveDepth: e.depth, SendDepth: e.depth}
+	return rdma.Config{SendBufferSize: e.sndbuf, ReceiveBufferSize: e.rcvbuf, SendQueueSize: e.sqsize, ReceiveQueueSize: e.rqsize, MaxInline: e.inline}
 }
 
 // dial connects to the server named by -connect.

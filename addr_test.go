@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"strings"
 	"testing"
 )
 
@@ -104,28 +105,28 @@ func TestResolveAddrHonoursContext(t *testing.T) {
 	}
 }
 
-func TestConfigDefaultsAndValidation(t *testing.T) {
-	def := Config{}.withDefaults()
-	if def != (Config{MessageSize: 16 << 10, ReceiveDepth: 32, SendDepth: 32}) {
-		t.Errorf("zero Config defaults = %+v", def)
+func TestConfigValidation(t *testing.T) {
+	good := []Config{
+		{},
+		{SendBufferSize: 4096, ReceiveBufferSize: 1 << 20, SendQueueSize: 1, ReceiveQueueSize: 2, MaxInline: 64},
+		{MaxInline: 0},
 	}
-	set := Config{MessageSize: 4096, ReceiveDepth: 1, SendDepth: 2, MaxInline: 64}
-	if got := set.withDefaults(); got != set {
-		t.Errorf("withDefaults() changed an explicit Config: %+v", got)
-	}
-	bad := []Config{
-		{MessageSize: 255},
-		{MessageSize: -1},
-		{ReceiveDepth: -1},
-		{SendDepth: -1},
-		{MaxInline: -1},
-	}
-	for _, c := range bad {
-		if err := c.withDefaults().validate(); err == nil {
-			t.Errorf("validate(%+v) = nil, want an error", c)
+	for _, c := range good {
+		if err := c.validate(); err != nil {
+			t.Errorf("validate(%+v) error: %v", c, err)
 		}
 	}
-	if err := def.validate(); err != nil {
-		t.Errorf("validate(defaults) error: %v", err)
+	bad := map[string]Config{
+		"SendBufferSize":    {SendBufferSize: -1},
+		"ReceiveBufferSize": {ReceiveBufferSize: -1},
+		"SendQueueSize":     {SendQueueSize: -1},
+		"ReceiveQueueSize":  {ReceiveQueueSize: -1},
+		"MaxInline":         {MaxInline: -1},
+	}
+	for field, c := range bad {
+		err := c.validate()
+		if err == nil || !errors.Is(err, errConfig) || !strings.Contains(err.Error(), field) {
+			t.Errorf("validate(%+v) = %v, want an error matching errConfig and naming %s", c, err, field)
+		}
 	}
 }

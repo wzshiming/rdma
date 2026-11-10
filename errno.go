@@ -4,8 +4,9 @@ package rdma
 
 import "syscall"
 
-// Errors reported with the errno a socket would produce.
+// Errors of the socket layer, with the errno rsockets use.
 var (
-	errConnReset error = syscall.ECONNRESET // the peer vanished before sending EOF
-	errPipe      error = syscall.EPIPE      // Write after CloseWrite
+	errAgain      error = syscall.EAGAIN      // nothing to do without blocking
+	errInProgress error = syscall.EINPROGRESS // the connect goes on in the background
+	errPipe       error = syscall.EPIPE       // Write after CloseWrite
 )

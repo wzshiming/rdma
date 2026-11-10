@@ -1,10 +1,11 @@
 // Package rdma provides reliable byte streams over RDMA with the vocabulary
 // of the net package.
 //
-// A connection is an RC queue pair driven with SEND and RECV only, so it
-// works over InfiniBand, RoCE and iWARP alike, and it is addressed like TCP:
-// an IP address, which selects the device through rdma_cm, and a port. Dial
-// connects to a listener:
+// A connection is an rsocket, the stream socket of librdmacm (rsocket(7))
+// carried over an RDMA queue pair, so it works over InfiniBand, RoCE and
+// iWARP alike and talks to any rsockets application, and it is addressed
+// like TCP: an IP address, which selects the device through rdma_cm, and a
+// port. Dial connects to a listener:
 //
 //	conn, err := rdma.Dial("rdma", "10.200.0.1:4791")
 //	if err != nil {
@@ -33,27 +34,29 @@
 // the address family; host names are resolved with net.DefaultResolver.
 // *Conn implements net.Conn and adds CloseWrite, *Listener implements
 // net.Listener and adds AcceptRDMA, and Dialer and ListenConfig carry the
-// options, including a Config that sizes the buffers of a connection: its
-// message size and receive depth are negotiated down to the smaller of the
-// two peers' values during the handshake, which rides in the connection
-// manager's private data.
+// options, including a Config with the rsockets knobs of a connection: the
+// sizes of its registered send and receive buffers, the depths of its work
+// queues and the inline threshold. A zero field keeps the rsockets default,
+// which /etc/rdma/rsocket configures for the process. There is no handshake
+// of this package's own: the peer may be rstream, a program run under
+// LD_PRELOAD=librspreload.so, or anything else built on rsockets.
 //
-// Data is copied into registered send buffers by Write and out of registered
-// receive buffers by Read; the number of messages in flight is bounded by
-// credits the receiver grants as its buffers are read, so no message is ever
-// sent without a buffer waiting for it. Each connection pins
-// (SendDepth+ReceiveDepth+2) x MessageSize bytes, about 1 MiB with the
-// defaults, which count against RLIMIT_MEMLOCK. Every wait, for completions
-// and for connection events alike, goes through the Go runtime poller: idle
-// connections neither spin nor occupy threads.
+// Every socket runs in non-blocking mode and one goroutine per process waits
+// for all of them in rpoll, woken through a pipe when a connection starts
+// waiting or closes; a Read or Write that cannot proceed parks its goroutine
+// on a channel until the poller reports the socket ready, so idle connections
+// neither spin nor hold threads. Each connection pins its two registered
+// buffers, about 256 KiB with the defaults, which count against
+// RLIMIT_MEMLOCK.
 //
 // Semantics follow the net package. The peer reads io.EOF once a side has
 // called CloseWrite or Close and everything written before has been read.
 // Close wakes blocked Reads and Writes with net.ErrClosed, deadlines expire
 // with os.ErrDeadlineExceeded (Timeout reports true), and every error is a
 // *net.OpError on net "rdma": errors.Is matches syscall.ECONNREFUSED when
-// nobody listens, syscall.ECONNRESET when the peer vanished without sending
-// EOF, syscall.ETIMEDOUT when the transport's retries ran out, ErrProtocol
-// when the peer speaks another protocol version, and errors.ErrUnsupported on
-// platforms without librdmacm, where the package still compiles.
+// nobody listens, and errors.ErrUnsupported on platforms without librdmacm,
+// where the package still compiles. Close and CloseWrite return at once
+// while the peer is alive; when it has vanished, rsockets wait for the posted
+// sends to be given up, which takes the transport's retry timeout, several
+// seconds.
 package rdma

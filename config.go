@@ -1,71 +1,78 @@
 package rdma
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
-// Config tunes the buffers of a connection. The zero value of each field
-// selects its default.
+// Config carries the rsockets options of a connection. The zero value of a
+// field leaves the option alone, so the connection gets the rsockets
+// default, which the files under /etc/rdma/rsocket (mem_default,
+// wmem_default, sqsize_default, rqsize_default, inline_default) set for the
+// whole process. A Dialer's Config applies to the socket it dials with, a
+// ListenConfig's to the listening socket and, by inheritance, to every
+// connection it accepts.
 type Config struct {
-	// MessageSize is the size in bytes of one message on the wire, header
-	// included, and so of each registered buffer; it is negotiated down to
-	// the smaller of the two peers' values. Default 16 KiB, minimum 256.
-	MessageSize int
-	// ReceiveDepth is the number of messages the peer may have in flight
-	// toward this end, each backed by a posted receive buffer; it is
-	// negotiated down to the smaller of the two peers' values. Default 32.
-	ReceiveDepth int
-	// SendDepth is the number of messages this end may have in flight before
-	// Write waits for a send completion. Default 32.
-	SendDepth int
-	// MaxInline is the largest message the queue pair is asked to send
-	// inline. 0 accepts whatever the device grants; the value is never
-	// required.
+	// SendBufferSize is the size in bytes of the registered send buffer
+	// (SO_SNDBUF), which rsockets double like the kernel does. Default 128
+	// KiB.
+	SendBufferSize int
+	// ReceiveBufferSize is the size in bytes of the registered receive
+	// buffer (SO_RCVBUF), doubled likewise; the peer may have this much in
+	// flight before it waits. Default 128 KiB.
+	ReceiveBufferSize int
+	// SendQueueSize is the depth of the send work queue (RDMA_SQSIZE).
+	// Default 384.
+	SendQueueSize int
+	// ReceiveQueueSize is the depth of the receive work queue
+	// (RDMA_RQSIZE). Default 384.
+	ReceiveQueueSize int
+	// MaxInline is the largest send in bytes posted inline (RDMA_INLINE).
+	// Default 64.
 	MaxInline int
 }
 
-// Config defaults.
-const (
-	DefaultMessageSize  = 16 << 10
-	DefaultReceiveDepth = 32
-	DefaultSendDepth    = 32
-)
+// errConfig is the cause of the *net.OpError reported for a Config that no
+// socket could take.
+var errConfig = errors.New("invalid Config")
 
-// minMessageSize is the smallest MessageSize: the header plus a little room.
-const minMessageSize = 256
-
-// withDefaults returns c with every zero field replaced by its default.
-func (c Config) withDefaults() Config {
-	if c.MessageSize == 0 {
-		c.MessageSize = DefaultMessageSize
-	}
-	if c.ReceiveDepth == 0 {
-		c.ReceiveDepth = DefaultReceiveDepth
-	}
-	if c.SendDepth == 0 {
-		c.SendDepth = DefaultSendDepth
-	}
-	return c
-}
-
-// validate rejects values no device could serve; device limits are checked
-// when the connection is set up.
+// validate rejects negative fields before a socket is created.
 func (c Config) validate() error {
-	switch {
-	case c.MessageSize < minMessageSize:
-		return fmt.Errorf("rdma: MessageSize %d is below the minimum of %d", c.MessageSize, minMessageSize)
-	case c.MessageSize > maxMessageSize:
-		return fmt.Errorf("rdma: MessageSize %d exceeds the maximum of %d", c.MessageSize, maxMessageSize)
-	case c.ReceiveDepth < 1 || c.ReceiveDepth > maxDepth:
-		return fmt.Errorf("rdma: ReceiveDepth %d is not between 1 and %d", c.ReceiveDepth, maxDepth)
-	case c.SendDepth < 1 || c.SendDepth > maxDepth:
-		return fmt.Errorf("rdma: SendDepth %d is not between 1 and %d", c.SendDepth, maxDepth)
-	case c.MaxInline < 0:
-		return fmt.Errorf("rdma: MaxInline %d is negative", c.MaxInline)
+	for _, f := range []struct {
+		name  string
+		value int
+	}{
+		{"SendBufferSize", c.SendBufferSize},
+		{"ReceiveBufferSize", c.ReceiveBufferSize},
+		{"SendQueueSize", c.SendQueueSize},
+		{"ReceiveQueueSize", c.ReceiveQueueSize},
+		{"MaxInline", c.MaxInline},
+	} {
+		if f.value < 0 {
+			return fmt.Errorf("%w: %s %d is negative", errConfig, f.name, f.value)
+		}
 	}
 	return nil
 }
 
-// Bounds that keep the handshake fields and buffer sizes in range.
-const (
-	maxMessageSize = 1 << 30
-	maxDepth       = 1 << 16
-)
+// apply sets every non-zero field on s, which must not be connected or
+// listening yet.
+func (c Config) apply(s socket) error {
+	for _, o := range []struct {
+		value int
+		set   func(int) error
+	}{
+		{c.SendBufferSize, s.SetSendBuffer},
+		{c.ReceiveBufferSize, s.SetReceiveBuffer},
+		{c.SendQueueSize, s.SetSendQueueSize},
+		{c.ReceiveQueueSize, s.SetReceiveQueueSize},
+		{c.MaxInline, s.SetInline},
+	} {
+		if o.value != 0 {
+			if err := o.set(o.value); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}

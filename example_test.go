@@ -50,13 +50,13 @@ func ExampleListen() {
 	}
 }
 
-// ExampleDialer dials with a deadline, a pinned source address and buffers
-// sized for small messages, then closes its sending side and reads the reply.
+// ExampleDialer dials with a deadline, a pinned source address and small
+// buffers and queues, then closes its sending side and reads the reply.
 func ExampleDialer() {
 	d := rdma.Dialer{
 		Timeout:   5 * time.Second,
 		LocalAddr: &rdma.Addr{IP: net.ParseIP("10.200.0.2")},
-		Config:    rdma.Config{MessageSize: 4096, ReceiveDepth: 16, SendDepth: 16},
+		Config:    rdma.Config{SendBufferSize: 16 << 10, ReceiveBufferSize: 16 << 10, SendQueueSize: 16, ReceiveQueueSize: 16},
 	}
 	conn, err := d.DialContext(context.Background(), "rdma4", "10.200.0.1:4791")
 	if err != nil {

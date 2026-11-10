@@ -25,7 +25,7 @@ func TestStubUnsupported(t *testing.T) {
 			return err
 		}},
 		{"Dialer", "dial", func() error {
-			d := rdma.Dialer{Config: rdma.Config{MessageSize: 4096}}
+			d := rdma.Dialer{Config: rdma.Config{SendBufferSize: 4096}}
 			_, err := d.Dial("rdma", "10.200.0.1:4791")
 			return err
 		}},
