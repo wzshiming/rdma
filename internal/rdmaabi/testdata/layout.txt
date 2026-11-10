@@ -1,0 +1,252 @@
+# Layout of the rdma-core mirrors in bytes: "<C type> <size>" and
+# "<C type>.<member> <offset> <size>". Regenerate with go test -update
+# once TestLayoutsMatchC passes.
+struct ibv_device_attr 232
+struct ibv_device_attr.fw_ver 0 64
+struct ibv_device_attr.node_guid 64 8
+struct ibv_device_attr.sys_image_guid 72 8
+struct ibv_device_attr.max_mr_size 80 8
+struct ibv_device_attr.page_size_cap 88 8
+struct ibv_device_attr.vendor_id 96 4
+struct ibv_device_attr.vendor_part_id 100 4
+struct ibv_device_attr.hw_ver 104 4
+struct ibv_device_attr.max_qp 108 4
+struct ibv_device_attr.max_qp_wr 112 4
+struct ibv_device_attr.device_cap_flags 116 4
+struct ibv_device_attr.max_sge 120 4
+struct ibv_device_attr.max_sge_rd 124 4
+struct ibv_device_attr.max_cq 128 4
+struct ibv_device_attr.max_cqe 132 4
+struct ibv_device_attr.max_mr 136 4
+struct ibv_device_attr.max_pd 140 4
+struct ibv_device_attr.max_qp_rd_atom 144 4
+struct ibv_device_attr.max_ee_rd_atom 148 4
+struct ibv_device_attr.max_res_rd_atom 152 4
+struct ibv_device_attr.max_qp_init_rd_atom 156 4
+struct ibv_device_attr.max_ee_init_rd_atom 160 4
+struct ibv_device_attr.atomic_cap 164 4
+struct ibv_device_attr.max_ee 168 4
+struct ibv_device_attr.max_rdd 172 4
+struct ibv_device_attr.max_mw 176 4
+struct ibv_device_attr.max_raw_ipv6_qp 180 4
+struct ibv_device_attr.max_raw_ethy_qp 184 4
+struct ibv_device_attr.max_mcast_grp 188 4
+struct ibv_device_attr.max_mcast_qp_attach 192 4
+struct ibv_device_attr.max_total_mcast_qp_attach 196 4
+struct ibv_device_attr.max_ah 200 4
+struct ibv_device_attr.max_fmr 204 4
+struct ibv_device_attr.max_map_per_fmr 208 4
+struct ibv_device_attr.max_srq 212 4
+struct ibv_device_attr.max_srq_wr 216 4
+struct ibv_device_attr.max_srq_sge 220 4
+struct ibv_device_attr.max_pkeys 224 2
+struct ibv_device_attr.local_ca_ack_delay 226 1
+struct ibv_device_attr.phys_port_cnt 227 1
+struct ibv_port_attr 56
+struct ibv_port_attr.state 0 4
+struct ibv_port_attr.max_mtu 4 4
+struct ibv_port_attr.active_mtu 8 4
+struct ibv_port_attr.gid_tbl_len 12 4
+struct ibv_port_attr.port_cap_flags 16 4
+struct ibv_port_attr.max_msg_sz 20 4
+struct ibv_port_attr.bad_pkey_cntr 24 4
+struct ibv_port_attr.qkey_viol_cntr 28 4
+struct ibv_port_attr.pkey_tbl_len 32 2
+struct ibv_port_attr.lid 34 2
+struct ibv_port_attr.sm_lid 36 2
+struct ibv_port_attr.lmc 38 1
+struct ibv_port_attr.max_vl_num 39 1
+struct ibv_port_attr.sm_sl 40 1
+struct ibv_port_attr.subnet_timeout 41 1
+struct ibv_port_attr.init_type_reply 42 1
+struct ibv_port_attr.active_width 43 1
+struct ibv_port_attr.active_speed 44 1
+struct ibv_port_attr.phys_state 45 1
+struct ibv_port_attr.link_layer 46 1
+struct ibv_port_attr.flags 47 1
+struct ibv_port_attr.port_cap_flags2 48 2
+struct ibv_port_attr.active_speed_ex 52 4
+struct ibv_gid_entry 32
+struct ibv_gid_entry.gid 0 16
+struct ibv_gid_entry.gid_index 16 4
+struct ibv_gid_entry.port_num 20 4
+struct ibv_gid_entry.gid_type 24 4
+struct ibv_gid_entry.ndev_ifindex 28 4
+union ibv_gid 16
+struct ibv_context_ops 256
+struct ibv_context_ops.poll_cq 88 8
+struct ibv_context_ops.req_notify_cq 96 8
+struct ibv_context_ops.post_send 200 8
+struct ibv_context_ops.post_recv 208 8
+struct ibv_context 280
+struct ibv_context.device 0 8
+struct ibv_context.ops 8 256
+struct ibv_context.cmd_fd 264 4
+struct ibv_context.async_fd 268 4
+struct ibv_context.num_comp_vectors 272 4
+struct ibv_comp_channel 16
+struct ibv_comp_channel.context 0 8
+struct ibv_comp_channel.fd 8 4
+struct ibv_comp_channel.refcnt 12 4
+struct ibv_async_event 16
+struct ibv_async_event.element 0 8
+struct ibv_async_event.event_type 8 4
+struct ibv_wc 48
+struct ibv_wc.wr_id 0 8
+struct ibv_wc.status 8 4
+struct ibv_wc.opcode 12 4
+struct ibv_wc.vendor_err 16 4
+struct ibv_wc.byte_len 20 4
+struct ibv_wc.imm_data 24 4
+struct ibv_wc.qp_num 28 4
+struct ibv_wc.src_qp 32 4
+struct ibv_wc.wc_flags 36 4
+struct ibv_wc.pkey_index 40 2
+struct ibv_wc.slid 42 2
+struct ibv_wc.sl 44 1
+struct ibv_wc.dlid_path_bits 45 1
+struct ibv_mr 48
+struct ibv_mr.context 0 8
+struct ibv_mr.pd 8 8
+struct ibv_mr.addr 16 8
+struct ibv_mr.length 24 8
+struct ibv_mr.handle 32 4
+struct ibv_mr.lkey 36 4
+struct ibv_mr.rkey 40 4
+struct ibv_cq 32
+struct ibv_cq.context 0 8
+struct ibv_cq.channel 8 8
+struct ibv_cq.cq_context 16 8
+struct ibv_cq.handle 24 4
+struct ibv_cq.cqe 28 4
+struct ibv_qp 64
+struct ibv_qp.context 0 8
+struct ibv_qp.qp_context 8 8
+struct ibv_qp.pd 16 8
+struct ibv_qp.send_cq 24 8
+struct ibv_qp.recv_cq 32 8
+struct ibv_qp.srq 40 8
+struct ibv_qp.handle 48 4
+struct ibv_qp.qp_num 52 4
+struct ibv_qp.state 56 4
+struct ibv_qp.qp_type 60 4
+struct ibv_qp_init_attr 64
+struct ibv_qp_init_attr.qp_context 0 8
+struct ibv_qp_init_attr.send_cq 8 8
+struct ibv_qp_init_attr.recv_cq 16 8
+struct ibv_qp_init_attr.srq 24 8
+struct ibv_qp_init_attr.cap 32 20
+struct ibv_qp_init_attr.qp_type 52 4
+struct ibv_qp_init_attr.sq_sig_all 56 4
+struct ibv_qp_cap 20
+struct ibv_qp_cap.max_send_wr 0 4
+struct ibv_qp_cap.max_recv_wr 4 4
+struct ibv_qp_cap.max_send_sge 8 4
+struct ibv_qp_cap.max_recv_sge 12 4
+struct ibv_qp_cap.max_inline_data 16 4
+struct ibv_qp_attr 144
+struct ibv_qp_attr.qp_state 0 4
+struct ibv_qp_attr.cur_qp_state 4 4
+struct ibv_qp_attr.path_mtu 8 4
+struct ibv_qp_attr.path_mig_state 12 4
+struct ibv_qp_attr.qkey 16 4
+struct ibv_qp_attr.rq_psn 20 4
+struct ibv_qp_attr.sq_psn 24 4
+struct ibv_qp_attr.dest_qp_num 28 4
+struct ibv_qp_attr.qp_access_flags 32 4
+struct ibv_qp_attr.cap 36 20
+struct ibv_qp_attr.ah_attr 56 32
+struct ibv_qp_attr.alt_ah_attr 88 32
+struct ibv_qp_attr.pkey_index 120 2
+struct ibv_qp_attr.alt_pkey_index 122 2
+struct ibv_qp_attr.en_sqd_async_notify 124 1
+struct ibv_qp_attr.sq_draining 125 1
+struct ibv_qp_attr.max_rd_atomic 126 1
+struct ibv_qp_attr.max_dest_rd_atomic 127 1
+struct ibv_qp_attr.min_rnr_timer 128 1
+struct ibv_qp_attr.port_num 129 1
+struct ibv_qp_attr.timeout 130 1
+struct ibv_qp_attr.retry_cnt 131 1
+struct ibv_qp_attr.rnr_retry 132 1
+struct ibv_qp_attr.alt_port_num 133 1
+struct ibv_qp_attr.alt_timeout 134 1
+struct ibv_qp_attr.rate_limit 136 4
+struct ibv_ah_attr 32
+struct ibv_ah_attr.grh 0 24
+struct ibv_ah_attr.dlid 24 2
+struct ibv_ah_attr.sl 26 1
+struct ibv_ah_attr.src_path_bits 27 1
+struct ibv_ah_attr.static_rate 28 1
+struct ibv_ah_attr.is_global 29 1
+struct ibv_ah_attr.port_num 30 1
+struct ibv_global_route 24
+struct ibv_global_route.dgid 0 16
+struct ibv_global_route.flow_label 16 4
+struct ibv_global_route.sgid_index 20 1
+struct ibv_global_route.hop_limit 21 1
+struct ibv_global_route.traffic_class 22 1
+struct ibv_send_wr 128
+struct ibv_send_wr.wr_id 0 8
+struct ibv_send_wr.next 8 8
+struct ibv_send_wr.sg_list 16 8
+struct ibv_send_wr.num_sge 24 4
+struct ibv_send_wr.opcode 28 4
+struct ibv_send_wr.send_flags 32 4
+struct ibv_send_wr.imm_data 36 4
+struct ibv_send_wr.wr.rdma.remote_addr 40 8
+struct ibv_send_wr.wr.rdma.rkey 48 4
+struct ibv_recv_wr 32
+struct ibv_recv_wr.wr_id 0 8
+struct ibv_recv_wr.next 8 8
+struct ibv_recv_wr.sg_list 16 8
+struct ibv_recv_wr.num_sge 24 4
+struct ibv_sge 16
+struct ibv_sge.addr 0 8
+struct ibv_sge.length 8 4
+struct ibv_sge.lkey 12 4
+struct rdma_event_channel 4
+struct rdma_event_channel.fd 0 4
+struct rdma_cm_id 416
+struct rdma_cm_id.verbs 0 8
+struct rdma_cm_id.channel 8 8
+struct rdma_cm_id.context 16 8
+struct rdma_cm_id.qp 24 8
+struct rdma_cm_id.route 32 312
+struct rdma_cm_id.ps 344 4
+struct rdma_cm_id.port_num 348 1
+struct rdma_cm_id.event 352 8
+struct rdma_cm_id.send_cq_channel 360 8
+struct rdma_cm_id.send_cq 368 8
+struct rdma_cm_id.recv_cq_channel 376 8
+struct rdma_cm_id.recv_cq 384 8
+struct rdma_cm_id.srq 392 8
+struct rdma_cm_id.pd 400 8
+struct rdma_cm_id.qp_type 408 4
+struct rdma_route 312
+struct rdma_route.addr 0 296
+struct rdma_route.path_rec 296 8
+struct rdma_route.num_paths 304 4
+struct rdma_addr 296
+struct rdma_addr.src_storage 0 128
+struct rdma_addr.dst_storage 128 128
+struct rdma_addr.addr.ibaddr 256 40
+struct rdma_ib_addr 40
+struct rdma_ib_addr.sgid 0 16
+struct rdma_ib_addr.dgid 16 16
+struct rdma_ib_addr.pkey 32 2
+struct rdma_cm_event 80
+struct rdma_cm_event.id 0 8
+struct rdma_cm_event.listen_id 8 8
+struct rdma_cm_event.event 16 4
+struct rdma_cm_event.status 20 4
+struct rdma_cm_event.param.conn 24 24
+struct rdma_conn_param 24
+struct rdma_conn_param.private_data 0 8
+struct rdma_conn_param.private_data_len 8 1
+struct rdma_conn_param.responder_resources 9 1
+struct rdma_conn_param.initiator_depth 10 1
+struct rdma_conn_param.flow_control 11 1
+struct rdma_conn_param.retry_count 12 1
+struct rdma_conn_param.rnr_retry_count 13 1
+struct rdma_conn_param.srq 14 1
+struct rdma_conn_param.qp_num 16 4
