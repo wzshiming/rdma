@@ -82,6 +82,11 @@ jobs:
       # picks the device by source IP.
       RXE_NETDEV: rxe-dummy0
       RXE_IP: 10.200.0.1
+      # Ubuntu 24.04 ships rdma-core 50.0, whose rsockets service thread polls
+      # a freed descriptor array once a fourth rsocket registers (fixed in 53
+      # by 24061f015bd9), so the many-connection tests need a newer librdmacm:
+      # the release tarball below is built and installed under /usr/local.
+      RDMA_CORE_VERSION: "66.0"
     steps:
     - uses: actions/checkout@v7
 
@@ -90,12 +95,58 @@ jobs:
       with:
         go-version: stable
 
-    - name: Install rdma-core
+    - name: Install Ubuntu's rdma-core
+      # The udev rules and module configuration come from the distribution;
+      # headers and libraries come from the source build below, so the -dev
+      # packages stay out: gcc searches /usr/lib/<arch> before ld's own
+      # /usr/local/lib/<arch> and would link the 50.0 librdmacm.so instead.
       run: |
         sudo apt-get update
-        sudo apt-get install -y rdma-core ibverbs-utils rdmacm-utils libibverbs-dev librdmacm-dev ibverbs-providers iproute2
+        sudo apt-get install -y rdma-core ibverbs-utils rdmacm-utils ibverbs-providers iproute2
         # rdma_rxe.ko ships in linux-modules-extra on Ubuntu.
         sudo apt-get install -y "linux-modules-extra-$(uname -r)" || true
+
+    - name: Identify the runner image
+      id: image
+      run: echo "id=$ImageOS-$ImageVersion" | tee -a "$GITHUB_OUTPUT"
+
+    - name: Restore the rdma-core build
+      id: rdma-core-cache
+      uses: actions/cache/restore@v6
+      with:
+        path: ~/rdma-core-install
+        key: rdma-core-${{ env.RDMA_CORE_VERSION }}-${{ steps.image.outputs.id }}
+
+    - name: Build rdma-core
+      if: steps.rdma-core-cache.outputs.cache-hit != 'true'
+      # The libraries go into lib/<arch>: ld and ld.so search
+      # /usr/local/lib/<arch> ahead of /usr/lib/<arch> but /usr/local/lib only
+      # last, so this directory wins at link time and at run time alike. The
+      # providers (rxe among them) follow the libdir, their configuration
+      # goes to /usr/local/etc/libibverbs.d.
+      run: |
+        sudo apt-get install -y build-essential cmake ninja-build pkg-config libnl-3-dev libnl-route-3-dev libudev-dev python3
+        curl -fsSL -o /tmp/rdma-core.tar.gz "https://github.com/linux-rdma/rdma-core/releases/download/v$RDMA_CORE_VERSION/rdma-core-$RDMA_CORE_VERSION.tar.gz"
+        tar -C /tmp -xzf /tmp/rdma-core.tar.gz
+        grep -q "^set(PACKAGE_VERSION \"$RDMA_CORE_VERSION\")" "/tmp/rdma-core-$RDMA_CORE_VERSION/CMakeLists.txt"
+        cmake -S "/tmp/rdma-core-$RDMA_CORE_VERSION" -B /tmp/rdma-core-build -GNinja \
+          -DCMAKE_BUILD_TYPE=Release -DNO_PYVERBS=1 -DNO_MAN_PAGES=1 \
+          -DCMAKE_INSTALL_PREFIX=/usr/local \
+          -DCMAKE_INSTALL_LIBDIR="lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH)"
+        ninja -C /tmp/rdma-core-build
+        DESTDIR="$HOME/rdma-core-install" ninja -C /tmp/rdma-core-build install
+
+    - name: Save the rdma-core build
+      if: steps.rdma-core-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v6
+      with:
+        path: ~/rdma-core-install
+        key: ${{ steps.rdma-core-cache.outputs.cache-primary-key }}
+
+    - name: Install the rdma-core build
+      run: |
+        sudo cp -a --no-preserve=ownership "$HOME/rdma-core-install/." /
+        sudo ldconfig
 
     - name: Load rdma_rxe
       run: |
@@ -121,6 +172,22 @@ jobs:
         rdma link
         ibv_devinfo -v
         ls -l /dev/infiniband
+
+    - name: Show the rdma-core in use
+      # Everything RDMA the tests touch must come from the source build.
+      run: |
+        arch=$(dpkg-architecture -qDEB_HOST_MULTIARCH)
+        ldconfig -p | grep -E 'librdmacm|libibverbs'
+        ls -l /usr/local/lib/"$arch"/librdmacm.so*
+        command -v rstream
+        test "$(command -v rstream)" = /usr/local/bin/rstream
+        ibv_devinfo -d rxe0 | head
+        go test -c -o /tmp/rdma.test .
+        ldd /tmp/rdma.test | grep -E 'rdmacm|ibverbs'
+        if ldd /tmp/rdma.test | grep -E 'rdmacm|ibverbs' | grep -v "/usr/local/lib/$arch/"; then
+          echo "the test binary loads an RDMA library from outside /usr/local/lib/$arch" >&2
+          exit 1
+        fi
 
     - name: rping loopback
       run: |
