@@ -24,7 +24,7 @@ func readREADME(t *testing.T) string {
 }
 
 func TestREADMESections(t *testing.T) {
-	want := []string{"# rdma", "## Requirements", "## Install", "## Usage", "## Packages", "## Command line", "## Soft-RoCE", "## Platforms", "## License"}
+	want := []string{"# rdma", "## Requirements", "## Install", "## Usage", "## Packages", "## Command line", "## Docker", "## Soft-RoCE", "## Platforms", "## License"}
 	var got []string
 	inCode := false
 	for _, line := range strings.Split(readREADME(t), "\n") {
@@ -48,6 +48,24 @@ func TestREADMEBadges(t *testing.T) {
 	} {
 		if !strings.Contains(readme, url) {
 			t.Errorf("README lacks the badge URL %s", url)
+		}
+	}
+}
+
+// TestREADMEDocker checks that the Docker section names the published image
+// and shows how to run and build it.
+func TestREADMEDocker(t *testing.T) {
+	docker := section(readREADME(t), "## Docker")
+	if docker == "" {
+		t.Fatal("README has no Docker section")
+	}
+	for _, want := range []string{
+		"ghcr.io/wzshiming/rdma",
+		"docker run --rm --network host --device /dev/infiniband --ulimit memlock=-1:-1 ghcr.io/wzshiming/rdma devices",
+		"docker build -t rdma .",
+	} {
+		if !strings.Contains(docker, want) {
+			t.Errorf("the Docker section lacks %q", want)
 		}
 	}
 }

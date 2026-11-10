@@ -120,6 +120,22 @@ The samples above come from Soft-RoCE on a GitHub Actions runner; hardware is a 
 
 `-msgsize` and `-depth` set the message size and queue depth of the connections (`Config.MessageSize`, `Config.ReceiveDepth` and `Config.SendDepth`), and `-keep` makes a server serve run after run.
 
+## Docker
+
+The image `ghcr.io/wzshiming/rdma` holds the `rdma` command with the rdma-core libraries and providers, built for linux/amd64 and linux/arm64, and runs it as an unprivileged user. A push to master publishes `latest`, `master` and `sha-<short commit>`; a `v1.2.3` tag publishes `1.2.3`, `1.2` and `1`.
+
+```sh
+docker run --rm --network host --device /dev/infiniband --ulimit memlock=-1:-1 ghcr.io/wzshiming/rdma devices
+docker run --rm --network host --device /dev/infiniband --ulimit memlock=-1:-1 ghcr.io/wzshiming/rdma pingpong -listen 10.200.0.1:4791 &
+docker run --rm --network host --device /dev/infiniband --ulimit memlock=-1:-1 ghcr.io/wzshiming/rdma pingpong -connect 10.200.0.1:4791
+docker run --rm --network host --device /dev/infiniband --ulimit memlock=-1:-1 ghcr.io/wzshiming/rdma bw -listen 10.200.0.1:4791 &
+docker run --rm --network host --device /dev/infiniband --ulimit memlock=-1:-1 ghcr.io/wzshiming/rdma bw -connect 10.200.0.1:4791 -duration 2s
+```
+
+`--device /dev/infiniband` hands the container the uverbs and rdma_cm device nodes, `--network host` lets rdma_cm resolve the host's IP addresses and GIDs, and the memlock limit makes room for the registered buffers, which are pinned.
+
+Build the image from a checkout with `docker build -t rdma .`.
+
 ## Soft-RoCE
 
 Soft-RoCE runs RDMA over any Ethernet interface with the `rdma_rxe` kernel module, so one Linux host is enough to try the package; the CI workflow does exactly this on a stock Ubuntu runner. Give rxe a dummy interface with a private address of its own: rdma_cm picks the device by the local IP, and a hardware RDMA device on the same host would otherwise claim the address of a shared interface.
