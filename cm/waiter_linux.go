@@ -1,4 +1,4 @@
-//go:build linux && cgo
+//go:build linux && !android && (amd64 || arm64 || loong64 || ppc64le || riscv64 || s390x)
 
 package cm
 
@@ -17,9 +17,10 @@ var aLongTimeAgo = time.Unix(1, 0)
 
 // fdWaiter waits for an rdma_cm event channel descriptor on the Go runtime
 // poller. It wraps a non-blocking dup of the descriptor in an *os.File, whose
-// read deadline implements cancellation, so no OS thread blocks inside C.
-// Since the two descriptors share their file status flags, O_NONBLOCK also
-// makes rdma_get_cm_event fail with EAGAIN instead of blocking.
+// read deadline implements cancellation, so no OS thread blocks inside
+// librdmacm. Since the two descriptors share their file status flags,
+// O_NONBLOCK also makes rdma_get_cm_event fail with EAGAIN instead of
+// blocking.
 type fdWaiter struct {
 	file *os.File
 	raw  syscall.RawConn

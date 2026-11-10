@@ -21,8 +21,8 @@
 // while the queue pair is destroyed by ID.Close.
 //
 // Each ID owns an event channel whose descriptor waits on the Go runtime
-// poller: no OS thread blocks inside C, and cancellation comes from the
-// context. Every event is acknowledged as soon as it is read, which keeps
+// poller: no OS thread blocks inside librdmacm, and cancellation comes from
+// the context. Every event is acknowledged as soon as it is read, which keeps
 // rdma_destroy_id from waiting, so Close never blocks.
 //
 // The IB CM carries private data in fixed-size fields: MaxConnectPrivateData
@@ -39,8 +39,12 @@
 // syscall.ECONNREFUSED in errors.Is. Using an ID after Close yields an error
 // wrapping os.ErrClosed; Accept on a closed Listener yields net.ErrClosed.
 //
-// On Linux with cgo the package links against librdmacm (-lrdmacm, header
-// rdma/rdma_cma.h). Everywhere else it compiles to stubs whose constructors
-// return an error satisfying errors.Is(err, errors.ErrUnsupported); the
-// types, constants and String methods are available on every platform.
+// On Linux (amd64, arm64, loong64, ppc64le, riscv64 and s390x) the package
+// loads librdmacm.so.1 at run time on first use, with or without cgo, so
+// building needs neither a C compiler nor the rdma-core headers; when the
+// library cannot be loaded, Resolve and Listen return a *verbs.OpError that
+// satisfies errors.Is(err, errors.ErrUnsupported). Everywhere else the
+// package compiles to stubs whose constructors return the same kind of
+// error; the types, constants and String methods are available on every
+// platform.
 package cm
