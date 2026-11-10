@@ -4,8 +4,11 @@ package rdma
 
 import (
 	"errors"
+	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/wzshiming/rdma/rsocket"
@@ -63,4 +66,40 @@ func TestRdmaCoreReleaseLoadsTheLibrary(t *testing.T) {
 		t.Fatal("rdmaCoreRelease() = 0 in a fresh process: librdmacm is not loaded before its release is read")
 	}
 	t.Logf("rdma-core release %d", v)
+}
+
+// TestMissingLibraryIsUnsupported runs Dial and Listen in a process whose
+// dynamic loader finds an empty file in place of librdmacm.so.1, which
+// fails to load as a missing one would: the process starts, and both
+// return a *net.OpError matching errors.ErrUnsupported that names the
+// library.
+func TestMissingLibraryIsUnsupported(t *testing.T) {
+	if os.Getenv(childEnv) == "" {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "librdmacm.so.1"), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		runInChild(t, "TestMissingLibraryIsUnsupported", "LD_LIBRARY_PATH="+dir)
+		return
+	}
+	for _, tt := range []struct {
+		name, op string
+		call     func() error
+	}{
+		{"Dial", "dial", func() error { _, err := Dial("rdma", "10.200.0.1:4791"); return err }},
+		{"Listen", "listen", func() error { _, err := Listen("rdma", "10.200.0.1:0"); return err }},
+	} {
+		err := tt.call()
+		var opErr *net.OpError
+		if !errors.As(err, &opErr) || opErr.Op != tt.op || opErr.Net != "rdma" {
+			t.Errorf("%s() error = %#v, want a *net.OpError with Op %q on net rdma", tt.name, err, tt.op)
+		}
+		if !errors.Is(err, errors.ErrUnsupported) {
+			t.Errorf("%s() error = %v, want one matching errors.ErrUnsupported", tt.name, err)
+		}
+		if err == nil || !strings.Contains(err.Error(), "librdmacm.so.1") {
+			t.Errorf("%s() error = %v, want the text to name librdmacm.so.1", tt.name, err)
+		}
+		t.Logf("%s() without librdmacm: %v", tt.name, err)
+	}
 }
