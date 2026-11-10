@@ -137,7 +137,11 @@ func (l *Listener) AcceptRDMA() (*Conn, error) {
 		if l.isClosed() {
 			return nil, l.opError("accept", net.ErrClosed)
 		}
-		s, _, err := l.s.Accept()
+		var s socket
+		var err error
+		if !l.nw.run(l.s, func() { s, _, err = l.s.Accept() }) {
+			return nil, l.opError("accept", net.ErrClosed)
+		}
 		if err == nil {
 			// rsockets hand out blocking sockets whatever the listener is.
 			if err := s.SetNonblock(true); err != nil {
@@ -169,7 +173,7 @@ func (l *Listener) AcceptRDMA() (*Conn, error) {
 
 // acceptRetry is how long Accept lets the poller wait before it asks the
 // listening socket again.
-const acceptRetry = 5 * time.Millisecond
+const acceptRetry = 10 * time.Millisecond
 
 // Close stops listening; a blocked Accept returns an error matching
 // net.ErrClosed. Established connections are not affected.

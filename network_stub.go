@@ -24,6 +24,12 @@ func (unsupportedNetwork) socket(domain rsocket.Domain) (socket, error) {
 
 func (unsupportedNetwork) attach(socket) error { return errors.ErrUnsupported }
 
+func (unsupportedNetwork) run(socket, func()) bool { return false }
+
+func (unsupportedNetwork) exclude(socket) {}
+
+func (unsupportedNetwork) include(socket) {}
+
 func (unsupportedNetwork) wait(socket, rsocket.Events) (<-chan rsocket.Events, func()) {
 	ch := make(chan rsocket.Events, 1)
 	ch <- rsocket.PollNval

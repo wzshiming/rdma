@@ -33,16 +33,18 @@ type Conn struct {
 // newConn wraps a connected socket attached to the network's poller.
 func newConn(nw network, s socket) *Conn {
 	c := &Conn{nw: nw, s: s, closing: make(chan struct{})}
-	if a, err := s.LocalAddr(); err == nil {
-		if addr := addrFromAddrPort(a); addr != nil {
-			c.local = addr
+	nw.run(s, func() {
+		if a, err := s.LocalAddr(); err == nil {
+			if addr := addrFromAddrPort(a); addr != nil {
+				c.local = addr
+			}
 		}
-	}
-	if a, err := s.RemoteAddr(); err == nil {
-		if addr := addrFromAddrPort(a); addr != nil {
-			c.remote = addr
+		if a, err := s.RemoteAddr(); err == nil {
+			if addr := addrFromAddrPort(a); addr != nil {
+				c.remote = addr
+			}
 		}
-	}
+	})
 	return c
 }
 
@@ -94,7 +96,11 @@ func (c *Conn) Read(p []byte) (int, error) {
 		if expired, _ := c.rd.state(); expired {
 			return 0, c.opError("read", os.ErrDeadlineExceeded)
 		}
-		n, err := c.s.Read(p)
+		var n int
+		var err error
+		if !c.nw.run(c.s, func() { n, err = c.s.Read(p) }) {
+			return 0, c.opError("read", net.ErrClosed)
+		}
 		switch {
 		case err == nil || err == io.EOF:
 			return n, err
@@ -129,7 +135,11 @@ func (c *Conn) Write(p []byte) (int, error) {
 		if len(p) == 0 {
 			return total, nil
 		}
-		n, err := c.s.Write(p)
+		var n int
+		var err error
+		if !c.nw.run(c.s, func() { n, err = c.s.Write(p) }) {
+			return total, c.opError("write", net.ErrClosed)
+		}
 		total += n
 		p = p[n:]
 		if err != nil && !errors.Is(err, errAgain) {
@@ -162,7 +172,12 @@ func (c *Conn) CloseWrite() error {
 	}
 	c.writeClosed = true
 	c.mu.Unlock()
-	if err := c.s.Shutdown(rsocket.ShutWrite); err != nil {
+	// Shutdown may block, so it runs here rather than on the poller, which
+	// leaves the socket alone meanwhile.
+	c.nw.exclude(c.s)
+	err := c.s.Shutdown(rsocket.ShutWrite)
+	c.nw.include(c.s)
+	if err != nil {
 		return c.opError("close", err)
 	}
 	return nil

@@ -115,14 +115,20 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (*Con
 // connect starts a non-blocking connect to raddr and waits for its end, or
 // for ctx, through the poller; s is attached.
 func connect(ctx context.Context, nw network, s socket, raddr *Addr) error {
-	err := s.Connect(raddr.addrPort())
+	var err error
+	if !nw.run(s, func() { err = s.Connect(raddr.addrPort()) }) {
+		return net.ErrClosed
+	}
 	if !errors.Is(err, errInProgress) {
 		return err
 	}
 	ready, cancel := nw.wait(s, rsocket.PollOut)
 	select {
 	case <-ready:
-		return s.SocketError()
+		if !nw.run(s, func() { err = s.SocketError() }) {
+			return net.ErrClosed
+		}
+		return err
 	case <-ctx.Done():
 		cancel()
 		return ctx.Err()

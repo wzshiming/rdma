@@ -130,6 +130,23 @@ func (n *fakeNet) attach(s socket) error {
 	return nil
 }
 
+// run calls f on the caller's goroutine: the fake has no poll to keep the
+// call away from. It still refuses a socket that is not attached.
+func (n *fakeNet) run(s socket, f func()) bool {
+	n.mu.Lock()
+	attached := n.attached[s.(*fakeSocket)]
+	n.mu.Unlock()
+	if !attached {
+		return false
+	}
+	f()
+	return true
+}
+
+func (n *fakeNet) exclude(socket) {}
+
+func (n *fakeNet) include(socket) {}
+
 func (n *fakeNet) wait(s socket, events rsocket.Events) (<-chan rsocket.Events, func()) {
 	n.mu.Lock()
 	defer n.mu.Unlock()

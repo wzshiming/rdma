@@ -4,6 +4,7 @@ package rdma
 
 import (
 	"runtime"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -189,4 +190,99 @@ func TestPollerExitsWithTheLastSocket(t *testing.T) {
 	expectEvents(t, ready, rsocket.PollIn)
 	p.detach(a)
 	waitForGoroutines(t, before)
+}
+
+// TestPollerRunsCallsOnItsGoroutine checks that run executes its functions
+// one at a time on the poller goroutine, between two polls, however many
+// goroutines ask at once and even while the poller waits on a socket, and
+// that it runs nothing for a socket that is not attached.
+func TestPollerRunsCallsOnItsGoroutine(t *testing.T) {
+	p := &poller{}
+	s := newPipeSocket(t)
+	if err := p.attach(s); err != nil {
+		t.Fatalf("attach() error: %v", err)
+	}
+	ready, _ := p.wait(s, rsocket.PollIn) // keeps the poller in Poll
+	// Plain increments would be a data race under -race unless every call
+	// runs on the same goroutine.
+	count := 0
+	var wg sync.WaitGroup
+	for range 100 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if !p.run(s, func() { count++ }) {
+				t.Error("run() on an attached socket reported it did not run")
+			}
+		}()
+	}
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("run() did not return while the poller waited on a socket")
+	}
+	if count != 100 {
+		t.Fatalf("count = %d after 100 calls, want 100", count)
+	}
+	expectSilence(t, ready)
+	p.detach(s)
+	if p.run(s, func() { count++ }) || count != 100 {
+		t.Fatalf("run() on a detached socket ran the function (count %d)", count)
+	}
+}
+
+// TestPollerExcludeKeepsTheSocketOutOfThePoll checks that between exclude
+// and include the poller neither polls the socket nor runs calls on it, that
+// its waiters and calls survive until include, and that exclude returns at
+// once for a socket nobody waits on.
+func TestPollerExcludeKeepsTheSocketOutOfThePoll(t *testing.T) {
+	p := &poller{}
+	s := newPipeSocket(t)
+	if err := p.attach(s); err != nil {
+		t.Fatalf("attach() error: %v", err)
+	}
+	ready, _ := p.wait(s, rsocket.PollIn)
+	excluded := make(chan struct{})
+	go func() {
+		p.exclude(s)
+		close(excluded)
+	}()
+	select {
+	case <-excluded:
+	case <-time.After(5 * time.Second):
+		t.Fatal("exclude() did not return while the poller waited on the socket")
+	}
+	s.fill(t)
+	expectSilence(t, ready)
+	ran := make(chan bool, 1)
+	go func() { ran <- p.run(s, func() {}) }()
+	select {
+	case <-ran:
+		t.Fatal("run() on an excluded socket ran before include()")
+	case <-time.After(100 * time.Millisecond):
+	}
+	p.include(s)
+	expectEvents(t, ready, rsocket.PollIn)
+	select {
+	case ok := <-ran:
+		if !ok {
+			t.Fatal("run() deferred by exclude() reported it did not run")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("run() deferred by exclude() did not return after include()")
+	}
+	// Nobody waits on the socket now, so it is not polled and exclude has
+	// nothing to wait for.
+	start := time.Now()
+	p.exclude(s)
+	p.include(s)
+	if elapsed := time.Since(start); elapsed > 50*time.Millisecond {
+		t.Errorf("exclude() and include() of an unpolled socket took %v", elapsed)
+	}
+	p.detach(s)
 }

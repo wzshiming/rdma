@@ -38,14 +38,29 @@ type socket interface {
 	SetInline(bytes int) error
 }
 
-// network is the platform seam: it creates sockets and waits for their
-// readiness. Interests are one-shot and the poller refers to a socket only
-// between attach and detach, so that Close never races the poll.
+// network is the platform seam: it creates sockets, waits for their
+// readiness and runs the calls on them. rsockets keep per-socket counters
+// that rsend, rrecv and the completion processing of rpoll all update
+// without a common lock, so once a socket is attached every call on it goes
+// through run, which the poller executes between two polls, or happens while
+// the socket is excluded from the poll. Interests are one-shot and the
+// poller refers to a socket only between attach and detach, so that Close
+// never races the poll.
 type network interface {
 	// socket creates a stream socket of the address family.
 	socket(domain rsocket.Domain) (socket, error)
 	// attach hands s to the poller; it precedes every wait on s.
 	attach(s socket) error
+	// run executes f, a call on s, on the poller's goroutine between two
+	// polls, after include when s is excluded. It reports false, f not
+	// run, when s is not attached.
+	run(s socket, f func()) bool
+	// exclude takes s out of the poll and holds its calls back until
+	// include, returning once no poll refers to s, so that the caller may
+	// make a call on s that blocks.
+	exclude(s socket)
+	// include ends an exclude.
+	include(s socket)
 	// wait registers a one-shot interest in events on s and returns the
 	// channel that receives the events once they hold, errors and hang-ups
 	// included, or rsocket.PollNval at once when s is not attached, and a
@@ -53,7 +68,7 @@ type network interface {
 	wait(s socket, events rsocket.Events) (ready <-chan rsocket.Events, cancel func())
 	// detach removes s from the poller and returns once the poller no
 	// longer refers to it, so that s may be closed; pending waits on s are
-	// never answered.
+	// never answered and pending runs report false.
 	detach(s socket)
 }
 
