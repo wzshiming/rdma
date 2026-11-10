@@ -1,104 +1,90 @@
-//go:build linux && cgo
+//go:build linux && !android && (amd64 || arm64 || loong64 || ppc64le || riscv64 || s390x)
 
 package rsocket
 
-/*
-#cgo LDFLAGS: -lrdmacm
-#include <errno.h>
-#include <fcntl.h>
-#include <poll.h>
-#include <stdint.h>
-#include <string.h>
-#include <unistd.h>
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <sys/timerfd.h>
-#include <rdma/rsocket.h>
-
-// rfcntl is variadic, which cgo cannot call.
-static int rs_getfl(int fd) { return rfcntl(fd, F_GETFL); }
-static int rs_setfl(int fd, int flags) { return rfcntl(fd, F_SETFL, flags); }
-
-// rs_timerfd returns a descriptor that becomes readable after ns nanoseconds,
-// or -1 with errno set.
-static int rs_timerfd(int64_t ns) {
-	struct itimerspec its = { .it_value = { .tv_sec = ns / 1000000000, .tv_nsec = ns % 1000000000 } };
-	int fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
-	if (fd < 0)
-		return -1;
-	if (timerfd_settime(fd, 0, &its, NULL) < 0) {
-		int saved = errno;
-		close(fd);
-		errno = saved;
-		return -1;
-	}
-	return fd;
-}
-
-static int rs_setsockopt_int(int fd, int level, int name, int value) {
-	return rsetsockopt(fd, level, name, &value, sizeof value);
-}
-
-static int rs_getsockopt_int(int fd, int level, int name, int *value) {
-	socklen_t len = sizeof *value;
-	return rgetsockopt(fd, level, name, value, &len);
-}
-
-// rs_sockaddr fills ss with an IPv4 (4 bytes) or IPv6 (16 bytes) address and
-// a host-order port and returns the length of the sockaddr.
-static socklen_t rs_sockaddr(struct sockaddr_storage *ss, int family, const unsigned char *addr, uint16_t port) {
-	memset(ss, 0, sizeof *ss);
-	if (family == AF_INET) {
-		struct sockaddr_in *sin = (struct sockaddr_in *)ss;
-		sin->sin_family = AF_INET;
-		sin->sin_port = htons(port);
-		memcpy(&sin->sin_addr, addr, 4);
-		return sizeof *sin;
-	}
-	struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)ss;
-	sin6->sin6_family = AF_INET6;
-	sin6->sin6_port = htons(port);
-	memcpy(&sin6->sin6_addr, addr, 16);
-	return sizeof *sin6;
-}
-
-// rs_addrport reads the address bytes and host-order port of an IPv4 or IPv6
-// sockaddr into addr (16 bytes) and port and returns its family.
-static int rs_addrport(const struct sockaddr_storage *ss, unsigned char *addr, uint16_t *port) {
-	if (ss->ss_family == AF_INET) {
-		const struct sockaddr_in *sin = (const struct sockaddr_in *)ss;
-		memcpy(addr, &sin->sin_addr, 4);
-		*port = ntohs(sin->sin_port);
-	} else if (ss->ss_family == AF_INET6) {
-		const struct sockaddr_in6 *sin6 = (const struct sockaddr_in6 *)ss;
-		memcpy(addr, &sin6->sin6_addr, 16);
-		*port = ntohs(sin6->sin6_port);
-	}
-	return ss->ss_family;
-}
-*/
-import "C"
-
 import (
+	"encoding/binary"
 	"io"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
 
+	"github.com/wzshiming/rdma/internal/dynlib"
 	"github.com/wzshiming/rdma/verbs"
 )
 
-// A PollFD converts to a struct pollfd by cast: the Events constants carry
-// the poll(2) values, which this constant checks at compile time.
-const _ = -uint((PollIn ^ C.POLLIN) | (PollOut ^ C.POLLOUT) | (PollErr ^ C.POLLERR) | (PollHup ^ C.POLLHUP) | (PollNval ^ C.POLLNVAL))
+// rdmacm is the librdmacm of the process, loaded on first use; a test points
+// it at a library that does not exist.
+var rdmacm = &loader{name: "librdmacm.so.1"}
+
+// loader resolves the rsockets functions of the library name once, on first
+// use. A load that fails is reported to its caller and tried again by the
+// next one.
+type loader struct {
+	name string
+	mu   sync.Mutex
+	lib  atomic.Pointer[library]
+}
+
+// library is the rsockets functions of librdmacm.
+type library struct {
+	rsocket, rbind, rlisten, raccept, rconnect, rrecv, rsend, rshutdown, rclose,
+	rgetsockname, rgetpeername, rpoll, rsetsockopt, rgetsockopt, rfcntl dynlib.Func
+}
+
+// load returns the functions of the library, loading it on the first call.
+// A library the dynamic loader cannot open, or one lacking a function, is a
+// *verbs.OpError of op that matches errors.ErrUnsupported and names the
+// library.
+func (l *loader) load(op string) (*library, error) {
+	if lib := l.lib.Load(); lib != nil {
+		return lib, nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if lib := l.lib.Load(); lib != nil {
+		return lib, nil
+	}
+	so, err := dynlib.Open(l.name)
+	if err != nil {
+		return nil, &verbs.OpError{Op: op, Err: err}
+	}
+	lib := new(library)
+	for _, f := range []struct {
+		name string
+		fn   *dynlib.Func
+	}{
+		{"rsocket", &lib.rsocket}, {"rbind", &lib.rbind}, {"rlisten", &lib.rlisten},
+		{"raccept", &lib.raccept}, {"rconnect", &lib.rconnect}, {"rrecv", &lib.rrecv},
+		{"rsend", &lib.rsend}, {"rshutdown", &lib.rshutdown}, {"rclose", &lib.rclose},
+		{"rgetsockname", &lib.rgetsockname}, {"rgetpeername", &lib.rgetpeername},
+		{"rpoll", &lib.rpoll}, {"rsetsockopt", &lib.rsetsockopt},
+		{"rgetsockopt", &lib.rgetsockopt}, {"rfcntl", &lib.rfcntl},
+	} {
+		if *f.fn, err = so.Lookup(f.name); err != nil {
+			return nil, &verbs.OpError{Op: op, Err: err}
+		}
+	}
+	l.lib.Store(lib)
+	return lib, nil
+}
+
+// Options of the level SOL_RDMA, from rdma/rsocket.h.
+const (
+	solRDMA    = 0x10000
+	rdmaSQSize = 0 // RDMA_SQSIZE
+	rdmaRQSize = 1 // RDMA_RQSIZE
+	rdmaInline = 2 // RDMA_INLINE
+)
 
 // Socket is a stream rsocket (rsocket(7)): a connected byte stream carried
 // over an RDMA queue pair by librdmacm.
 type Socket struct {
-	fd int
+	lib *library
+	fd  int
 
 	mu     sync.RWMutex // held shared by every call into rsockets, exclusively by Close
 	closed bool
@@ -106,33 +92,39 @@ type Socket struct {
 
 // New creates a stream socket of the address family domain (rsocket with
 // SOCK_STREAM). It fails with a *verbs.OpError carrying the errno of
-// librdmacm on a host without an RDMA device or the rdma_cm module.
+// librdmacm on a host without an RDMA device or the rdma_cm module, and
+// with one matching errors.ErrUnsupported when librdmacm.so.1 cannot be
+// loaded.
 func New(domain Domain) (*Socket, error) {
-	var family C.int
+	var family uintptr
 	switch domain {
 	case IPv4:
-		family = C.AF_INET
+		family = syscall.AF_INET
 	case IPv6:
-		family = C.AF_INET6
+		family = syscall.AF_INET6
 	default:
 		return nil, &verbs.OpError{Op: "rsocket", Err: syscall.EAFNOSUPPORT}
 	}
-	fd, err := C.rsocket(family, C.SOCK_STREAM, 0)
-	if fd < 0 {
-		return nil, opError("rsocket", err)
+	lib, err := rdmacm.load("rsocket")
+	if err != nil {
+		return nil, err
 	}
-	return &Socket{fd: int(fd)}, nil
+	fd, errno := lib.rsocket.Int(family, syscall.SOCK_STREAM, 0, 0, 0, 0)
+	if fd < 0 {
+		return nil, opError("rsocket", errno)
+	}
+	return &Socket{lib: lib, fd: int(fd)}, nil
 }
 
 // do runs f with the descriptor under the shared lock, or reports op called
 // on a closed Socket.
-func (s *Socket) do(op string, f func(fd C.int) error) error {
+func (s *Socket) do(op string, f func(fd uintptr) error) error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if s.closed {
 		return errClosed(op)
 	}
-	return f(C.int(s.fd))
+	return f(uintptr(s.fd))
 }
 
 // Descriptor returns the rsockets descriptor for Poll and diagnostics, or -1
@@ -147,44 +139,72 @@ func (s *Socket) Descriptor() int {
 	return s.fd
 }
 
-// sockaddr stores ap in ss and returns its length; a v4-mapped address
-// becomes an IPv4 sockaddr.
-func sockaddr(ss *C.struct_sockaddr_storage, ap netip.AddrPort) C.socklen_t {
+// sockaddrIn and sockaddrIn6 are struct sockaddr_in and struct sockaddr_in6:
+// the family an sa_family_t in the host's byte order, the port two bytes in
+// network order whatever the host's, then the address; sin6_flowinfo and
+// sin6_scope_id are neither set nor read.
+type sockaddrIn struct {
+	family uint16
+	port   [2]byte
+	addr   [4]byte
+	_      [8]byte
+}
+
+type sockaddrIn6 struct {
+	family   uint16
+	port     [2]byte
+	flowinfo uint32
+	addr     [16]byte
+	scopeID  uint32
+}
+
+// sockaddrStorage is struct sockaddr_storage, which holds either of them and
+// is aligned like it.
+type sockaddrStorage struct {
+	family uint16
+	_      [6]byte
+	_      [15]uint64
+}
+
+// set stores ap in ss and returns the length of the sockaddr (a socklen_t);
+// a v4-mapped address becomes an IPv4 sockaddr.
+func (ss *sockaddrStorage) set(ap netip.AddrPort) uint32 {
+	*ss = sockaddrStorage{}
+	var port [2]byte
+	binary.BigEndian.PutUint16(port[:], ap.Port())
 	addr := ap.Addr().Unmap()
 	if addr.Is4() {
-		a := addr.As4()
-		return C.rs_sockaddr(ss, C.AF_INET, (*C.uchar)(&a[0]), C.uint16_t(ap.Port()))
+		sin := (*sockaddrIn)(unsafe.Pointer(ss))
+		*sin = sockaddrIn{family: syscall.AF_INET, port: port, addr: addr.As4()}
+		return uint32(unsafe.Sizeof(*sin))
 	}
-	a := addr.As16()
-	return C.rs_sockaddr(ss, C.AF_INET6, (*C.uchar)(&a[0]), C.uint16_t(ap.Port()))
+	sin6 := (*sockaddrIn6)(unsafe.Pointer(ss))
+	*sin6 = sockaddrIn6{family: syscall.AF_INET6, port: port, addr: addr.As16()}
+	return uint32(unsafe.Sizeof(*sin6))
 }
 
 // addrPort reads an IPv4 or IPv6 sockaddr; other families give the zero
 // value.
-func addrPort(ss *C.struct_sockaddr_storage) netip.AddrPort {
-	var addr [16]byte
-	var port C.uint16_t
-	switch C.rs_addrport(ss, (*C.uchar)(&addr[0]), &port) {
-	case C.AF_INET:
-		return netip.AddrPortFrom(netip.AddrFrom4([4]byte(addr[:4])), uint16(port))
-	case C.AF_INET6:
-		return netip.AddrPortFrom(netip.AddrFrom16(addr), uint16(port))
+func (ss *sockaddrStorage) addrPort() netip.AddrPort {
+	switch ss.family {
+	case syscall.AF_INET:
+		sin := (*sockaddrIn)(unsafe.Pointer(ss))
+		return netip.AddrPortFrom(netip.AddrFrom4(sin.addr), binary.BigEndian.Uint16(sin.port[:]))
+	case syscall.AF_INET6:
+		sin6 := (*sockaddrIn6)(unsafe.Pointer(ss))
+		return netip.AddrPortFrom(netip.AddrFrom16(sin6.addr), binary.BigEndian.Uint16(sin6.port[:]))
 	}
 	return netip.AddrPort{}
-}
-
-func sockaddrPtr(ss *C.struct_sockaddr_storage) *C.struct_sockaddr {
-	return (*C.struct_sockaddr)(unsafe.Pointer(ss))
 }
 
 // Bind binds the socket to local (rbind); its IP picks the RDMA device and
 // port 0 picks a free port.
 func (s *Socket) Bind(local netip.AddrPort) error {
-	return s.do("rbind", func(fd C.int) error {
-		var ss C.struct_sockaddr_storage
-		n := sockaddr(&ss, local)
-		if rc, err := C.rbind(fd, sockaddrPtr(&ss), n); rc != 0 {
-			return opError("rbind", err)
+	return s.do("rbind", func(fd uintptr) error {
+		var ss sockaddrStorage
+		n := ss.set(local)
+		if rc, errno := s.lib.rbind.Int(fd, uintptr(unsafe.Pointer(&ss)), uintptr(n), 0, 0, 0); rc != 0 {
+			return opError("rbind", errno)
 		}
 		return nil
 	})
@@ -193,9 +213,9 @@ func (s *Socket) Bind(local netip.AddrPort) error {
 // Listen starts listening for connections (rlisten); backlog bounds the
 // requests waiting to be accepted.
 func (s *Socket) Listen(backlog int) error {
-	return s.do("rlisten", func(fd C.int) error {
-		if rc, err := C.rlisten(fd, C.int(backlog)); rc != 0 {
-			return opError("rlisten", err)
+	return s.do("rlisten", func(fd uintptr) error {
+		if rc, errno := s.lib.rlisten.Int(fd, uintptr(backlog), 0, 0, 0, 0); rc != 0 {
+			return opError("rlisten", errno)
 		}
 		return nil
 	})
@@ -208,15 +228,15 @@ func (s *Socket) Listen(backlog int) error {
 func (s *Socket) Accept() (*Socket, netip.AddrPort, error) {
 	var conn *Socket
 	var peer netip.AddrPort
-	err := s.do("raccept", func(fd C.int) error {
-		var ss C.struct_sockaddr_storage
-		n := C.socklen_t(unsafe.Sizeof(ss))
-		cfd, err := C.raccept(fd, sockaddrPtr(&ss), &n)
+	err := s.do("raccept", func(fd uintptr) error {
+		var ss sockaddrStorage
+		n := uint32(unsafe.Sizeof(ss))
+		cfd, errno := s.lib.raccept.Int(fd, uintptr(unsafe.Pointer(&ss)), uintptr(unsafe.Pointer(&n)), 0, 0, 0)
 		if cfd < 0 {
-			return opError("raccept", err)
+			return opError("raccept", errno)
 		}
-		conn = &Socket{fd: int(cfd)}
-		peer = addrPort(&ss)
+		conn = &Socket{lib: s.lib, fd: int(cfd)}
+		peer = ss.addrPort()
 		return nil
 	})
 	if err != nil {
@@ -230,11 +250,11 @@ func (s *Socket) Accept() (*Socket, netip.AddrPort, error) {
 // Write are called: Poll reports PollOut when it ends, with PollErr when it
 // failed, and SocketError tells how.
 func (s *Socket) Connect(remote netip.AddrPort) error {
-	return s.do("rconnect", func(fd C.int) error {
-		var ss C.struct_sockaddr_storage
-		n := sockaddr(&ss, remote)
-		if rc, err := C.rconnect(fd, sockaddrPtr(&ss), n); rc != 0 {
-			return opError("rconnect", err)
+	return s.do("rconnect", func(fd uintptr) error {
+		var ss sockaddrStorage
+		n := ss.set(remote)
+		if rc, errno := s.lib.rconnect.Int(fd, uintptr(unsafe.Pointer(&ss)), uintptr(n), 0, 0, 0); rc != 0 {
+			return opError("rconnect", errno)
 		}
 		return nil
 	})
@@ -244,10 +264,11 @@ func (s *Socket) Connect(remote netip.AddrPort) error {
 // Connect: nil for success, otherwise a *verbs.OpError with Op "rconnect" and
 // the errno.
 func (s *Socket) SocketError() error {
-	var value C.int
-	err := s.do("rgetsockopt", func(fd C.int) error {
-		if rc, err := C.rs_getsockopt_int(fd, C.SOL_SOCKET, C.SO_ERROR, &value); rc != 0 {
-			return opError("rgetsockopt", err)
+	var value int32
+	err := s.do("rgetsockopt", func(fd uintptr) error {
+		n := uint32(unsafe.Sizeof(value))
+		if rc, errno := s.lib.rgetsockopt.Int(fd, syscall.SOL_SOCKET, syscall.SO_ERROR, uintptr(unsafe.Pointer(&value)), uintptr(unsafe.Pointer(&n)), 0); rc != 0 {
+			return opError("rgetsockopt", errno)
 		}
 		return nil
 	})
@@ -267,12 +288,12 @@ func (s *Socket) Read(b []byte) (int, error) {
 	if len(b) == 0 {
 		return 0, nil
 	}
-	var n C.ssize_t
-	err := s.do("rrecv", func(fd C.int) error {
-		var err error
-		n, err = C.rrecv(fd, unsafe.Pointer(&b[0]), C.size_t(len(b)), 0)
+	var n int
+	err := s.do("rrecv", func(fd uintptr) error {
+		var errno syscall.Errno
+		n, errno = s.lib.rrecv.SSize(fd, uintptr(unsafe.Pointer(&b[0])), uintptr(len(b)), 0, 0, 0)
 		if n < 0 {
-			return opError("rrecv", err)
+			return opError("rrecv", errno)
 		}
 		return nil
 	})
@@ -282,7 +303,7 @@ func (s *Socket) Read(b []byte) (int, error) {
 	if n == 0 {
 		return 0, io.EOF
 	}
-	return int(n), nil
+	return n, nil
 }
 
 // Write writes to the connection (rsend). It may write less than len(b) with
@@ -292,38 +313,38 @@ func (s *Socket) Write(b []byte) (int, error) {
 	if len(b) == 0 {
 		return 0, nil
 	}
-	var n C.ssize_t
-	err := s.do("rsend", func(fd C.int) error {
-		var err error
-		n, err = C.rsend(fd, unsafe.Pointer(&b[0]), C.size_t(len(b)), 0)
+	var n int
+	err := s.do("rsend", func(fd uintptr) error {
+		var errno syscall.Errno
+		n, errno = s.lib.rsend.SSize(fd, uintptr(unsafe.Pointer(&b[0])), uintptr(len(b)), 0, 0, 0)
 		if n < 0 {
-			return opError("rsend", err)
+			return opError("rsend", errno)
 		}
 		return nil
 	})
 	if err != nil {
 		return 0, err
 	}
-	return int(n), nil
+	return n, nil
 }
 
 // Shutdown closes one or both halves of the connection (rshutdown); the peer
 // reads EOF after ShutWrite. It waits for the posted sends to complete.
 func (s *Socket) Shutdown(how How) error {
-	var chow C.int
+	var chow uintptr
 	switch how {
 	case ShutRead:
-		chow = C.SHUT_RD
+		chow = syscall.SHUT_RD
 	case ShutWrite:
-		chow = C.SHUT_WR
+		chow = syscall.SHUT_WR
 	case ShutReadWrite:
-		chow = C.SHUT_RDWR
+		chow = syscall.SHUT_RDWR
 	default:
 		return &verbs.OpError{Op: "rshutdown", Err: syscall.EINVAL}
 	}
-	return s.do("rshutdown", func(fd C.int) error {
-		if rc, err := C.rshutdown(fd, chow); rc != 0 {
-			return opError("rshutdown", err)
+	return s.do("rshutdown", func(fd uintptr) error {
+		if rc, errno := s.lib.rshutdown.Int(fd, chow, 0, 0, 0, 0); rc != 0 {
+			return opError("rshutdown", errno)
 		}
 		return nil
 	})
@@ -340,49 +361,44 @@ func (s *Socket) Close() error {
 		return errClosed("rclose")
 	}
 	s.closed = true
-	if rc, err := C.rclose(C.int(s.fd)); rc != 0 {
-		return opError("rclose", err)
+	if rc, errno := s.lib.rclose.Int(uintptr(s.fd), 0, 0, 0, 0, 0); rc != 0 {
+		return opError("rclose", errno)
 	}
 	return nil
 }
 
 // LocalAddr returns the local address of the socket (rgetsockname).
 func (s *Socket) LocalAddr() (netip.AddrPort, error) {
-	return s.addr("rgetsockname", func(fd C.int, sa *C.struct_sockaddr, n *C.socklen_t) (C.int, error) {
-		rc, err := C.rgetsockname(fd, sa, n)
-		return rc, err
-	})
+	return s.addr("rgetsockname", s.lib.rgetsockname)
 }
 
 // RemoteAddr returns the address of the peer (rgetpeername).
 func (s *Socket) RemoteAddr() (netip.AddrPort, error) {
-	return s.addr("rgetpeername", func(fd C.int, sa *C.struct_sockaddr, n *C.socklen_t) (C.int, error) {
-		rc, err := C.rgetpeername(fd, sa, n)
-		return rc, err
-	})
+	return s.addr("rgetpeername", s.lib.rgetpeername)
 }
 
-// addr reads an address of the socket with get, an rgetsockname or
-// rgetpeername named op.
-func (s *Socket) addr(op string, get func(C.int, *C.struct_sockaddr, *C.socklen_t) (C.int, error)) (netip.AddrPort, error) {
+// addr reads an address of the socket with get, rgetsockname or rgetpeername
+// named op.
+func (s *Socket) addr(op string, get dynlib.Func) (netip.AddrPort, error) {
 	var ap netip.AddrPort
-	err := s.do(op, func(fd C.int) error {
-		var ss C.struct_sockaddr_storage
-		n := C.socklen_t(unsafe.Sizeof(ss))
-		if rc, err := get(fd, sockaddrPtr(&ss), &n); rc != 0 {
-			return opError(op, err)
+	err := s.do(op, func(fd uintptr) error {
+		var ss sockaddrStorage
+		n := uint32(unsafe.Sizeof(ss))
+		if rc, errno := get.Int(fd, uintptr(unsafe.Pointer(&ss)), uintptr(unsafe.Pointer(&n)), 0, 0, 0); rc != 0 {
+			return opError(op, errno)
 		}
-		ap = addrPort(&ss)
+		ap = ss.addrPort()
 		return nil
 	})
 	return ap, err
 }
 
 // setsockopt sets an int option (rsetsockopt).
-func (s *Socket) setsockopt(level, name C.int, value int) error {
-	return s.do("rsetsockopt", func(fd C.int) error {
-		if rc, err := C.rs_setsockopt_int(fd, level, name, C.int(value)); rc != 0 {
-			return opError("rsetsockopt", err)
+func (s *Socket) setsockopt(level, name int, value int) error {
+	return s.do("rsetsockopt", func(fd uintptr) error {
+		v := int32(value)
+		if rc, errno := s.lib.rsetsockopt.Int(fd, uintptr(level), uintptr(name), uintptr(unsafe.Pointer(&v)), unsafe.Sizeof(v), 0); rc != 0 {
+			return opError("rsetsockopt", errno)
 		}
 		return nil
 	})
@@ -397,91 +413,127 @@ func boolInt(on bool) int {
 
 // SetSendBuffer sets the send buffer size (SO_SNDBUF); rsockets doubles it.
 func (s *Socket) SetSendBuffer(bytes int) error {
-	return s.setsockopt(C.SOL_SOCKET, C.SO_SNDBUF, bytes)
+	return s.setsockopt(syscall.SOL_SOCKET, syscall.SO_SNDBUF, bytes)
 }
 
 // SetReceiveBuffer sets the receive buffer size (SO_RCVBUF); rsockets
 // doubles it.
 func (s *Socket) SetReceiveBuffer(bytes int) error {
-	return s.setsockopt(C.SOL_SOCKET, C.SO_RCVBUF, bytes)
+	return s.setsockopt(syscall.SOL_SOCKET, syscall.SO_RCVBUF, bytes)
 }
 
 // SetSendQueueSize sets the send queue depth (RDMA_SQSIZE).
-func (s *Socket) SetSendQueueSize(n int) error { return s.setsockopt(C.SOL_RDMA, C.RDMA_SQSIZE, n) }
+func (s *Socket) SetSendQueueSize(n int) error { return s.setsockopt(solRDMA, rdmaSQSize, n) }
 
 // SetReceiveQueueSize sets the receive queue depth (RDMA_RQSIZE).
-func (s *Socket) SetReceiveQueueSize(n int) error {
-	return s.setsockopt(C.SOL_RDMA, C.RDMA_RQSIZE, n)
-}
+func (s *Socket) SetReceiveQueueSize(n int) error { return s.setsockopt(solRDMA, rdmaRQSize, n) }
 
 // SetInline sets the largest send posted inline (RDMA_INLINE).
-func (s *Socket) SetInline(bytes int) error { return s.setsockopt(C.SOL_RDMA, C.RDMA_INLINE, bytes) }
+func (s *Socket) SetInline(bytes int) error { return s.setsockopt(solRDMA, rdmaInline, bytes) }
 
 // SetReuseAddr sets SO_REUSEADDR; call it before Bind.
 func (s *Socket) SetReuseAddr(on bool) error {
-	return s.setsockopt(C.SOL_SOCKET, C.SO_REUSEADDR, boolInt(on))
+	return s.setsockopt(syscall.SOL_SOCKET, syscall.SO_REUSEADDR, boolInt(on))
 }
 
 // SetV6Only sets IPV6_V6ONLY; call it before Listen.
 func (s *Socket) SetV6Only(on bool) error {
-	return s.setsockopt(C.IPPROTO_IPV6, C.IPV6_V6ONLY, boolInt(on))
+	return s.setsockopt(syscall.IPPROTO_IPV6, syscall.IPV6_V6ONLY, boolInt(on))
 }
 
 // SetNonblock sets or clears O_NONBLOCK (rfcntl F_GETFL/F_SETFL).
 func (s *Socket) SetNonblock(on bool) error {
-	return s.do("rfcntl", func(fd C.int) error {
-		flags, err := C.rs_getfl(fd)
+	return s.do("rfcntl", func(fd uintptr) error {
+		flags, errno := s.lib.rfcntl.Int(fd, syscall.F_GETFL, 0, 0, 0, 0)
 		if flags < 0 {
-			return opError("rfcntl", err)
+			return opError("rfcntl", errno)
 		}
 		if on {
-			flags |= C.O_NONBLOCK
+			flags |= syscall.O_NONBLOCK
 		} else {
-			flags &^= C.O_NONBLOCK
+			flags &^= syscall.O_NONBLOCK
 		}
-		if rc, err := C.rs_setfl(fd, flags); rc != 0 {
-			return opError("rfcntl", err)
+		if rc, errno := s.lib.rfcntl.Int(fd, syscall.F_SETFL, uintptr(flags), 0, 0, 0); rc != 0 {
+			return opError("rfcntl", errno)
 		}
 		return nil
 	})
+}
+
+// pollfd is struct pollfd; the Events constants carry the values of poll(2),
+// which are the same on every Linux architecture.
+type pollfd struct {
+	fd      int32
+	events  int16
+	revents int16
+}
+
+// clockMonotonic is CLOCK_MONOTONIC, the same on every Linux architecture.
+const clockMonotonic = 1
+
+// itimerspec is struct itimerspec.
+type itimerspec struct {
+	interval syscall.Timespec
+	value    syscall.Timespec
+}
+
+// timerfd returns a descriptor that becomes readable once d has passed: a
+// non-blocking timerfd on CLOCK_MONOTONIC (TFD_NONBLOCK and TFD_CLOEXEC are
+// O_NONBLOCK and O_CLOEXEC).
+func timerfd(d time.Duration) (int, error) {
+	fd, _, errno := syscall.Syscall(syscall.SYS_TIMERFD_CREATE, clockMonotonic, syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+	if errno != 0 {
+		return -1, opError("timerfd_create", errno)
+	}
+	its := itimerspec{value: syscall.NsecToTimespec(int64(d))}
+	if _, _, errno := syscall.Syscall6(syscall.SYS_TIMERFD_SETTIME, fd, 0, uintptr(unsafe.Pointer(&its)), 0, 0, 0); errno != 0 {
+		syscall.Close(int(fd))
+		return -1, opError("timerfd_settime", errno)
+	}
+	return int(fd), nil
 }
 
 // Poll waits until an event of fds occurs or timeout passes (rpoll), fills
 // in the Revents and returns the number of descriptors with events, 0 on
 // timeout. A negative timeout waits without limit and 0 returns at once; an
 // EINTR is retried for the time left. fds mixes rsockets descriptors and
-// plain OS file descriptors freely and must not be empty.
+// plain OS file descriptors freely and must not be empty. It fails with an
+// error matching errors.ErrUnsupported when librdmacm.so.1 cannot be loaded.
 func Poll(fds []PollFD, timeout time.Duration) (int, error) {
 	if len(fds) == 0 {
 		return 0, &verbs.OpError{Op: "rpoll", Err: syscall.EINVAL}
 	}
-	cfds := make([]C.struct_pollfd, len(fds), len(fds)+1)
+	lib, err := rdmacm.load("rpoll")
+	if err != nil {
+		return 0, err
+	}
+	cfds := make([]pollfd, len(fds), len(fds)+1)
 	for i, fd := range fds {
-		cfds[i] = C.struct_pollfd{fd: C.int(fd.Fd), events: C.short(fd.Events)}
+		cfds[i] = pollfd{fd: int32(fd.Fd), events: int16(fd.Events)}
 	}
 	// The timeout runs on a timerfd polled along with fds while rpoll waits
 	// without limit: in rdma-core up to v60 an rpoll whose own timeout
 	// expires leaks its poller count, after which every rpoll that has to
 	// wait spins instead of sleeping and never times out.
-	wait := C.int(-1)
+	wait := -1
 	switch {
 	case timeout == 0:
 		wait = 0
 	case timeout > 0:
-		tfd, err := C.rs_timerfd(C.int64_t(timeout))
-		if tfd < 0 {
-			return 0, opError("timerfd_create", err)
+		tfd, err := timerfd(timeout)
+		if err != nil {
+			return 0, err
 		}
-		defer C.close(tfd)
-		cfds = append(cfds, C.struct_pollfd{fd: tfd, events: C.POLLIN})
+		defer syscall.Close(tfd)
+		cfds = append(cfds, pollfd{fd: int32(tfd), events: int16(PollIn)})
 	}
 	for {
-		n, err := C.rpoll(&cfds[0], C.nfds_t(len(cfds)), wait)
+		n, errno := lib.rpoll.Int(uintptr(unsafe.Pointer(&cfds[0])), uintptr(len(cfds)), uintptr(wait), 0, 0, 0)
 		if n < 0 {
-			if err == syscall.EINTR {
+			if errno == syscall.EINTR {
 				continue
 			}
-			return 0, opError("rpoll", err)
+			return 0, opError("rpoll", errno)
 		}
 		ready := 0
 		for i := range fds {

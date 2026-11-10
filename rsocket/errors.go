@@ -9,8 +9,8 @@ import (
 	"github.com/wzshiming/rdma/verbs"
 )
 
-// opError reports an rsockets call op that failed with errno set, as read by
-// cgo into err.
+// opError reports an rsockets call op that failed with the errno err, or
+// with EIO when it left none.
 func opError(op string, err error) error {
 	errno, ok := err.(syscall.Errno)
 	if !ok || errno == 0 {

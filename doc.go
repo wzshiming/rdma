@@ -55,7 +55,8 @@
 // with os.ErrDeadlineExceeded (Timeout reports true), and every error is a
 // *net.OpError on net "rdma": errors.Is matches syscall.ECONNREFUSED when
 // nobody listens, and errors.ErrUnsupported on platforms without librdmacm,
-// where the package still compiles. Close and CloseWrite return at once
+// where the package still compiles, or when librdmacm.so.1 cannot be loaded
+// at run time. Close and CloseWrite return at once
 // while the peer is alive; when it has vanished, rsockets wait for the posted
 // sends to be given up, which takes the transport's retry timeout, several
 // seconds.

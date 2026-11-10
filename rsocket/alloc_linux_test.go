@@ -1,4 +1,4 @@
-//go:build linux && cgo
+//go:build linux && !android && !race && (amd64 || arm64 || loong64 || ppc64le || riscv64 || s390x)
 
 package rsocket_test
 
@@ -9,6 +9,10 @@ import (
 
 	"github.com/wzshiming/rdma/rsocket"
 )
+
+// Under the race detector sync.Pool, which dynlib draws the argument block
+// of every call from, drops entries at random, so these tests stay out of
+// race builds.
 
 // TestReadWriteAllocateNothing measures the Go heap allocations of Write and
 // Read on a connected socket, the hot path of every byte: none, as measured

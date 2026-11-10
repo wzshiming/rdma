@@ -90,8 +90,12 @@
 // "rsetsockopt", "rgetsockopt", "rfcntl", "rpoll") and whose Err is the
 // syscall.Errno, or os.ErrClosed after Close.
 //
-// On Linux with cgo the package links against librdmacm (-lrdmacm, header
-// rdma/rsocket.h). Everywhere else it compiles to stubs whose New and Poll
-// return an error satisfying errors.Is(err, errors.ErrUnsupported); the
-// types, constants and String methods are available on every platform.
+// On Linux (amd64, arm64, loong64, ppc64le, riscv64 and s390x) the package
+// loads librdmacm.so.1 through the dynamic loader when the first socket is
+// created or Poll is first called, with or without cgo, so that building
+// needs neither a C compiler nor the rdma-core headers; when the library
+// cannot be loaded, New and Poll return an error satisfying errors.Is(err,
+// errors.ErrUnsupported) that names it. Everywhere else the package compiles
+// to stubs whose New and Poll return such an error; the types, constants and
+// String methods are available on every platform.
 package rsocket

@@ -1,4 +1,4 @@
-//go:build !linux || !cgo
+//go:build !linux || android || !(amd64 || arm64 || loong64 || ppc64le || riscv64 || s390x)
 
 package rdma_test
 

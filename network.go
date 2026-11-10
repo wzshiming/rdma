@@ -7,7 +7,8 @@ import (
 )
 
 // socket is the non-blocking stream socket the engine drives, with the shape
-// of *rsocket.Socket: on Linux with cgo it is one, in tests an in-memory fake.
+// of *rsocket.Socket: on Linux with librdmacm it is one, in tests an
+// in-memory fake.
 // A call that would block fails with an error matching errAgain, a Connect
 // that goes on in the background with one matching errInProgress, and Read
 // returns io.EOF once the peer has shut down writing.
