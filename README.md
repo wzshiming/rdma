@@ -3,12 +3,12 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/wzshiming/rdma.svg)](https://pkg.go.dev/github.com/wzshiming/rdma)
 [![Go](https://github.com/wzshiming/rdma/actions/workflows/go.yml/badge.svg)](https://github.com/wzshiming/rdma/actions/workflows/go.yml)
 
-Reliable byte streams over RDMA with the vocabulary of the `net` package: `Dial` and `Listen` give out `net.Conn` and `net.Listener` values backed by rsockets, the stream sockets of librdmacm, addressed by IP address and port like TCP, working over InfiniBand, RoCE and iWARP alike, and depending on nothing but the standard library and rdma-core.
+Reliable byte streams over RDMA with the vocabulary of the `net` package: `Dial` and `Listen` give out `net.Conn` and `net.Listener` values backed by rsockets, the stream sockets of librdmacm, addressed by IP address and port like TCP, working over InfiniBand, RoCE and iWARP alike, and depending on the standard library, [`github.com/ebitengine/purego`](https://github.com/ebitengine/purego) and rdma-core, which the bindings load at run time.
 
 ## Requirements
 
 - Linux with the kernel's RDMA stack (`ib_uverbs`, `rdma_ucm`) and either an RDMA device or Soft-RoCE (the `rdma_rxe` kernel module) over any Ethernet interface; see [Soft-RoCE](#soft-roce) for a one-host setup.
-- rdma-core: the headers `libibverbs-dev` and `librdmacm-dev` to build, the libraries `libibverbs1`, `librdmacm1t64` and `ibverbs-providers` to run (Debian and Ubuntu package names; the library is `librdmacm1` before Debian trixie and Ubuntu 24.04). Release 53 or later holds more than three connections in one process reliably: earlier releases, the 50.0 of Ubuntu 24.04 among them, have the rsockets `cm_svc_run` bug, a service thread polling a freed descriptor array once a fourth rsocket registers, which hangs connections or crashes the process.
+- rdma-core at run time: the libraries `libibverbs1`, `librdmacm1t64` and `ibverbs-providers` (Debian and Ubuntu package names; the library is `librdmacm1` before Debian trixie and Ubuntu 24.04). Building needs neither the headers nor a C compiler: the bindings open `librdmacm.so.1` and `libibverbs.so.1` on first use. Release 53 or later holds more than three connections in one process reliably: earlier releases, the 50.0 of Ubuntu 24.04 among them, have the rsockets `cm_svc_run` bug, a service thread polling a freed descriptor array once a fourth rsocket registers, which hangs connections or crashes the process.
 - A locked-memory limit that holds the registered buffers, which are pinned: about 256 KiB per connection with the rsockets defaults, so the usual 8 MiB limit holds a few dozen connections. `ulimit -l unlimited` raises it for a shell.
 
 Everywhere else the module compiles to stubs; see [Platforms](#platforms).
@@ -142,7 +142,7 @@ Build the image from a checkout with `docker build -t rdma .`.
 Soft-RoCE runs RDMA over any Ethernet interface with the `rdma_rxe` kernel module, so one Linux host is enough to try the package; the CI workflow does exactly this on a stock Ubuntu runner, where it also builds rdma-core from source, since the 50.0 that Ubuntu 24.04 ships falls under the caveat in [Requirements](#requirements). Give rxe a dummy interface with a private address of its own: rdma_cm picks the device by the local IP, and a hardware RDMA device on the same host would otherwise claim the address of a shared interface.
 
 ```sh
-sudo apt-get install -y rdma-core ibverbs-utils rdmacm-utils libibverbs-dev librdmacm-dev ibverbs-providers iproute2
+sudo apt-get install -y rdma-core ibverbs-utils rdmacm-utils ibverbs-providers iproute2
 sudo apt-get install -y "linux-modules-extra-$(uname -r)"  # rdma_rxe.ko lives here on Ubuntu
 sudo modprobe rdma_rxe
 
@@ -169,7 +169,7 @@ rdma pingpong -connect 10.200.0.1:4791
 
 ## Platforms
 
-Linux with cgo is the real implementation, over librdmacm and libibverbs. Every other GOOS, and Linux built with `CGO_ENABLED=0`, compiles the same API, with `Dial`, `Listen` and the constructors of `rsocket`, `verbs` and `cm` returning an error that `errors.Is(err, errors.ErrUnsupported)` matches; a program using the package builds everywhere and fails only where it needs RDMA.
+The real implementation is Linux on amd64, arm64, loong64, ppc64le, riscv64 and s390x, with or without cgo: the bindings load `librdmacm.so.1` and `libibverbs.so.1` through [`purego`](https://github.com/ebitengine/purego) on first use and call them directly, so `CGO_ENABLED` changes nothing, and a host without the libraries gets an error that `errors.Is(err, errors.ErrUnsupported)` matches from `Dial`, `Listen` and the constructors of `rsocket`, `verbs` and `cm` rather than a program that cannot start. A build without cgo links glibc's dynamic loader; musl is unverified. The architectures are verified to different degrees: amd64 runs the device tests on the Soft-RoCE device of the CI workflow, arm64 runs the tests on a host without a device, and loong64, ppc64le, riscv64 and s390x get a cross vet and the compile-time check of the structure layouts against the rdma-core headers, so no code runs on them in CI. Every other GOOS and GOARCH, linux/386 and linux/arm among them, compiles the same API with those constructors returning the same error; a program using the package builds everywhere and fails only where it needs RDMA.
 
 ## License
 

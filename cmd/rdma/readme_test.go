@@ -106,6 +106,69 @@ func TestREADMEDescribesTheRsocketsStream(t *testing.T) {
 	}
 }
 
+// TestREADMERequirements checks that Requirements asks for the rdma-core
+// libraries at run time, keeps the release caveat, and no longer for the
+// development packages and C compiler a cgo build needed.
+func TestREADMERequirements(t *testing.T) {
+	requirements := section(readREADME(t), "## Requirements")
+	if requirements == "" {
+		t.Fatal("README has no Requirements section")
+	}
+	for _, stale := range []string{"libibverbs-dev", "librdmacm-dev", "to build"} {
+		if strings.Contains(requirements, stale) {
+			t.Errorf("the Requirements section still mentions %q", stale)
+		}
+	}
+	for _, want := range []string{
+		"`libibverbs1`", "`librdmacm1t64`", "`ibverbs-providers`", "`librdmacm1`",
+		"neither the headers nor a C compiler",
+		"Release 53 or later",
+	} {
+		if !strings.Contains(requirements, want) {
+			t.Errorf("the Requirements section lacks %q", want)
+		}
+	}
+}
+
+// TestREADMEPlatforms checks that Platforms names the six supported Linux
+// architectures and how each is verified, the independence from cgo, the
+// error a host without the libraries gets, and the libc the no-cgo build
+// targets.
+func TestREADMEPlatforms(t *testing.T) {
+	platforms := section(readREADME(t), "## Platforms")
+	if platforms == "" {
+		t.Fatal("README has no Platforms section")
+	}
+	if strings.Contains(platforms, "Linux with cgo") {
+		t.Error("the Platforms section still makes cgo the real implementation")
+	}
+	for _, want := range []string{
+		"amd64", "arm64", "loong64", "ppc64le", "riscv64", "s390x",
+		"Soft-RoCE", "without a device", "cross vet", "layout",
+		"`CGO_ENABLED`", "errors.ErrUnsupported", "glibc", "musl",
+		"linux/386", "linux/arm",
+	} {
+		if !strings.Contains(platforms, want) {
+			t.Errorf("the Platforms section lacks %q", want)
+		}
+	}
+}
+
+// TestREADMENamesTheDependencies checks that the README names purego beside
+// the standard library and rdma-core, and installs no development package
+// anywhere, the Soft-RoCE recipe included.
+func TestREADMENamesTheDependencies(t *testing.T) {
+	readme := readREADME(t)
+	if !strings.Contains(readme, "github.com/ebitengine/purego") {
+		t.Error("README does not name github.com/ebitengine/purego")
+	}
+	for _, stale := range []string{"nothing but the standard library", "libibverbs-dev", "librdmacm-dev"} {
+		if strings.Contains(readme, stale) {
+			t.Errorf("README still mentions %q", stale)
+		}
+	}
+}
+
 // section returns the text from the heading to the next heading of the
 // same level.
 func section(doc, heading string) string {
