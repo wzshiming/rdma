@@ -20,6 +20,7 @@ import (
 	"golang.org/x/net/nettest"
 
 	"github.com/wzshiming/rdma/internal/rdmatest"
+	"github.com/wzshiming/rdma/rsocket"
 )
 
 const rxeTimeout = 20 * time.Second
@@ -48,8 +49,12 @@ func manyConnections(t *testing.T) {
 // rdmaCoreRelease reads the rdma-core release from the file name of the
 // librdmacm this process has loaded, librdmacm.so.1.<minor>.<release>.<patch>,
 // which is the library the tests run against whichever directory holds it;
-// it returns 0 when none is mapped.
+// it returns 0 when none is mapped. The library is loaded by the first
+// rsockets call, so one is made first.
 func rdmaCoreRelease() int {
+	if s, err := rsocket.New(rsocket.IPv4); err == nil {
+		s.Close()
+	}
 	maps, err := os.ReadFile("/proc/self/maps")
 	if err != nil {
 		return 0
