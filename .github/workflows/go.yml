@@ -9,14 +9,40 @@ permissions:
 
 jobs:
   test:
+    name: test (${{ matrix.name || matrix.os }})
     strategy:
       fail-fast: false
       matrix:
-        os:
-        - ubuntu-latest
-        - macos-latest
-        - windows-latest
+        include:
+        # The toolchain's default: cgo against the development packages on
+        # Linux, the stubs on macOS and Windows.
+        - os: ubuntu-latest
+          apt: libibverbs-dev librdmacm-dev
+          flags: -race
+          packages: ./...
+        - os: macos-latest
+          flags: -race
+          packages: ./...
+        - os: windows-latest
+          flags: -race
+          packages: ./...
+        # No cgo on linux/amd64 and linux/arm64 with the libraries present at
+        # run time only. The race detector needs cgo, so it stays out; the
+        # commands keep their build tags until their tests run without cgo,
+        # so the library packages alone.
+        - name: linux/amd64 without cgo
+          os: ubuntu-24.04
+          cgo: 0
+          apt: libibverbs1 librdmacm1t64
+          packages: . ./rsocket/... ./verbs/... ./cm/... ./internal/...
+        - name: linux/arm64 without cgo
+          os: ubuntu-24.04-arm
+          cgo: 0
+          apt: libibverbs1 librdmacm1t64
+          packages: . ./rsocket/... ./verbs/... ./cm/... ./internal/...
     runs-on: ${{ matrix.os }}
+    env:
+      CGO_ENABLED: ${{ matrix.cgo }}
     defaults:
       run:
         shell: bash
@@ -33,9 +59,12 @@ jobs:
       with:
         go-version: stable
 
-    - name: Install RDMA libraries
+    - name: Show the platform
+      run: uname -m && go version && go env GOOS GOARCH CGO_ENABLED
+
+    - name: Install RDMA packages
       if: runner.os == 'Linux'
-      run: sudo apt-get update && sudo apt-get install -y libibverbs-dev librdmacm-dev
+      run: sudo apt-get update && sudo apt-get install -y ${{ matrix.apt }}
 
     - name: Format
       run: test -z "$(gofmt -l . | tee /dev/stderr)"
@@ -44,7 +73,7 @@ jobs:
       run: go vet ./...
 
     - name: Test
-      run: go test -race -count=1 ./...
+      run: go test ${{ matrix.flags }} -count=1 ${{ matrix.packages }}
 
   check:
     runs-on: ubuntu-latest
