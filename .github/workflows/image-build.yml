@@ -1,0 +1,107 @@
+name: Image
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # The first push creates the package, which may be private; GITHUB_TOKEN cannot change that, so set its visibility to public in the package settings.
+  packages: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+    - uses: actions/checkout@v7
+
+    # Go cross-compiles, but the runtime stage's apt-get and useradd run as the target architecture.
+    - uses: docker/setup-qemu-action@v4
+
+    - uses: docker/setup-buildx-action@v4
+
+    # Only master and v* tags publish; branches and pull requests just build and smoke test.
+    - name: Log in to the registry
+      if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v'))
+      uses: docker/login-action@v4
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v6
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=sha
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+          type=semver,pattern={{major}}
+          type=raw,value=latest,enable={{is_default_branch}}
+      env:
+        DOCKER_METADATA_ANNOTATIONS_LEVELS: manifest,index
+
+    - name: Build the amd64 image
+      uses: docker/build-push-action@v7
+      with:
+        context: .
+        platforms: linux/amd64
+        load: true
+        tags: rdma:smoke
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+    - name: Smoke test the amd64 image
+      shell: bash
+      run: |
+        docker run --rm rdma:smoke help | tee "$RUNNER_TEMP/help"
+        grep -q '^Usage: rdma' "$RUNNER_TEMP/help"
+        docker run --rm --entrypoint ldd rdma:smoke /usr/local/bin/rdma | tee "$RUNNER_TEMP/ldd"
+        grep -q libibverbs "$RUNNER_TEMP/ldd"
+        grep -q librdmacm "$RUNNER_TEMP/ldd"
+        if grep 'not found' "$RUNNER_TEMP/ldd"; then exit 1; fi
+        docker run --rm --entrypoint id rdma:smoke | tee "$RUNNER_TEMP/id"
+        grep -q '^uid=10001(' "$RUNNER_TEMP/id"
+        if [ -e /dev/infiniband ]; then
+          ls -l /dev/infiniband
+          docker run --rm --network host --device /dev/infiniband rdma:smoke devices
+        fi
+
+    - name: Build the arm64 image
+      uses: docker/build-push-action@v7
+      with:
+        context: .
+        platforms: linux/arm64
+        load: true
+        tags: rdma:smoke-arm64
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+    - name: Smoke test the arm64 image
+      run: docker run --rm --platform linux/arm64 rdma:smoke-arm64 help
+
+    - name: Build and push
+      uses: docker/build-push-action@v7
+      with:
+        context: .
+        platforms: linux/amd64,linux/arm64
+        push: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v')) }}
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        annotations: ${{ steps.meta.outputs.annotations }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
