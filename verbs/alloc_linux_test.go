@@ -8,13 +8,14 @@ import (
 	"github.com/wzshiming/rdma/verbs"
 )
 
-// The cgo binding allocated this much per call on rxe (Go run 42851838307 of
-// commit f481f61); the run-time loaded one may not allocate more. Under the
-// race detector sync.Pool, which dynlib draws its argument block from, drops
+// The cgo binding allocated 1, 1 and 0 times per call on rxe (Go run
+// 42851838307 of commit f481f61); the run-time loaded one builds the chain
+// in the queue pair's own buffer and allocates nothing. Under the race
+// detector sync.Pool, which dynlib draws its argument block from, drops
 // entries at random, so these tests stay out of race builds.
 const (
-	maxPostSendAllocs = 1
-	maxPostRecvAllocs = 1
+	maxPostSendAllocs = 0
+	maxPostRecvAllocs = 0
 	maxPollAllocs     = 0
 )
 
