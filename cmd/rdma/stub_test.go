@@ -1,4 +1,4 @@
-//go:build !linux || !cgo
+//go:build !linux || android || !(amd64 || arm64 || loong64 || ppc64le || riscv64 || s390x)
 
 package main
 
@@ -7,8 +7,8 @@ import (
 	"testing"
 )
 
-// TestStubUnsupported checks that without rdma-core every command that needs
-// a device reports the unsupported error and fails.
+// TestStubUnsupported checks that on a platform without the bindings every
+// command that needs a device reports the unsupported error and fails.
 func TestStubUnsupported(t *testing.T) {
 	tests := []struct {
 		name string
