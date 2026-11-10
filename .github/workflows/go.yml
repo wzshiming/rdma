@@ -90,10 +90,13 @@ jobs:
 
     - name: Cross-platform vet
       # The default shell (bash -e) stops the loop at the first failing target.
-      # CGO_ENABLED=0 keeps the native target on the stub path too.
+      # CGO_ENABLED=0 so that no target needs a C toolchain: the six Linux
+      # architectures the bindings support, then linux/386 and the other
+      # systems, which get the stubs.
       run: |
         for target in \
-          linux/amd64 linux/386 linux/arm64 darwin/amd64 darwin/arm64 \
+          linux/amd64 linux/arm64 linux/loong64 linux/ppc64le linux/riscv64 linux/s390x \
+          linux/386 darwin/amd64 darwin/arm64 \
           windows/amd64 windows/386 windows/arm64 \
           freebsd/amd64 openbsd/amd64 netbsd/amd64 dragonfly/amd64 \
           solaris/amd64 illumos/amd64 aix/ppc64 plan9/amd64 \
