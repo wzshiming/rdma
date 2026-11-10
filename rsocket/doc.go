@@ -63,17 +63,20 @@
 //
 // # Blocking and concurrency
 //
-// Every call runs inside librdmacm on the calling thread. Shutdown and Close
-// wait for the posted sends to complete, which may take the retry timeout of
-// the transport, several seconds, when the peer has vanished. On a
-// non-blocking socket one goroutine may Read, another Write and a third Poll
-// at the same time; a blocking socket must not be shared, since its
-// completion channel blocks the waiter inside C. Close waits for the calls
-// in progress on the Socket to return before releasing it, so a blocking
-// call that never returns holds Close back: use non-blocking mode and Poll,
-// with a pipe or eventfd among the descriptors for wake-ups. After Close
-// every method fails with an error wrapping os.ErrClosed and the descriptor
-// is never passed to librdmacm again.
+// Every call runs inside librdmacm on the calling thread, and librdmacm
+// runs threads of its own for the connection management: a listener's
+// requests are accepted there, handshake included, before Poll reports it
+// readable, and a non-blocking Connect goes on there even while the socket
+// is not polled. Shutdown and Close wait for the posted sends to complete,
+// which may take the retry timeout of the transport, several seconds, when
+// the peer has vanished. On a non-blocking socket one goroutine may Read,
+// another Write and a third Poll at the same time; a blocking socket must
+// not be shared, since its completion channel blocks the waiter inside C.
+// Close waits for the calls in progress on the Socket to return before
+// releasing it, so a blocking call that never returns holds Close back: use
+// non-blocking mode and Poll, with a pipe or eventfd among the descriptors
+// for wake-ups. After Close every method fails with an error wrapping
+// os.ErrClosed and the descriptor is never passed to librdmacm again.
 //
 // Registered memory does not survive fork: a process that forks after
 // creating a socket needs RDMAV_FORK_SAFE=1 in its environment, or
