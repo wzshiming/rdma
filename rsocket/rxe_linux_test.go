@@ -329,11 +329,13 @@ func TestWriteWithoutRoomReturnsEAGAIN(t *testing.T) {
 	if !bytes.Equal(got, sent) {
 		t.Fatal("the server read differs from what the client wrote")
 	}
-	// Drained, the client can write again.
-	fds := []rsocket.PollFD{{Fd: client.Descriptor(), Events: rsocket.PollOut}}
+	// Drained, the client can write again once the server has returned the
+	// buffer space, which it does from a call that services its socket: the
+	// Poll on it here, as an event loop would make.
+	fds := []rsocket.PollFD{{Fd: client.Descriptor(), Events: rsocket.PollOut}, {Fd: server.Descriptor(), Events: rsocket.PollIn}}
 	await(t, fds, time.Now().Add(timeout))
-	if fds[0].Revents&rsocket.PollOut == 0 {
-		t.Fatalf("client Revents = %v after the drain, want POLLOUT", fds[0].Revents)
+	if fds[0].Revents&rsocket.PollOut == 0 || fds[1].Revents != 0 {
+		t.Fatalf("Revents = %v, %v after the drain; want POLLOUT on the client only", fds[0].Revents, fds[1].Revents)
 	}
 }
 

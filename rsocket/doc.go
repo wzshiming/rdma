@@ -29,6 +29,13 @@
 // sockets do not inherit the flag: an Accept from a non-blocking listener
 // returns a socket whose Read blocks until SetNonblock(true) is called on it.
 //
+// Flow control runs on credits: a Write fills the sender's buffer and the
+// receiver's, 128 KiB each by default, and then fails with syscall.EAGAIN
+// until the receiver has returned the space. Read alone does not return it:
+// the receiver sends the credit update from its next call that services the
+// socket, a Poll on it, a Read that has to wait, or a Write. An event loop
+// that polls every connected socket does this as a matter of course.
+//
 // Poll on an rsockets descriptor first spins for the polling_time of the
 // configuration (10 µs by default), then sleeps in poll(2) in slices of
 // wake_up_interval (5 s by default), so a call without a timeout wakes
