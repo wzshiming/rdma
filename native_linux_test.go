@@ -9,6 +9,8 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"os"
+	"os/exec"
 	"runtime"
 	"sync"
 	"syscall"
@@ -489,4 +491,108 @@ func testCloseWithThePeerNotReading(t *testing.T, closer, peer *Conn) {
 	if in.sum() != out.sum() {
 		t.Errorf("wrote %s before Close, the peer read %s", in.sum(), out.sum())
 	}
+}
+
+// The environment of the peer process of
+// TestRXENativeKilledPeerReadsAsResetAfterTheData: the address it dials and
+// the engine it dials with.
+const (
+	peerAddrEnv   = "RDMA_TEST_PEER_ADDR"
+	peerEngineEnv = "RDMA_TEST_PEER_ENGINE"
+)
+
+// killedPeerData is what the peer process writes before it is killed.
+func killedPeerData() []byte {
+	b := make([]byte, 32<<10)
+	newStream(23).rng.Read(b)
+	return b
+}
+
+// A peer process of either engine writes to a native connection and is
+// killed before it closes: the native end reads what arrived, then
+// ECONNRESET.
+func TestRXENativeKilledPeerReadsAsResetAfterTheData(t *testing.T) {
+	if addr := os.Getenv(peerAddrEnv); addr != "" {
+		writeAndAwaitTheKill(t, Engine(os.Getenv(peerEngineEnv)), addr)
+		return
+	}
+	rdmatest.Device(t)
+	want := killedPeerData()
+	forEachEngine(t, func(t *testing.T, peer Engine) {
+		ln := rxeListen(t, Config{Engine: EngineNative})
+		acc := acceptAsync(ln)
+		cmd := exec.Command(os.Args[0], "-test.run=^TestRXENativeKilledPeerReadsAsResetAfterTheData$", "-test.count=1")
+		cmd.Env = append(os.Environ(), peerAddrEnv+"="+ln.Addr().String(), peerEngineEnv+"="+string(peer))
+		var out bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &out, &out
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("start the peer process: %v", err)
+		}
+		exited := make(chan struct{})
+		var exitErr error
+		go func() {
+			exitErr = cmd.Wait()
+			close(exited)
+		}()
+		t.Cleanup(func() {
+			cmd.Process.Kill()
+			<-exited
+		})
+		var conn *Conn
+		select {
+		case r := <-acc:
+			if r.err != nil {
+				t.Fatalf("AcceptRDMA() error: %v", r.err)
+			}
+			conn = r.c
+			t.Cleanup(func() { conn.Close() })
+		case <-exited:
+			t.Fatalf("the peer process exited before it connected: %v\n%s", exitErr, &out)
+		case <-time.After(rxeTimeout):
+			t.Fatalf("the peer process did not connect within %v", rxeTimeout)
+		}
+		for deadline := time.Now().Add(rxeTimeout); arrived(conn) < len(want); time.Sleep(time.Millisecond) {
+			select {
+			case <-exited:
+				t.Fatalf("the peer process exited before its data arrived: %v\n%s", exitErr, &out)
+			default:
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("%d of the %d bytes of the peer process arrived within %v", arrived(conn), len(want), rxeTimeout)
+			}
+		}
+		if err := cmd.Process.Kill(); err != nil {
+			t.Fatalf("kill the peer process: %v", err)
+		}
+		<-exited
+		conn.SetReadDeadline(time.Now().Add(rxeTimeout))
+		got, err := io.ReadAll(conn)
+		if !bytes.Equal(got, want) || !isOpError(err, "read", syscall.ECONNRESET) {
+			t.Errorf("read %d bytes and %v once the peer process was killed; want its %d bytes and a read *net.OpError with ECONNRESET", len(got), err, len(want))
+		}
+	})
+}
+
+// writeAndAwaitTheKill is the peer process: it dials addr with the engine e,
+// writes killedPeerData and waits to be killed.
+func writeAndAwaitTheKill(t *testing.T, e Engine, addr string) {
+	d := Dialer{Config: Config{Engine: e}, Timeout: rxeTimeout}
+	c, err := d.Dial("rdma", addr)
+	if err != nil {
+		t.Fatalf("Dial(%s) error: %v", addr, err)
+	}
+	if _, err := c.Write(killedPeerData()); err != nil {
+		t.Fatalf("Write error: %v", err)
+	}
+	time.Sleep(rxeTimeout)
+	t.Fatal("the peer process was not killed")
+}
+
+// arrived returns how many bytes have arrived on c, a connection of the
+// native engine, in one piece and wait to be read.
+func arrived(c *Conn) int {
+	s := c.s.(*nativeStream)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.st.Peek())
 }
