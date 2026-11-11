@@ -276,16 +276,17 @@ func (d *deadline) set(t time.Time) {
 		d.expired = true
 		return
 	}
-	ch := d.ch
-	d.timer = time.AfterFunc(wait, func() {
+	var timer *time.Timer
+	timer = time.AfterFunc(wait, func() {
 		d.mu.Lock()
 		defer d.mu.Unlock()
 		// A deadline set since then has its own timer.
-		if d.ch == ch {
+		if d.timer == timer {
 			d.expired = true
 			d.wake()
 		}
 	})
+	d.timer = timer
 }
 
 // stop disarms the deadline when the connection closes.
