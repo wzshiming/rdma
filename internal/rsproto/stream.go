@@ -2,6 +2,7 @@ package rsproto
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 )
 
@@ -74,6 +75,8 @@ type Stream struct {
 
 // recvID is the id of every receive, rs_recv_wr_id(0).
 const recvID = 1 << 63
+
+var errWriteEnded = errors.New("rsproto: write side ended")
 
 // NewStream returns a stream on memory the caller registered, as
 // rs_create_ep leaves it for a connection to be set up: with
@@ -165,9 +168,10 @@ func (s *Stream) setGrant(i int, g SGE) {
 	PutSGE(s.c.GrantTable.Buf[i*SGESize:], s.order, g)
 }
 
-// CanSend mirrors rs_can_send: whether Reserve would lend room now.
+// CanSend mirrors rs_can_send while the write side is open: whether Reserve
+// would lend room now.
 func (s *Stream) CanSend() bool {
-	return s.sqeAvail > 0 && s.sbufAvail >= SndLowat && s.sseqNo != s.sseqComp && s.grant(s.targetSGE).Length != 0
+	return s.state&StateWritable != 0 && s.sqeAvail > 0 && s.sbufAvail >= SndLowat && s.sseqNo != s.sseqComp && s.grant(s.targetSGE).Length != 0
 }
 
 // Reserve lends the room of the send buffer that one message can carry now,
@@ -181,8 +185,12 @@ func (s *Stream) Reserve() []byte {
 }
 
 // Commit ends the reservation, sending the first n bytes of the view as one
-// data message, as rs_write_data does.
+// data message, as rs_write_data does; once the write side has ended it sends
+// nothing and fails.
 func (s *Stream) Commit(n int) error {
+	if s.state&StateWritable == 0 {
+		return errWriteEnded
+	}
 	if n == 0 {
 		return nil
 	}

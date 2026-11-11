@@ -974,6 +974,25 @@ func TestCloseWriteSendsShutdownAndReadsGoOn(t *testing.T) {
 	}
 }
 
+// rsend fails with ECONNRESET once rs_writable is clear, though only when
+// rs_can_send fails first; the stream refuses at once, the commit of a view
+// lent before included.
+func TestWritesAreRefusedAfterCloseWrite(t *testing.T) {
+	l := &recorder{}
+	s := rsproto.NewStream(l, testConfig())
+	s.Connect(testPeer)
+	s.Reserve()
+	s.CloseWrite()
+	l.posts = nil
+
+	if s.CanSend() || s.Reserve() != nil {
+		t.Errorf("CanSend() = %v and Reserve() lent %d bytes after CloseWrite, want false and nothing", s.CanSend(), len(s.Reserve()))
+	}
+	if err := s.Commit(1); err == nil || len(l.posts) != 0 {
+		t.Errorf("Commit(1) of a view lent before CloseWrite = %v and posted %+v, want an error and nothing", err, l.posts)
+	}
+}
+
 func TestStreamConnData(t *testing.T) {
 	c := testConfig()
 	little := rsproto.ConnData{
