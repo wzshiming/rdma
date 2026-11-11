@@ -798,7 +798,7 @@ func TestCreditsKeepComingAsTheSequenceWraps(t *testing.T) {
 		readMessages(s, c, read%len(c.ReceiveBuffer.Buf), 1)
 		due := read%(rsproto.QPMinSize/2) == 0
 		msg := rsproto.MakeMsg(rsproto.OpSGL, uint32(uint16(read))+rsproto.QPMinSize)
-		if len(l.posts) != 0 != due || due && (len(l.posts) != 1 || l.posts[0].msg != msg) {
+		if due && (len(l.posts) != 1 || l.posts[0].msg != msg) || !due && len(l.posts) != 0 {
 			t.Fatalf("reading message %d posted %+v, want credits %v (%#x)", read, l.posts, due, msg)
 		}
 		for _, p := range l.posts {
