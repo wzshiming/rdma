@@ -161,3 +161,29 @@ func TestNativeDialWithoutALibraryIsUnsupported(t *testing.T) {
 		})
 	}
 }
+
+// A native listen fails at once with a listen *net.OpError matching
+// errors.ErrUnsupported when one of the libraries it runs on, the first or
+// the second it loads, cannot be loaded.
+func TestNativeListenWithoutALibraryIsUnsupported(t *testing.T) {
+	const missing = "/nonexistent/"
+	for _, tt := range []struct {
+		name      string
+		libraries []string
+	}{
+		{"libibverbs", []string{missing + "libibverbs.so.1", "librdmacm.so.1"}},
+		{"librdmacm", []string{"libibverbs.so.1", missing + "librdmacm.so.1"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			lc := ListenConfig{eng: nativeEngine{libraries: tt.libraries}}
+			ln, err := lc.Listen(t.Context(), "rdma", "192.0.2.1:7471")
+			if err == nil {
+				ln.Close()
+			}
+			if !isOpError(err, "listen", errors.ErrUnsupported) {
+				t.Errorf("Listen() loading %q error = %v, want a listen *net.OpError matching errors.ErrUnsupported", tt.libraries, err)
+			}
+			t.Logf("Listen() loading %q: %v", tt.libraries, err)
+		})
+	}
+}

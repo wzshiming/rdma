@@ -109,8 +109,12 @@ func (e nativeEngine) dial(ctx context.Context, laddr, raddr *Addr, c Config) (s
 }
 
 // listen listens on laddr through cm, as rlisten does, and has an acceptor
-// establish each request that arrives with acceptRequest.
+// establish each request that arrives with acceptRequest. A library missing
+// fails it first.
 func (e nativeEngine) listen(laddr *Addr, backlog int, c Config) (acceptor, error) {
+	if err := e.loadLibraries(); err != nil {
+		return nil, err
+	}
 	l, err := cm.Listen(laddr.addrPort(), backlog)
 	if err != nil {
 		return nil, err
