@@ -12,12 +12,6 @@ import (
 	"github.com/wzshiming/rdma/verbs"
 )
 
-// nativeDialer injects the native engine into a Dialer, an engine having to
-// listen too, which the native one does not yet.
-type nativeDialer struct{ nativeEngine }
-
-func (nativeDialer) listen(*Addr, int, Config) (acceptor, error) { return nil, errors.ErrUnsupported }
-
 // A native connection is sized as rsockets sizes an rsocket that the
 // librdmacm engine set the same Config on: buffer sizes doubled, a send
 // buffer of 4096 bytes when that falls short of RS_SNDLOWAT, queue depths and
@@ -166,7 +160,7 @@ func TestNativeDialWithoutALibraryIsUnsupported(t *testing.T) {
 		{"librdmacm", []string{"libibverbs.so.1", missing + "librdmacm.so.1"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			d := Dialer{eng: nativeDialer{nativeEngine{libraries: tt.libraries}}}
+			d := Dialer{eng: nativeEngine{libraries: tt.libraries}}
 			c, err := d.Dial("rdma", "192.0.2.1:7471")
 			if err == nil {
 				c.Close()

@@ -23,7 +23,7 @@ import (
 // the listener.
 func rxeNativeDialPair(t testing.TB, cfg Config) (native, peer *Conn) {
 	t.Helper()
-	return rxeEnginePair(t, cfg, nativeDialer{}, librdmacmEngine{&rsocketNet})
+	return rxeEnginePair(t, cfg, nativeEngine{}, librdmacmEngine{&rsocketNet})
 }
 
 // rxeEnginePair connects a Dialer of the engine dial to a fresh listener of
@@ -76,12 +76,12 @@ func TestRXENativeDialer(t *testing.T) {
 // A native Dialer and a listener of the librdmacm engine move 64 MiB each way
 // at once through io.Copy.
 func TestRXENativeDialerCopy(t *testing.T) {
-	testRXECopy(t, nativeDialer{}, librdmacmEngine{&rsocketNet}, 64<<20)
+	testRXECopy(t, nativeEngine{}, librdmacmEngine{&rsocketNet}, 64<<20)
 }
 
 // A native Dialer runs the exchange of rstream against its server.
 func TestRXENativeDialerAgainstRstreamServer(t *testing.T) {
-	testRXEDialerAgainstRstreamServer(t, nativeDialer{})
+	testRXEDialerAgainstRstreamServer(t, nativeEngine{})
 }
 
 // A native dial refuses a device whose transport is iWARP before it reaches
@@ -103,7 +103,7 @@ func TestRXENativeDialRefusesIWARP(t *testing.T) {
 			}
 			defer ln.Close()
 			acc := acceptAsync(ln)
-			eng := nativeDialer{nativeEngine{transportType: func(*verbs.Context) verbs.TransportType { return tt.transport }}}
+			eng := nativeEngine{transportType: func(*verbs.Context) verbs.TransportType { return tt.transport }}
 			d := Dialer{Timeout: rxeTimeout, eng: eng}
 			c, err := d.Dial("rdma", ln.Addr().String())
 			if !tt.refused {
@@ -134,7 +134,7 @@ func TestRXENativeDialRefusesIWARP(t *testing.T) {
 
 // Closed, the connections of the native engine leave no goroutine behind.
 func TestRXENativeDialerGoroutinesReturnToBaseline(t *testing.T) {
-	testRXEGoroutinesReturnToBaseline(t, nativeDialer{}, librdmacmEngine{&rsocketNet})
+	testRXEGoroutinesReturnToBaseline(t, nativeEngine{}, librdmacmEngine{&rsocketNet})
 }
 
 // testRXEGoroutinesReturnToBaseline connects a few pairs of a Dialer of the
