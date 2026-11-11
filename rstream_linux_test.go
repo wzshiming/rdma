@@ -150,8 +150,14 @@ func rstreamArgs(side string, ip net.IP, port int) []string {
 // TestRXERstreamClientAgainstListener has rstream's client run the exchange
 // against a Listener of this package.
 func TestRXERstreamClientAgainstListener(t *testing.T) {
+	testRXERstreamClientAgainstListener(t, nil)
+}
+
+// testRXERstreamClientAgainstListener has rstream's client run the exchange
+// against a Listener of the engine eng, nil for the platform's.
+func testRXERstreamClientAgainstListener(t *testing.T, eng engine) {
 	rstream := rstreamPath(t)
-	ln := rxeListen(t, Config{})
+	ln := rxeListenOn(t, Config{}, eng)
 	addr := ln.Addr().(*Addr)
 	wait := startRstream(t, rstream, rstreamArgs("-s", addr.IP, addr.Port)...)
 	acc := acceptAsync(ln)

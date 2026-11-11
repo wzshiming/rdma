@@ -74,8 +74,15 @@ func TestRXELibraryRelease(t *testing.T) {
 // rxeListen starts a Listener on port 0 of the rdmatest device's IP.
 func rxeListen(t testing.TB, cfg Config) *Listener {
 	t.Helper()
+	return rxeListenOn(t, cfg, nil)
+}
+
+// rxeListenOn starts a Listener of the engine eng, nil for the platform's,
+// on port 0 of the rdmatest device's IP.
+func rxeListenOn(t testing.TB, cfg Config, eng engine) *Listener {
+	t.Helper()
 	dev := rdmatest.Device(t)
-	lc := ListenConfig{Config: cfg}
+	lc := ListenConfig{Config: cfg, eng: eng}
 	ln, err := lc.Listen(context.Background(), "rdma", net.JoinHostPort(dev.IP.String(), "0"))
 	if err != nil {
 		t.Fatalf("Listen(%v:0) error: %v", dev.IP, err)
@@ -232,7 +239,13 @@ func TestRXEConcurrentConnections(t *testing.T) {
 }
 
 func TestRXEListenerCloseUnblocksAccept(t *testing.T) {
-	ln := rxeListen(t, Config{})
+	testRXEListenerCloseUnblocksAccept(t, nil)
+}
+
+// testRXEListenerCloseUnblocksAccept closes a Listener of the engine eng, nil
+// for the platform's, while an Accept waits on it.
+func testRXEListenerCloseUnblocksAccept(t *testing.T, eng engine) {
+	ln := rxeListenOn(t, Config{}, eng)
 	errc := make(chan error, 1)
 	go func() {
 		_, err := ln.Accept()
@@ -253,7 +266,14 @@ func TestRXEListenerCloseUnblocksAccept(t *testing.T) {
 }
 
 func TestRXEDialRefusedWithoutListener(t *testing.T) {
-	ln := rxeListen(t, Config{})
+	testRXEDialRefusedWithoutListener(t, nil, nil)
+}
+
+// testRXEDialRefusedWithoutListener has a Dialer of the engine dial dial the
+// port of a Listener of the engine listen once it is closed, nil for the
+// platform's engine.
+func testRXEDialRefusedWithoutListener(t *testing.T, dial, listen engine) {
+	ln := rxeListenOn(t, Config{}, listen)
 	addr := ln.Addr().String()
 	if err := ln.Close(); err != nil {
 		t.Fatalf("Close() error: %v", err)
@@ -261,7 +281,8 @@ func TestRXEDialRefusedWithoutListener(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	start := time.Now()
-	c, err := DialContext(ctx, "rdma", addr)
+	d := Dialer{eng: dial}
+	c, err := d.DialContext(ctx, "rdma", addr)
 	if err == nil {
 		c.Close()
 		t.Fatalf("DialContext(%s) succeeded without a listener", addr)

@@ -20,26 +20,28 @@ import (
 // the listener.
 func rxeNativeDialPair(t testing.TB, cfg Config) (native, peer *Conn) {
 	t.Helper()
-	dev := rdmatest.Device(t)
-	lc := ListenConfig{Config: cfg, eng: librdmacmEngine{&rsocketNet}}
-	ln, err := lc.Listen(context.Background(), "rdma", net.JoinHostPort(dev.IP.String(), "0"))
-	if err != nil {
-		t.Fatalf("Listen(%v:0) error: %v", dev.IP, err)
-	}
+	return rxeEnginePair(t, cfg, nativeDialer{}, librdmacmEngine{&rsocketNet})
+}
+
+// rxeEnginePair connects a Dialer of the engine dial to a fresh listener of
+// the engine listen on the device, both with cfg, and closes the listener.
+func rxeEnginePair(t testing.TB, cfg Config, dial, listen engine) (client, server *Conn) {
+	t.Helper()
+	ln := rxeListenOn(t, cfg, listen)
 	defer ln.Close()
 	acc := acceptAsync(ln)
-	d := Dialer{Config: cfg, Timeout: rxeTimeout, eng: nativeDialer{}}
-	native, err = d.Dial("rdma", ln.Addr().String())
+	d := Dialer{Config: cfg, Timeout: rxeTimeout, eng: dial}
+	client, err := d.Dial("rdma", ln.Addr().String())
 	if err != nil {
-		t.Fatalf("native Dial(%v) error: %v", ln.Addr(), err)
+		t.Fatalf("Dial(%v) error: %v", ln.Addr(), err)
 	}
-	t.Cleanup(func() { native.Close() })
+	t.Cleanup(func() { client.Close() })
 	r := <-acc
 	if r.err != nil {
 		t.Fatalf("AcceptRDMA() error: %v", r.err)
 	}
 	t.Cleanup(func() { r.c.Close() })
-	return native, r.c
+	return client, r.c
 }
 
 // A native Dialer interoperates with a listener of the librdmacm engine, its
