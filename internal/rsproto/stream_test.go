@@ -256,6 +256,40 @@ func TestCompletionGivesBackQueueEntry(t *testing.T) {
 	}
 }
 
+// rs_write_data takes the bytes of a message from sbuf_bytes_avail and
+// rs_poll_cq gives them back when the send completes, rs_can_send waiting for
+// RS_SNDLOWAT of them; the free bytes run on from ssgl[0], which rsend moves
+// back to the start of the send buffer at its end.
+func TestCompletionGivesBackBufferBytes(t *testing.T) {
+	c := testConfig()
+	buf := make([]byte, 2*rsproto.SndLowat)
+	c.SendBuffer.Buf = buf
+	l := &recorder{}
+	s := rsproto.NewStream(l, c)
+	s.Connect(testPeer)
+
+	first := rsproto.SndLowat + 1
+	s.Reserve()
+	if err := s.Commit(first); err != nil {
+		t.Fatalf("Commit(%d) = %v", first, err)
+	}
+	if s.CanSend() {
+		t.Fatalf("CanSend() with %d of %d bytes free", len(buf)-first, len(buf))
+	}
+	s.Sent(l.posts[0].id, nil)
+	v := s.Reserve()
+	if off := viewOffset(t, buf, v); off != first || len(v) != len(buf)-first {
+		t.Fatalf("Reserve() after the first message completed = [%d:%d], want the rest of the buffer [%d:%d]", off, off+len(v), first, len(buf))
+	}
+	if err := s.Commit(len(v)); err != nil {
+		t.Fatalf("Commit(%d) = %v", len(v), err)
+	}
+	v = s.Reserve()
+	if off := viewOffset(t, buf, v); off != 0 || len(v) != first {
+		t.Fatalf("Reserve() with [%d:%d] in flight = [%d:%d], want [0:%d]", first, len(buf), off, off+len(v), first)
+	}
+}
+
 func TestStreamConnData(t *testing.T) {
 	c := testConfig()
 	little := rsproto.ConnData{

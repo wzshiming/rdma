@@ -33,6 +33,7 @@ type Stream struct {
 
 	targetSGE int // the entry of the grant table data goes to
 	sqeAvail  int // send queue entries free for data
+	sbufAvail int // bytes of the send buffer free
 	sbufPos   int // where the free bytes of the send buffer start: ssgl[0].addr
 	sseqNo    int // data messages sent
 	sseqComp  int // the sseqNo the peer's credits stop sending at
@@ -43,10 +44,11 @@ type Stream struct {
 // rs_create_ep leaves it for a connection to be set up.
 func NewStream(l Link, c Config) *Stream {
 	return &Stream{
-		link:     l,
-		c:        c,
-		order:    ConnData{BigEndian: c.BigEndian}.ByteOrder(),
-		sqeAvail: c.SendQueueSize - QPCtrlSize,
+		link:      l,
+		c:         c,
+		order:     ConnData{BigEndian: c.BigEndian}.ByteOrder(),
+		sqeAvail:  c.SendQueueSize - QPCtrlSize,
+		sbufAvail: len(c.SendBuffer.Buf),
 	}
 }
 
@@ -79,7 +81,7 @@ func (s *Stream) setGrant(i int, g SGE) {
 
 // CanSend mirrors rs_can_send: whether Reserve would lend room now.
 func (s *Stream) CanSend() bool {
-	return s.sqeAvail > 0 && s.sseqNo != s.sseqComp && s.grant(s.targetSGE).Length != 0
+	return s.sqeAvail > 0 && s.sbufAvail >= SndLowat && s.sseqNo != s.sseqComp && s.grant(s.targetSGE).Length != 0
 }
 
 // Reserve lends the room of the send buffer that one message can carry now,
@@ -88,7 +90,7 @@ func (s *Stream) Reserve() []byte {
 	if !s.CanSend() {
 		return nil
 	}
-	n := min(len(s.c.SendBuffer.Buf)-s.sbufPos, int(s.grant(s.targetSGE).Length))
+	n := min(s.sbufAvail, len(s.c.SendBuffer.Buf)-s.sbufPos, int(s.grant(s.targetSGE).Length))
 	return s.c.SendBuffer.Buf[s.sbufPos : s.sbufPos+n : s.sbufPos+n]
 }
 
@@ -97,6 +99,7 @@ func (s *Stream) Reserve() []byte {
 func (s *Stream) Commit(n int) error {
 	s.sseqNo++
 	s.sqeAvail--
+	s.sbufAvail -= n
 	g := s.grant(s.targetSGE)
 	addr, key := g.Addr, g.Key
 	g.Addr += uint64(n)
@@ -107,9 +110,11 @@ func (s *Stream) Commit(n int) error {
 	}
 
 	s.sgl[0] = Segment{Addr: s.c.SendBuffer.Addr + uint64(s.sbufPos), Length: uint32(n), Key: s.c.SendBuffer.Key}
-	s.sbufPos += n
+	if s.sbufPos += n; s.sbufPos == len(s.c.SendBuffer.Buf) {
+		s.sbufPos = 0
+	}
 	msg := MakeMsg(OpData, uint32(n))
-	s.link.PostWriteMsg(0, s.sgl[:1], msg, addr, key)
+	s.link.PostWriteMsg(uint64(msg), s.sgl[:1], msg, addr, key)
 	return nil
 }
 
@@ -117,6 +122,7 @@ func (s *Stream) Commit(n int) error {
 // does.
 func (s *Stream) Sent(id uint64, err error) {
 	s.sqeAvail++
+	s.sbufAvail += int(Msg(id).Data())
 }
 
 // Received takes a message word the peer sent, as rs_poll_cq does.
