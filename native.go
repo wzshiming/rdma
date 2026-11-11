@@ -164,35 +164,25 @@ func (s *nativeStream) sendsDone() bool { return s.st.SendsDone() && s.link.pend
 func (s *nativeStream) addrs() (local, remote netip.AddrPort) { return s.local, s.remote }
 
 func (s *nativeStream) read(p []byte) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return 0, net.ErrClosed
-	}
-	v := s.st.Peek()
-	if len(v) == 0 {
-		if s.st.EOF() {
-			return 0, io.EOF
-		}
-		return 0, errAgain
+	v, err := s.lendRead()
+	if err != nil {
+		return 0, err
 	}
 	n := copy(p, v)
-	s.st.Consume(n)
+	// The bytes are read even when the stream closed meanwhile.
+	s.returnRead(n)
 	return n, nil
 }
 
 func (s *nativeStream) write(p []byte) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.writeError(); err != nil {
+	v, err := s.lendWrite()
+	if err != nil {
 		return 0, err
 	}
-	v := s.st.Reserve()
-	if v == nil {
-		return 0, errAgain
-	}
 	n := copy(v, p)
-	s.st.Commit(n)
+	if err := s.commitWrite(n); err != nil {
+		return 0, err
+	}
 	return n, nil
 }
 
