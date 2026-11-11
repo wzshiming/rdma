@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/netip"
@@ -13,6 +14,7 @@ import (
 	"os/exec"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -595,4 +597,113 @@ func arrived(c *Conn) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.st.Peek())
+}
+
+// goroutinesPerNativeConn is the number of goroutines each connection of the
+// native engine runs: the pump of its completion queue and the watcher of
+// its connection events.
+const goroutinesPerNativeConn = 2
+
+// Each connection of the native engine runs goroutinesPerNativeConn
+// goroutines, as many while bytes flow each way as while it is idle.
+func TestRXENativeGoroutinesPerConnectionAreConstant(t *testing.T) {
+	rdmatest.Device(t)
+	testGoroutinesPerConnection(t, func(t *testing.T) (client, server *Conn) {
+		return rxeEnginePair(t, Config{}, EngineNative, EngineNative)
+	}, goroutinesPerNativeConn)
+}
+
+// testGoroutinesPerConnection connects pairs of connections with pair and
+// checks that each connection runs perConn goroutines of its own, idle, all
+// along while every connection writes and reads, and idle again, and none
+// once closed.
+func testGoroutinesPerConnection(t *testing.T, pair func(*testing.T) (client, server *Conn), perConn int) {
+	base := settledGoroutines()
+	var conns []*Conn
+	for range 4 {
+		client, server := pair(t)
+		conns = append(conns, client, server)
+		awaitGoroutines(t, base+len(conns)*perConn, fmt.Sprintf("with %d idle connections", len(conns)))
+	}
+
+	// Every connection writes on a goroutine of the test, which its peer
+	// reads on another, until stop.
+	stop := make(chan struct{})
+	var moved atomic.Int64
+	var wg sync.WaitGroup
+	for i, c := range conns {
+		peer := conns[i^1]
+		c.SetDeadline(time.Now().Add(rxeTimeout))
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			buf := make([]byte, 64<<10)
+			for {
+				select {
+				case <-stop:
+					if err := c.CloseWrite(); err != nil {
+						t.Errorf("CloseWrite error: %v", err)
+					}
+					return
+				default:
+				}
+				if _, err := c.Write(buf); err != nil {
+					t.Errorf("Write error: %v", err)
+					return
+				}
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			buf := make([]byte, 64<<10)
+			for {
+				n, err := peer.Read(buf)
+				moved.Add(int64(n))
+				if err == io.EOF {
+					return
+				}
+				if err != nil {
+					t.Errorf("Read error: %v", err)
+					return
+				}
+			}
+		}()
+	}
+	busy := base + len(conns)*perConn + 2*len(conns)
+	start := moved.Load()
+	for range 50 {
+		if n := runtime.NumGoroutine(); n != busy {
+			t.Errorf("%d goroutines with %d connections moving bytes on %d of the test's, want %d", n, len(conns), 2*len(conns), busy)
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if moved.Load() == start {
+		t.Error("no byte moved while the goroutines were counted")
+	}
+	close(stop)
+	wg.Wait()
+	awaitGoroutines(t, base+len(conns)*perConn, fmt.Sprintf("with %d connections idle again", len(conns)))
+
+	for _, c := range conns {
+		if err := c.Close(); err != nil {
+			t.Errorf("Close error: %v", err)
+		}
+	}
+	awaitGoroutines(t, base, "once the connections are closed")
+}
+
+// awaitGoroutines waits up to 5 seconds for the number of goroutines to be
+// want, and fails t with the number it is otherwise.
+func awaitGoroutines(t *testing.T, want int, what string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	n := runtime.NumGoroutine()
+	for n != want && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+		n = runtime.NumGoroutine()
+	}
+	if n != want {
+		t.Fatalf("%d goroutines %s, want %d", n, what, want)
+	}
 }
