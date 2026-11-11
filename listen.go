@@ -11,8 +11,9 @@ import (
 // ListenConfig contains options for listening to an address, like
 // net.ListenConfig. The zero value is ready to use.
 type ListenConfig struct {
-	// Config sets the rsockets options of the listening socket, which the
-	// accepted connections inherit.
+	// Config selects the engine of the listener, which the connections it
+	// accepts run on whatever the dialer's, and sets the rsockets options
+	// they inherit.
 	Config Config
 	// Backlog bounds the connection requests waiting to be accepted; 0
 	// means the kernel's default.

@@ -5,13 +5,14 @@ import (
 	"fmt"
 )
 
-// Config carries the rsockets options of a connection. The zero value of a
-// field leaves the option alone, so the connection gets the rsockets
-// default, which the files under /etc/rdma/rsocket (mem_default,
-// wmem_default, sqsize_default, rqsize_default, inline_default) set for the
-// whole process. A Dialer's Config applies to the socket it dials with, a
-// ListenConfig's to the listening socket and, by inheritance, to every
-// connection it accepts.
+// Config selects the engine of a connection and carries its rsockets
+// options, which mean the same on either engine. A zero option takes the
+// rsockets default: on the native engine the compile-time one each field
+// gives, on the librdmacm engine the one the files under /etc/rdma/rsocket
+// (mem_default, wmem_default, sqsize_default, rqsize_default,
+// inline_default) set for the whole process. A Dialer's Config applies to the
+// connection it dials, a ListenConfig's to the listener and, by inheritance,
+// to every connection it accepts.
 type Config struct {
 	// Engine selects the engine that carries the connections: EngineNative,
 	// also for the zero value, or EngineLibrdmacm. A Listener accepts
