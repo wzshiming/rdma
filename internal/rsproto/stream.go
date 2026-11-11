@@ -31,12 +31,12 @@ type Stream struct {
 	c     Config
 	order binary.ByteOrder // of the host, which the grant table is in
 
-	targetSGE int // the entry of the grant table data goes to
-	sqeAvail  int // send queue entries free for data
-	sbufAvail int // bytes of the send buffer free
-	sbufPos   int // where the free bytes of the send buffer start: ssgl[0].addr
-	sseqNo    int // data messages sent
-	sseqComp  int // the sseqNo the peer's credits stop sending at
+	targetSGE int    // the entry of the grant table data goes to
+	sqeAvail  int    // send queue entries free for data
+	sbufAvail int    // bytes of the send buffer free
+	sbufPos   int    // where the free bytes of the send buffer start: ssgl[0].addr
+	sseqNo    uint16 // data messages sent, wrapping
+	sseqComp  uint16 // the sseqNo the peer's credits stop sending at
 	sgl       [2]Segment
 }
 
@@ -66,7 +66,7 @@ func (s *Stream) ConnData() ConnData {
 // its peer.
 func (s *Stream) Connect(peer ConnData) {
 	s.setGrant(0, peer.FirstGrant)
-	s.sseqComp = int(peer.Credits)
+	s.sseqComp = peer.Credits
 }
 
 // grant returns entry i of the grant table, target_sgl[i] in C, which the
@@ -128,6 +128,6 @@ func (s *Stream) Sent(id uint64, err error) {
 // Received takes a message word the peer sent, as rs_poll_cq does.
 func (s *Stream) Received(msg Msg) {
 	if msg.Op() == OpSGL {
-		s.sseqComp = int(msg.Data())
+		s.sseqComp = uint16(msg.Data())
 	}
 }

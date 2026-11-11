@@ -290,6 +290,33 @@ func TestCompletionGivesBackBufferBytes(t *testing.T) {
 	}
 }
 
+// sseq_no and sseq_comp are 16 bits: rs_poll_cq cuts to them the peer's
+// credit limit, which rs_send_credits sums as rseq_no + rq_size past 16 bits,
+// and rs_can_send compares them as they wrap.
+func TestSequenceWrapsPast65536Messages(t *testing.T) {
+	c := testConfig()
+	c.SendBuffer.Buf = make([]byte, 2*rsproto.SndLowat)
+	peer := testPeer
+	peer.Credits = rsproto.QPMinSize
+	peer.FirstGrant.Length = 1 << 20
+	l := &recorder{}
+	s := rsproto.NewStream(l, c)
+	s.Connect(peer)
+
+	for sent := 0; sent < 1<<16+4*rsproto.QPMinSize; {
+		n := sendWhileCan(t, s, 2*rsproto.QPMinSize)
+		if n != rsproto.QPMinSize {
+			t.Fatalf("sent %d messages after %d on credits for %d more, want %d", n, sent, rsproto.QPMinSize, rsproto.QPMinSize)
+		}
+		sent += n
+		for _, p := range l.posts {
+			s.Sent(p.id, nil)
+		}
+		l.posts = l.posts[:0]
+		s.Received(rsproto.MakeMsg(rsproto.OpSGL, uint32(uint16(sent))+rsproto.QPMinSize))
+	}
+}
+
 func TestStreamConnData(t *testing.T) {
 	c := testConfig()
 	little := rsproto.ConnData{
