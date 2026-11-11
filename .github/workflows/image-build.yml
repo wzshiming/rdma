@@ -71,12 +71,14 @@ jobs:
         docker run --rm rdma:smoke help | tee "$RUNNER_TEMP/help"
         grep -q '^Usage: rdma' "$RUNNER_TEMP/help"
         # The container gets no /dev/infiniband, so libibverbs lists no device
-        # and librdmacm's rsocket() answers ENODEV: the binary reaches both
-        # libraries at run time, whatever the host carries.
+        # and rdma_cm, which the native engine listens through, answers ENODEV
+        # for its event channel: the binary reaches both libraries at run time,
+        # whatever the host carries. A library that fails to load reads
+        # "dynlib: <library>: <reason>" instead.
         docker run --rm rdma:smoke devices | tee "$RUNNER_TEMP/devices"
         grep -qx 'no RDMA devices' "$RUNNER_TEMP/devices"
         timeout 60 docker run --rm rdma:smoke pingpong -listen 127.0.0.1:0 2>&1 | tee "$RUNNER_TEMP/pingpong" || true
-        grep -q '^rdma pingpong: .* rsocket: no such device$' "$RUNNER_TEMP/pingpong"
+        grep -q '^rdma pingpong: .* verbs: rdma_create_event_channel: no such device$' "$RUNNER_TEMP/pingpong"
         docker run --rm --entrypoint id rdma:smoke | tee "$RUNNER_TEMP/id"
         grep -q '^uid=10001(' "$RUNNER_TEMP/id"
         if [ -e /dev/infiniband ]; then
@@ -104,7 +106,7 @@ jobs:
         docker run --rm --platform linux/arm64 rdma:smoke-arm64 devices | tee "$RUNNER_TEMP/devices"
         grep -qx 'no RDMA devices' "$RUNNER_TEMP/devices"
         timeout 60 docker run --rm --platform linux/arm64 rdma:smoke-arm64 pingpong -listen 127.0.0.1:0 2>&1 | tee "$RUNNER_TEMP/pingpong" || true
-        grep -q '^rdma pingpong: .* rsocket: no such device$' "$RUNNER_TEMP/pingpong"
+        grep -q '^rdma pingpong: .* verbs: rdma_create_event_channel: no such device$' "$RUNNER_TEMP/pingpong"
 
     - name: Build and push
       uses: docker/build-push-action@v7
