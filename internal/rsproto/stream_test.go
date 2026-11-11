@@ -369,6 +369,24 @@ func TestMessageStaysWithinMaxTransfer(t *testing.T) {
 	}
 }
 
+// rsend of no bytes sends no message, so a commit of none takes no credit and
+// posts nothing.
+func TestCommitOfNothingPostsNothing(t *testing.T) {
+	peer := testPeer
+	peer.Credits = 1
+	l := &recorder{}
+	s := rsproto.NewStream(l, testConfig())
+	s.Connect(peer)
+
+	s.Reserve()
+	if err := s.Commit(0); err != nil {
+		t.Fatalf("Commit(0) = %v", err)
+	}
+	if len(l.posts) != 0 || !s.CanSend() {
+		t.Errorf("Commit(0) on 1 credit posted %+v and left CanSend() = %v, want nothing posted and true", l.posts, s.CanSend())
+	}
+}
+
 func TestStreamConnData(t *testing.T) {
 	c := testConfig()
 	little := rsproto.ConnData{

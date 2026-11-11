@@ -101,6 +101,9 @@ func (s *Stream) Reserve() []byte {
 // Commit ends the reservation, sending the first n bytes of the view as one
 // data message, as rs_write_data does.
 func (s *Stream) Commit(n int) error {
+	if n == 0 {
+		return nil
+	}
 	s.sseqNo++
 	s.sqeAvail--
 	s.sbufAvail -= n
