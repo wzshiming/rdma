@@ -1170,6 +1170,21 @@ func TestPeerShutdownAfterCloseWriteEndsTheStream(t *testing.T) {
 	}
 }
 
+// rshutdown(SHUT_WR) of a connected rsocket whose rs_readable the peer's
+// shutdown has cleared posts RS_CTRL_DISCONNECT in place of RS_CTRL_SHUTDOWN.
+func TestCloseWriteAfterPeerShutdownSendsDisconnect(t *testing.T) {
+	l := &recorder{}
+	s := rsproto.NewStream(l, testConfig())
+	s.Connect(testPeer)
+	s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlShutdown))
+	l.posts = nil
+
+	s.CloseWrite()
+	if len(l.posts) != 1 || !isCtrl(l.posts[0], rsproto.CtrlDisconnect) || s.State() != rsproto.StateConnected {
+		t.Errorf("CloseWrite after the peer's shutdown posted %+v and left the state %#x, want RS_CTRL_DISCONNECT and %#x", l.posts, s.State(), rsproto.StateConnected)
+	}
+}
+
 func TestStreamConnData(t *testing.T) {
 	c := testConfig()
 	little := rsproto.ConnData{

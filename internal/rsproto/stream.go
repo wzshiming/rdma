@@ -314,10 +314,15 @@ func (s *Stream) Consume(n int) {
 func (s *Stream) EOF() bool { return s.state&StateReadable == 0 && s.rbufArrived == 0 }
 
 // CloseWrite mirrors rshutdown(SHUT_WR): the write side ends, which the peer
-// learns by RS_CTRL_SHUTDOWN, held until a control slot is free.
+// learns by RS_CTRL_SHUTDOWN, or by RS_CTRL_DISCONNECT once the read side has
+// ended too, held until a control slot is free.
 func (s *Stream) CloseWrite() {
 	s.state &^= StateWritable
-	s.shutdownHeld = true
+	if s.state&StateReadable != 0 {
+		s.shutdownHeld = true
+	} else {
+		s.disconnectHeld = true
+	}
 	s.postHeld()
 }
 
