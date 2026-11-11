@@ -1323,6 +1323,30 @@ func TestLinkLossAfterTheEndChangesNothing(t *testing.T) {
 	}
 }
 
+// rs_conn_have_rdata, which rrecv waits for, holds once data has arrived or
+// rs_readable is clear.
+func TestReadableWithDataOrTheEnd(t *testing.T) {
+	c := testConfig()
+	s := rsproto.NewStream(&recorder{}, c)
+	s.Connect(testPeer)
+	if s.Readable() {
+		t.Fatal("Readable() with nothing arrived")
+	}
+	peerWrites(s, c, 0, []byte("x"))
+	if !s.Readable() {
+		t.Fatal("Readable() = false with a byte arrived")
+	}
+	s.Peek()
+	s.Consume(1)
+	if s.Readable() {
+		t.Fatal("Readable() once all that arrived is read")
+	}
+	s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlShutdown))
+	if !s.Readable() {
+		t.Error("Readable() = false after the peer's shutdown")
+	}
+}
+
 func TestStreamConnData(t *testing.T) {
 	c := testConfig()
 	little := rsproto.ConnData{

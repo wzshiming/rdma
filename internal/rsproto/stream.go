@@ -324,6 +324,10 @@ func (s *Stream) Consume(n int) {
 	s.updateCredits()
 }
 
+// Readable mirrors rs_conn_have_rdata, which rrecv waits for: whether bytes
+// have arrived or the read side has ended.
+func (s *Stream) Readable() bool { return s.rbufArrived > 0 || s.state&StateReadable == 0 }
+
 // EOF reports whether the read side has ended and what arrived before has
 // been consumed, where rrecv returns 0.
 func (s *Stream) EOF() bool { return s.state&StateReadable == 0 && s.rbufArrived == 0 }
