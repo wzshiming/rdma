@@ -728,6 +728,31 @@ func TestCreditsBelowHalfABufferGoBare(t *testing.T) {
 	}
 }
 
+// rrecv counts a message into rseq_no only once it has taken all of it,
+// rmsg[rmsg_head].data shrinking by what it takes before.
+func TestPartlyReadMessageEarnsNoCredit(t *testing.T) {
+	c := testConfig()
+	c.ReceiveQueueSize = rsproto.QPMinSize
+	l := &recorder{}
+	s := rsproto.NewStream(l, c)
+	s.Connect(testPeer)
+	n := rsproto.QPMinSize / 2
+	for i := range n {
+		peerWrites(s, c, 2*i, []byte{byte(i), byte(i)})
+	}
+
+	s.Peek()
+	s.Consume(2*n - 1)
+	if len(l.posts) != 1 {
+		t.Fatalf("reading %d messages and a byte of the next posted %+v after the grant of Connect, want nothing", n-1, l.posts[1:])
+	}
+	s.Peek()
+	s.Consume(1)
+	if want := uint32(n + rsproto.QPMinSize); len(l.posts) != 2 || !isCredit(l.posts[1], want) {
+		t.Errorf("reading the last byte of %d messages posted %+v after the grant of Connect, want credits for %d", n, l.posts[1:], want)
+	}
+}
+
 func TestStreamConnData(t *testing.T) {
 	c := testConfig()
 	little := rsproto.ConnData{

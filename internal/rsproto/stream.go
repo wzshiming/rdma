@@ -45,6 +45,9 @@ type Stream struct {
 
 	rbufOffset  int              // where the arrived bytes start in the receive buffer: rbuf_offset
 	rbufArrived int              // bytes arrived and not yet consumed
+	rmsg        []uint32         // a ring of what is left of the data messages not read whole
+	rmsgHead    int              // the oldest of them
+	rmsgTail    int              // where the next goes
 	rbufAvail   int              // bytes of the receive buffer free and not granted: rbuf_bytes_avail
 	rbufFree    int              // where the next grant starts: rbuf_free_offset
 	remote      SGE              // the peer's grant table, Length counting entries: remote_sgl
@@ -73,6 +76,7 @@ func NewStream(l Link, c Config) *Stream {
 		sbufAvail: len(c.SendBuffer.Buf),
 		rbufAvail: len(c.ReceiveBuffer.Buf) / 2,
 		rbufFree:  len(c.ReceiveBuffer.Buf) / 2,
+		rmsg:      make([]uint32, c.ReceiveQueueSize+1),
 		rseqComp:  uint16(c.ReceiveQueueSize / 2),
 	}
 	for range c.ReceiveQueueSize {
@@ -203,6 +207,10 @@ func (s *Stream) Received(msg Msg) {
 		s.sseqComp = uint16(msg.Data())
 	case OpWrite, OpIOMapSGL, OpCtrl: // no data
 	default:
+		s.rmsg[s.rmsgTail] = msg.Data()
+		if s.rmsgTail++; s.rmsgTail == len(s.rmsg) {
+			s.rmsgTail = 0
+		}
 		s.rbufArrived += int(msg.Data())
 	}
 	s.link.PostRecv(recvID)
@@ -221,9 +229,20 @@ func (s *Stream) Peek() []byte {
 func (s *Stream) Consume(n int) {
 	s.rbufArrived -= n
 	s.rbufAvail += n
-	s.rseqNo++
 	if s.rbufOffset += n; s.rbufOffset == len(s.c.ReceiveBuffer.Buf) {
 		s.rbufOffset = 0
+	}
+	for n > 0 {
+		head := &s.rmsg[s.rmsgHead]
+		if n < int(*head) {
+			*head -= uint32(n)
+			break
+		}
+		n -= int(*head)
+		s.rseqNo++
+		if s.rmsgHead++; s.rmsgHead == len(s.rmsg) {
+			s.rmsgHead = 0
+		}
 	}
 	s.updateCredits()
 }
