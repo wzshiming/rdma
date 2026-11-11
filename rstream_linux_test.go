@@ -170,6 +170,12 @@ func TestRXERstreamClientAgainstListener(t *testing.T) {
 // TestRXEDialerAgainstRstreamServer has a Dialer of this package run the
 // exchange against rstream's server.
 func TestRXEDialerAgainstRstreamServer(t *testing.T) {
+	testRXEDialerAgainstRstreamServer(t, nil)
+}
+
+// testRXEDialerAgainstRstreamServer has a Dialer of the engine eng, nil for
+// the platform's, run the exchange against rstream's server.
+func testRXEDialerAgainstRstreamServer(t *testing.T, eng engine) {
 	rstream := rstreamPath(t)
 	// rstream binds the port it is given, so a free one is found first.
 	probe := rxeListen(t, Config{})
@@ -180,9 +186,10 @@ func TestRXEDialerAgainstRstreamServer(t *testing.T) {
 	// until the server listens.
 	ctx, cancel := context.WithTimeout(context.Background(), rstreamTimeout)
 	defer cancel()
+	d := Dialer{eng: eng}
 	var conn *Conn
 	for conn == nil {
-		c, err := DialContext(ctx, "rdma", addr.String())
+		c, err := d.DialContext(ctx, "rdma", addr.String())
 		switch {
 		case err == nil:
 			conn = c

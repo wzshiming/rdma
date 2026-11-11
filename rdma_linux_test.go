@@ -129,6 +129,12 @@ func TestRXEConn(t *testing.T) {
 
 func TestRXEEcho(t *testing.T) {
 	client, server := rxePair(t, smallConfig)
+	testRXEEcho(t, client, server)
+}
+
+// testRXEEcho has server echo what client writes, in writes around the
+// buffer sizes of smallConfig, and checks what client reads back.
+func testRXEEcho(t *testing.T, client, server *Conn) {
 	go io.Copy(server, server)
 	for _, n := range []int{1, 100, 16383, 16384, 16385, 3*16384 + 5, 1000000} {
 		want := make([]byte, n)
@@ -351,6 +357,12 @@ func TestRXECloseWakesBlockedReadAndWrite(t *testing.T) {
 
 func TestRXECloseWriteLetsThePeerWriteBack(t *testing.T) {
 	client, server := rxePair(t, Config{})
+	testRXECloseWriteLetsThePeerWriteBack(t, client, server)
+}
+
+// testRXECloseWriteLetsThePeerWriteBack has client write and shut down
+// writing, and server read it all and write back before it closes.
+func testRXECloseWriteLetsThePeerWriteBack(t *testing.T, client, server *Conn) {
 	if _, err := client.Write([]byte("request")); err != nil {
 		t.Fatalf("Write error: %v", err)
 	}
@@ -529,6 +541,12 @@ func TestRXEIdleConnectionsAreCheap(t *testing.T) {
 // until the close.
 func TestRXEBufferedDataPrecedesEOF(t *testing.T) {
 	client, server := rxePair(t, Config{})
+	testRXEBufferedDataPrecedesEOF(t, client, server)
+}
+
+// testRXEBufferedDataPrecedesEOF has client write and close at once, and
+// server read everything before io.EOF.
+func testRXEBufferedDataPrecedesEOF(t *testing.T, client, server *Conn) {
 	want := make([]byte, 32<<10)
 	newStream(7).rng.Read(want)
 	if _, err := client.Write(want); err != nil {
