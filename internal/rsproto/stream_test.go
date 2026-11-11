@@ -44,6 +44,17 @@ func (r *recorder) PostRecv(id uint64) error {
 	return r.err
 }
 
+// data returns the posts of data messages.
+func (r *recorder) data() []post {
+	var d []post
+	for _, p := range r.posts {
+		if p.msg.Op() == rsproto.OpData {
+			d = append(d, p)
+		}
+	}
+	return d
+}
+
 // testConfig describes local memory of the stock sizes as an engine registers
 // it, at addresses and under keys that tell the blocks apart.
 func testConfig() rsproto.Config {
@@ -257,7 +268,7 @@ func TestCompletionGivesBackQueueEntry(t *testing.T) {
 	if n, want := sendWhileCan(t, s, 100), rsproto.QPMinSize-rsproto.QPCtrlSize; n != want {
 		t.Fatalf("sent %d messages on a send queue of %d entries, want %d", n, rsproto.QPMinSize, want)
 	}
-	s.Sent(l.posts[0].id, nil)
+	s.Sent(l.data()[0].id, nil)
 	if n := sendWhileCan(t, s, 100); n != 1 {
 		t.Fatalf("sent %d messages after one completion, want 1", n)
 	}
@@ -283,7 +294,7 @@ func TestCompletionGivesBackBufferBytes(t *testing.T) {
 	if s.CanSend() {
 		t.Fatalf("CanSend() with %d of %d bytes free", len(buf)-first, len(buf))
 	}
-	s.Sent(l.posts[0].id, nil)
+	s.Sent(l.data()[0].id, nil)
 	v := s.Reserve()
 	if off := viewOffset(t, buf, v); off != first || len(v) != len(buf)-first {
 		t.Fatalf("Reserve() after the first message completed = [%d:%d], want the rest of the buffer [%d:%d]", off, off+len(v), first, len(buf))
@@ -332,12 +343,12 @@ func TestFailedSendIsAnError(t *testing.T) {
 	s.Connect(testPeer)
 	sendWhileCan(t, s, 2)
 
-	s.Sent(l.posts[0].id, nil)
+	s.Sent(l.data()[0].id, nil)
 	if err := s.Err(); err != nil {
 		t.Fatalf("Err() after a completed send = %v, want nil", err)
 	}
 	failed := errors.New("IBV_WC_RETRY_EXC_ERR")
-	s.Sent(l.posts[1].id, failed)
+	s.Sent(l.data()[1].id, failed)
 	if err := s.Err(); !errors.Is(err, failed) || errors.Is(err, io.EOF) {
 		t.Errorf("Err() after a failed send = %v, want an error wrapping %q, not the io.EOF of an orderly end", err, failed)
 	}
@@ -352,8 +363,8 @@ func TestFirstFailedSendStaysTheError(t *testing.T) {
 	sendWhileCan(t, s, 2)
 
 	failed, flushed := errors.New("IBV_WC_RETRY_EXC_ERR"), errors.New("IBV_WC_WR_FLUSH_ERR")
-	s.Sent(l.posts[0].id, failed)
-	s.Sent(l.posts[1].id, flushed)
+	s.Sent(l.data()[0].id, failed)
+	s.Sent(l.data()[1].id, flushed)
 	if err := s.Err(); !errors.Is(err, failed) || errors.Is(err, flushed) {
 		t.Errorf("Err() after a failed send and a flushed one = %v, want the failure %q", err, failed)
 	}
@@ -387,8 +398,8 @@ func TestCommitOfNothingPostsNothing(t *testing.T) {
 	if err := s.Commit(0); err != nil {
 		t.Fatalf("Commit(0) = %v", err)
 	}
-	if len(l.posts) != 0 || !s.CanSend() {
-		t.Errorf("Commit(0) on 1 credit posted %+v and left CanSend() = %v, want nothing posted and true", l.posts, s.CanSend())
+	if len(l.data()) != 0 || !s.CanSend() {
+		t.Errorf("Commit(0) on 1 credit posted %+v and left CanSend() = %v, want nothing posted and true", l.data(), s.CanSend())
 	}
 }
 
