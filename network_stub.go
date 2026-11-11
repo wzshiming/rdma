@@ -10,14 +10,14 @@ import (
 
 // platformEngine returns the engine c selects on a platform without
 // rdma-core, which fails with an error matching errors.ErrUnsupported either
-// way: the native engine for EngineNative, as no library it runs on can be
-// loaded, the librdmacm engine otherwise, on a network whose socket fails, so
-// nothing is ever polled.
+// way: the librdmacm engine for EngineLibrdmacm, on a network whose socket
+// fails, so nothing is ever polled, the native engine otherwise, as no
+// library it runs on can be loaded.
 func platformEngine(c Config) engine {
-	if c.Engine == EngineNative {
-		return nativeEngine{}
+	if c.Engine == EngineLibrdmacm {
+		return librdmacmEngine{unsupportedNetwork{}}
 	}
-	return librdmacmEngine{unsupportedNetwork{}}
+	return nativeEngine{}
 }
 
 type unsupportedNetwork struct{}

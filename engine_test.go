@@ -9,8 +9,8 @@ import (
 )
 
 // Config.Engine selects the engine behind the platform entry: the native
-// engine for EngineNative, the librdmacm engine for EngineLibrdmacm and for
-// the zero value. A value that names no engine fails Dial and Listen with an
+// engine for the zero value and EngineNative, the librdmacm engine for
+// EngineLibrdmacm. A value that names no engine fails Dial and Listen with an
 // error about the Config, which names it, before any engine is asked.
 func TestConfigEngineSelectsTheEngine(t *testing.T) {
 	for _, tt := range []struct {
@@ -18,7 +18,7 @@ func TestConfigEngineSelectsTheEngine(t *testing.T) {
 		engine Engine
 		want   engine // nil when refused
 	}{
-		{"zero value", "", librdmacmEngine{}},
+		{"zero value", "", nativeEngine{}},
 		{"EngineNative", EngineNative, nativeEngine{}},
 		{"EngineLibrdmacm", EngineLibrdmacm, librdmacmEngine{}},
 		{"unknown", "rsocket", nil},

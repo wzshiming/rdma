@@ -13,9 +13,9 @@ import (
 // ListenConfig's to the listening socket and, by inheritance, to every
 // connection it accepts.
 type Config struct {
-	// Engine selects the engine that carries the connections:
-	// EngineLibrdmacm, also for the zero value, or EngineNative. A Listener
-	// accepts connections of its own engine, whatever the dialer runs.
+	// Engine selects the engine that carries the connections: EngineNative,
+	// also for the zero value, or EngineLibrdmacm. A Listener accepts
+	// connections of its own engine, whatever the dialer runs.
 	Engine Engine
 	// SendBufferSize is the size in bytes of the registered send buffer
 	// (SO_SNDBUF), which rsockets double like the kernel does. Default 128
