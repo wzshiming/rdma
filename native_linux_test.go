@@ -131,13 +131,20 @@ func TestRXENativeDialRefusesIWARP(t *testing.T) {
 
 // Closed, the connections of the native engine leave no goroutine behind.
 func TestRXENativeDialerGoroutinesReturnToBaseline(t *testing.T) {
+	testRXEGoroutinesReturnToBaseline(t, nativeDialer{}, librdmacmEngine{&rsocketNet})
+}
+
+// testRXEGoroutinesReturnToBaseline connects a few pairs of a Dialer of the
+// engine dial and a listener of the engine listen, moves a byte each way on
+// each and closes both ends, and checks that no goroutine is left behind.
+func testRXEGoroutinesReturnToBaseline(t *testing.T, dial, listen engine) {
 	rdmatest.Device(t)
 	goroutines := runtime.NumGoroutine()
 	const n = 4
 	for range n {
-		native, peer := rxeNativeDialPair(t, Config{})
+		client, server := rxeEnginePair(t, Config{}, dial, listen)
 		buf := make([]byte, 1)
-		for _, ends := range [][2]*Conn{{native, peer}, {peer, native}} {
+		for _, ends := range [][2]*Conn{{client, server}, {server, client}} {
 			if _, err := ends[0].Write([]byte("x")); err != nil {
 				t.Fatalf("Write error: %v", err)
 			}
@@ -145,11 +152,11 @@ func TestRXENativeDialerGoroutinesReturnToBaseline(t *testing.T) {
 				t.Fatalf("ReadFull error: %v", err)
 			}
 		}
-		if err := native.Close(); err != nil {
-			t.Errorf("native Close() error: %v", err)
+		if err := client.Close(); err != nil {
+			t.Errorf("client Close() error: %v", err)
 		}
-		if err := peer.Close(); err != nil {
-			t.Errorf("peer Close() error: %v", err)
+		if err := server.Close(); err != nil {
+			t.Errorf("server Close() error: %v", err)
 		}
 	}
 	deadline := time.Now().Add(5 * time.Second)
@@ -157,6 +164,6 @@ func TestRXENativeDialerGoroutinesReturnToBaseline(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	if after := runtime.NumGoroutine(); after > goroutines {
-		t.Errorf("goroutines: %d before, %d after closing %d native connections", goroutines, after, n)
+		t.Errorf("goroutines: %d before, %d after closing %d connections", goroutines, after, n)
 	}
 }
