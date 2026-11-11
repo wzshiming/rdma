@@ -76,7 +76,7 @@ func TestDialRefusedWithoutListener(t *testing.T) {
 	dead.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	d := Dialer{nw: nw}
+	d := Dialer{eng: librdmacmEngine{nw}}
 	c, err := d.DialContext(ctx, "rdma", addr)
 	if err == nil {
 		c.Close()
@@ -102,7 +102,7 @@ func TestDialContextCancelReturnsContextError(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 		cancel()
 	}()
-	d := Dialer{nw: nw}
+	d := Dialer{eng: librdmacmEngine{nw}}
 	start := time.Now()
 	c, err := d.DialContext(ctx, "rdma", fakeNowhere)
 	if err == nil {
@@ -131,8 +131,8 @@ func TestDialContextCancelReturnsContextError(t *testing.T) {
 func TestDialerTimeoutAndDeadline(t *testing.T) {
 	nw := newFakeNet(t)
 	for name, d := range map[string]Dialer{
-		"timeout":  {Timeout: 50 * time.Millisecond, nw: nw},
-		"deadline": {Deadline: time.Now().Add(50 * time.Millisecond), nw: nw},
+		"timeout":  {Timeout: 50 * time.Millisecond, eng: librdmacmEngine{nw}},
+		"deadline": {Deadline: time.Now().Add(50 * time.Millisecond), eng: librdmacmEngine{nw}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := d.Dial("rdma", fakeNowhere)
@@ -148,7 +148,7 @@ func TestDialerLocalAddrPinsTheSource(t *testing.T) {
 	nw := newFakeNet(t)
 	ln := listenFake(t, nw, Config{})
 	acc := acceptAsync(ln)
-	d := Dialer{LocalAddr: &Addr{IP: net.IPv4(10, 99, 0, 7), Port: 1234}, nw: nw}
+	d := Dialer{LocalAddr: &Addr{IP: net.IPv4(10, 99, 0, 7), Port: 1234}, eng: librdmacmEngine{nw}}
 	c, err := d.Dial("rdma", ln.Addr().String())
 	if err != nil {
 		t.Fatalf("Dial() error: %v", err)
@@ -166,7 +166,7 @@ func TestDialerLocalAddrPinsTheSource(t *testing.T) {
 		t.Errorf("peer RemoteAddr() = %v, want the pinned 10.99.0.7:1234", r.c.RemoteAddr())
 	}
 
-	wrong := Dialer{LocalAddr: &net.TCPAddr{IP: net.IPv4(10, 99, 0, 7)}, nw: nw}
+	wrong := Dialer{LocalAddr: &net.TCPAddr{IP: net.IPv4(10, 99, 0, 7)}, eng: librdmacmEngine{nw}}
 	_, err = wrong.Dial("rdma", ln.Addr().String())
 	var addrErr *net.AddrError
 	if !errors.As(err, &addrErr) {
@@ -183,13 +183,13 @@ func TestNegativeConfigIsReportedBeforeDialing(t *testing.T) {
 		{ReceiveQueueSize: -1},
 		{MaxInline: -1},
 	} {
-		d := Dialer{Config: cfg, nw: nw}
+		d := Dialer{Config: cfg, eng: librdmacmEngine{nw}}
 		_, err := d.Dial("rdma", "10.99.0.1:1")
 		var opErr *net.OpError
 		if !errors.As(err, &opErr) || opErr.Op != "dial" || errors.Is(err, errRefused) {
 			t.Errorf("Dial() with %+v error = %v, want a dial *net.OpError about the Config", cfg, err)
 		}
-		lc := ListenConfig{Config: cfg, nw: nw}
+		lc := ListenConfig{Config: cfg, eng: librdmacmEngine{nw}}
 		if _, err = lc.Listen(context.Background(), "rdma", "10.99.0.1:0"); !errors.As(err, &opErr) || opErr.Op != "listen" {
 			t.Errorf("Listen() with %+v error = %v, want a listen *net.OpError", cfg, err)
 		}
@@ -201,7 +201,7 @@ func TestNegativeConfigIsReportedBeforeDialing(t *testing.T) {
 
 func TestListenWildcardAndUnknownNetwork(t *testing.T) {
 	nw := newFakeNet(t)
-	lc := ListenConfig{nw: nw}
+	lc := ListenConfig{eng: librdmacmEngine{nw}}
 	ln, err := lc.Listen(context.Background(), "rdma", ":0")
 	if err != nil {
 		t.Fatalf("Listen(:0) error: %v", err)
@@ -256,7 +256,7 @@ func TestListenerCloseUnblocksAccept(t *testing.T) {
 // sees first.
 func TestDialErrorsNameTheirCause(t *testing.T) {
 	nw := newFakeNet(t)
-	d := Dialer{Config: Config{MaxInline: -1}, nw: nw}
+	d := Dialer{Config: Config{MaxInline: -1}, eng: librdmacmEngine{nw}}
 	_, err := d.Dial("rdma", "10.99.0.1:1")
 	if err == nil || !strings.Contains(err.Error(), "MaxInline") {
 		t.Errorf("Dial() with MaxInline -1 error = %v, want it to name the field", err)

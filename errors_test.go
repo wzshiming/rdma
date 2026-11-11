@@ -57,13 +57,13 @@ func TestErrorShapes(t *testing.T) {
 		target  error
 		timeout bool
 	}{
-		{"dial refused", func() error { _, err := (&Dialer{nw: nw}).Dial("rdma", refusedAddr); return err }, "dial", refusedAddr, syscall.ECONNREFUSED, false},
+		{"dial refused", func() error { _, err := (&Dialer{eng: librdmacmEngine{nw}}).Dial("rdma", refusedAddr); return err }, "dial", refusedAddr, syscall.ECONNREFUSED, false},
 		{"dial negative config", func() error {
-			_, err := (&Dialer{Config: Config{SendQueueSize: -1}, nw: nw}).Dial("rdma", addr)
+			_, err := (&Dialer{Config: Config{SendQueueSize: -1}, eng: librdmacmEngine{nw}}).Dial("rdma", addr)
 			return err
 		}, "dial", addr, errConfig, false},
 		{"listen negative config", func() error {
-			lc := ListenConfig{Config: Config{ReceiveBufferSize: -1}, nw: nw}
+			lc := ListenConfig{Config: Config{ReceiveBufferSize: -1}, eng: librdmacmEngine{nw}}
 			_, err := lc.Listen(t.Context(), "rdma", "10.99.0.1:0")
 			return err
 		}, "listen", "10.99.0.1:0", errConfig, false},

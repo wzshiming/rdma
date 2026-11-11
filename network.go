@@ -11,9 +11,9 @@ import (
 	"github.com/wzshiming/rdma/rsocket"
 )
 
-// socket is the non-blocking stream socket the engine drives, with the shape
-// of *rsocket.Socket: on Linux with librdmacm it is one, in tests an
-// in-memory fake.
+// socket is the non-blocking stream socket the librdmacm engine drives, with
+// the shape of *rsocket.Socket: on Linux with librdmacm it is one, in tests
+// an in-memory fake.
 // A call that would block fails with an error matching errAgain, a Connect
 // that goes on in the background with one matching errInProgress, and Read
 // returns io.EOF once the peer has shut down writing.
@@ -44,8 +44,8 @@ type socket interface {
 	SetInline(bytes int) error
 }
 
-// network is the platform seam: it creates sockets, waits for their
-// readiness and runs the calls on them. rsockets keep per-socket counters
+// network is what the librdmacm engine runs on: it creates sockets, waits for
+// their readiness and runs the calls on them. rsockets keep per-socket counters
 // that rsend, rrecv and the completion processing of rpoll all update
 // without a common lock, so once a socket is attached every call on it goes
 // through run, which the poller executes between two polls, or happens while
@@ -99,12 +99,11 @@ func domain(a *Addr) rsocket.Domain {
 	return rsocket.IPv6
 }
 
-// librdmacmEngine carries the connections as rsockets of librdmacm, each in
-// non-blocking mode and attached to the poller of nw.
+// librdmacmEngine is the engine that carries the connections as rsockets of
+// librdmacm, each in non-blocking mode and attached to the poller of nw.
 type librdmacmEngine struct{ nw network }
 
-// dial connects from laddr, nil letting rdma_cm pick, to raddr.
-func (e librdmacmEngine) dial(ctx context.Context, laddr, raddr *Addr, c Config) (*rstream, error) {
+func (e librdmacmEngine) dial(ctx context.Context, laddr, raddr *Addr, c Config) (stream, error) {
 	s, err := e.nw.socket(domain(raddr))
 	if err != nil {
 		return nil, err
@@ -158,8 +157,7 @@ func connect(ctx context.Context, nw network, s socket, raddr *Addr) error {
 	}
 }
 
-// listen announces on laddr.
-func (e librdmacmEngine) listen(laddr *Addr, backlog int, c Config) (*rlistener, error) {
+func (e librdmacmEngine) listen(laddr *Addr, backlog int, c Config) (acceptor, error) {
 	s, err := e.nw.socket(domain(laddr))
 	if err != nil {
 		return nil, err
@@ -189,8 +187,6 @@ type rlistener struct {
 	closing chan struct{} // closed by close, waking every accept
 }
 
-// addr returns the address the socket is bound to, the zero AddrPort when
-// unknown.
 func (l *rlistener) addr() netip.AddrPort {
 	a, err := l.s.LocalAddr()
 	if err != nil {
@@ -205,9 +201,7 @@ func (l *rlistener) isClosed() bool {
 	return l.closed
 }
 
-// accept waits for the next connection; after close it returns
-// net.ErrClosed.
-func (l *rlistener) accept() (*rstream, error) {
+func (l *rlistener) accept() (stream, error) {
 	// rpoll sleeps on a listener's event channel, which a new request
 	// stirs, but the librdmacm thread then completes the handshake and
 	// queues the connection without waking pollers, so one interest stays
@@ -259,7 +253,6 @@ func (l *rlistener) accept() (*rstream, error) {
 // listening socket again.
 const acceptRetry = 10 * time.Millisecond
 
-// close stops listening: a waiting accept returns net.ErrClosed.
 func (l *rlistener) close() error {
 	l.mu.Lock()
 	if l.closed {
@@ -288,8 +281,6 @@ func newRstream(nw network, s socket) *rstream {
 	return &rstream{nw: nw, s: s, closing: make(chan struct{})}
 }
 
-// addrs returns the local and the peer's address, the zero AddrPort for one
-// unknown.
 func (s *rstream) addrs() (local, remote netip.AddrPort) {
 	s.nw.run(s.s, func() {
 		if a, err := s.s.LocalAddr(); err == nil {
@@ -316,8 +307,6 @@ func (s *rstream) write(p []byte) (n int, err error) {
 	return n, err
 }
 
-// wait blocks until the socket is readable, or writable with dir writable,
-// cancel is closed or the stream is, reporting only the last.
 func (s *rstream) wait(dir direction, cancel <-chan struct{}) error {
 	events := rsocket.PollIn
 	if dir == writable {

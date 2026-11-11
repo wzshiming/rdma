@@ -18,7 +18,7 @@ type ListenConfig struct {
 	// means the kernel's default.
 	Backlog int
 
-	nw network // tests inject a network; nil selects the platform's
+	eng engine // tests inject an engine; nil selects the platform's
 }
 
 // Listen announces on the local network address with the zero ListenConfig.
@@ -51,7 +51,7 @@ func (lc *ListenConfig) Listen(ctx context.Context, network, address string) (*L
 	if err := lc.Config.validate(); err != nil {
 		return fail(err)
 	}
-	a, err := librdmacmEngine{lc.network()}.listen(addr, lc.Backlog, lc.Config)
+	a, err := lc.engine().listen(addr, lc.Backlog, lc.Config)
 	if err != nil {
 		return fail(err)
 	}
@@ -62,16 +62,16 @@ func (lc *ListenConfig) Listen(ctx context.Context, network, address string) (*L
 	return l, nil
 }
 
-func (lc *ListenConfig) network() network {
-	if lc.nw != nil {
-		return lc.nw
+func (lc *ListenConfig) engine() engine {
+	if lc.eng != nil {
+		return lc.eng
 	}
-	return platformNetwork()
+	return platformEngine(lc.Config)
 }
 
 // Listener is an RDMA stream listener. It implements net.Listener.
 type Listener struct {
-	a    *rlistener
+	a    acceptor
 	addr *Addr
 
 	mu     sync.Mutex

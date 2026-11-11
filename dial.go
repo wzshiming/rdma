@@ -22,7 +22,7 @@ type Dialer struct {
 	// Config sets the rsockets options of the connection.
 	Config Config
 
-	nw network // tests inject a network; nil selects the platform's
+	eng engine // tests inject an engine; nil selects the platform's
 }
 
 // Dial connects to the address on the named network, which must be "rdma",
@@ -78,7 +78,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (*Con
 	if err := d.Config.validate(); err != nil {
 		return fail(err)
 	}
-	s, err := librdmacmEngine{d.network()}.dial(ctx, laddr, raddr, d.Config)
+	s, err := d.engine().dial(ctx, laddr, raddr, d.Config)
 	if err != nil {
 		return fail(err)
 	}
@@ -101,9 +101,9 @@ func (d *Dialer) withDeadline(ctx context.Context) (context.Context, context.Can
 	return context.WithDeadline(ctx, deadline)
 }
 
-func (d *Dialer) network() network {
-	if d.nw != nil {
-		return d.nw
+func (d *Dialer) engine() engine {
+	if d.eng != nil {
+		return d.eng
 	}
-	return platformNetwork()
+	return platformEngine(d.Config)
 }

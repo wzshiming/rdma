@@ -22,7 +22,7 @@ import (
 // listenFake starts a Listener on the fake network.
 func listenFake(t testing.TB, nw *fakeNet, cfg Config) *Listener {
 	t.Helper()
-	lc := ListenConfig{Config: cfg, nw: nw}
+	lc := ListenConfig{Config: cfg, eng: librdmacmEngine{nw}}
 	ln, err := lc.Listen(context.Background(), "rdma", "10.99.0.1:0")
 	if err != nil {
 		t.Fatalf("Listen() error: %v", err)
@@ -34,7 +34,7 @@ func listenFake(t testing.TB, nw *fakeNet, cfg Config) *Listener {
 // dialFake dials addr on the fake network.
 func dialFake(t testing.TB, nw *fakeNet, cfg Config, addr string) *Conn {
 	t.Helper()
-	d := Dialer{Config: cfg, nw: nw}
+	d := Dialer{Config: cfg, eng: librdmacmEngine{nw}}
 	c, err := d.Dial("rdma", addr)
 	if err != nil {
 		t.Fatalf("Dial(%s) error: %v", addr, err)
@@ -92,21 +92,22 @@ func TestConnOnFakeNetwork(t *testing.T) {
 	}
 }
 
-// stream is a deterministic byte stream hashed as it is produced or consumed.
-type stream struct {
+// testStream is a deterministic byte stream hashed as it is produced or
+// consumed.
+type testStream struct {
 	rng  *rand.ChaCha8
 	hash hash.Hash32
 	n    int64
 }
 
-func newStream(seed byte) *stream {
+func newStream(seed byte) *testStream {
 	var s [32]byte
 	s[0] = seed
-	return &stream{rng: rand.NewChaCha8(s), hash: crc32.NewIEEE()}
+	return &testStream{rng: rand.NewChaCha8(s), hash: crc32.NewIEEE()}
 }
 
 // writeTo writes total bytes to w in chunks of at most chunk bytes.
-func (s *stream) writeTo(w io.Writer, total, chunk int) error {
+func (s *testStream) writeTo(w io.Writer, total, chunk int) error {
 	buf := make([]byte, chunk)
 	for total > 0 {
 		n := min(total, chunk)
@@ -122,7 +123,7 @@ func (s *stream) writeTo(w io.Writer, total, chunk int) error {
 }
 
 // readFrom reads r until EOF in chunks of at most chunk bytes.
-func (s *stream) readFrom(r io.Reader, chunk int) error {
+func (s *testStream) readFrom(r io.Reader, chunk int) error {
 	buf := make([]byte, chunk)
 	for {
 		n, err := r.Read(buf)
@@ -137,7 +138,7 @@ func (s *stream) readFrom(r io.Reader, chunk int) error {
 	}
 }
 
-func (s *stream) sum() string { return fmt.Sprintf("%d bytes, crc %08x", s.n, s.hash.Sum32()) }
+func (s *testStream) sum() string { return fmt.Sprintf("%d bytes, crc %08x", s.n, s.hash.Sum32()) }
 
 // transfer streams total bytes from w to r, closes w's sending side and
 // checks the hashes.
@@ -235,7 +236,7 @@ func TestConcurrentConnectionsOnOneListener(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			d := Dialer{nw: nw}
+			d := Dialer{eng: librdmacmEngine{nw}}
 			client, err := d.Dial("rdma", ln.Addr().String())
 			if err != nil {
 				t.Errorf("Dial() #%d error: %v", i, err)
@@ -354,7 +355,7 @@ func TestResourcesReturnToBaseline(t *testing.T) {
 	const n = 16
 	for range n {
 		acc := acceptAsync(ln)
-		d := Dialer{nw: nw}
+		d := Dialer{eng: librdmacmEngine{nw}}
 		client, err := d.Dial("rdma", ln.Addr().String())
 		if err != nil {
 			t.Fatalf("Dial() error: %v", err)

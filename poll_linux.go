@@ -10,9 +10,9 @@ import (
 	"github.com/wzshiming/rdma/rsocket"
 )
 
-// platformNetwork returns the network built on rsockets, with one poller for
-// the whole process.
-func platformNetwork() network { return &rsocketNet }
+// platformEngine returns the engine of a Config: the librdmacm engine, with
+// one poller for the whole process.
+func platformEngine(Config) engine { return librdmacmEngine{&rsocketNet} }
 
 var rsocketNet rsocketNetwork
 

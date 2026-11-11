@@ -14,7 +14,7 @@ import (
 // other, calls in the same direction are serialised, and Close wakes them
 // all.
 type Conn struct {
-	s             *rstream
+	s             stream
 	local, remote net.Addr
 
 	rmu sync.Mutex // serialises Read calls
@@ -27,7 +27,7 @@ type Conn struct {
 }
 
 // newConn wraps a connected stream.
-func newConn(s *rstream) *Conn {
+func newConn(s stream) *Conn {
 	c := &Conn{s: s}
 	local, remote := s.addrs()
 	if addr := addrFromAddrPort(local); addr != nil {

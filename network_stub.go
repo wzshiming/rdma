@@ -8,9 +8,10 @@ import (
 	"github.com/wzshiming/rdma/rsocket"
 )
 
-// platformNetwork returns the network of a platform without librdmacm:
-// socket fails with errors.ErrUnsupported, so nothing is ever polled.
-func platformNetwork() network { return unsupportedNetwork{} }
+// platformEngine returns the engine of a Config on a platform without
+// librdmacm: the librdmacm engine on a network whose socket fails with
+// errors.ErrUnsupported, so nothing is ever polled.
+func platformEngine(Config) engine { return librdmacmEngine{unsupportedNetwork{}} }
 
 type unsupportedNetwork struct{}
 
