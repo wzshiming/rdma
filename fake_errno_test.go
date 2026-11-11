@@ -10,5 +10,4 @@ var (
 	errAddrInUse error = syscall.EADDRINUSE
 	errInvalid   error = syscall.EINVAL
 	errNotConn   error = syscall.ENOTCONN
-	errConnReset error = syscall.ECONNRESET
 )

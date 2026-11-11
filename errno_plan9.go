@@ -10,4 +10,5 @@ var (
 	errAgain      error = syscall.NewError("resource temporarily unavailable")
 	errInProgress error = syscall.NewError("operation now in progress")
 	errPipe       error = syscall.NewError("broken pipe")
+	errConnReset  error = syscall.NewError("connection reset by peer")
 )

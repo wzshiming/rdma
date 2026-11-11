@@ -11,5 +11,4 @@ var (
 	errAddrInUse error = syscall.NewError("address in use")
 	errInvalid   error = syscall.NewError("invalid argument")
 	errNotConn   error = syscall.NewError("socket is not connected")
-	errConnReset error = syscall.NewError("connection reset by peer")
 )
