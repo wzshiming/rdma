@@ -216,9 +216,10 @@ func (s *Stream) Commit(n int) error {
 }
 
 // Sent takes the completion of the post with the given id, as rs_poll_cq
-// does, and gives the peer the credits held for a control slot.
+// does, and posts the control message or gives the peer the credits held for
+// a control slot.
 func (s *Stream) Sent(id uint64, err error) {
-	if Msg(id).Op() == OpSGL {
+	if op := Msg(id).Op(); op == OpSGL || op == OpCtrl {
 		s.ctrlMaxSeqNo++
 	} else {
 		s.sqeAvail++

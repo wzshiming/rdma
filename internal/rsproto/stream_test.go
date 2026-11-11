@@ -1034,6 +1034,28 @@ func TestShutdownWaitsForAControlSlot(t *testing.T) {
 	}
 }
 
+// rs_poll_cq gives a control slot back, ctrl_max_seqno++, when an RS_OP_CTRL
+// send completes as when an RS_OP_SGL one does, and rs_process_cq then sends
+// the credits held for it.
+func TestControlCompletionGivesBackItsSlot(t *testing.T) {
+	c := testConfig()
+	c.ReceiveQueueSize = rsproto.QPMinSize
+	l := &recorder{}
+	s := rsproto.NewStream(l, c)
+	s.Connect(testPeer)
+	s.CloseWrite()
+	read := (rsproto.QPCtrlSize - 1) * rsproto.QPMinSize / 2
+	readMessages(s, c, 0, read)
+	if len(l.posts) != rsproto.QPCtrlSize || !isCtrl(l.posts[1], rsproto.CtrlShutdown) {
+		t.Fatalf("Connect, CloseWrite and reading %d messages posted %+v, want a grant, RS_CTRL_SHUTDOWN and two credits", read, l.posts)
+	}
+
+	s.Sent(l.posts[1].id, nil)
+	if want := uint32(read + rsproto.QPMinSize); len(l.posts) != rsproto.QPCtrlSize+1 || !isCredit(l.posts[rsproto.QPCtrlSize], want) {
+		t.Errorf("the completion of RS_CTRL_SHUTDOWN posted %+v, want the credits for %d held for its slot", l.posts[rsproto.QPCtrlSize:], want)
+	}
+}
+
 func TestStreamConnData(t *testing.T) {
 	c := testConfig()
 	little := rsproto.ConnData{
