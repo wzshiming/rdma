@@ -123,19 +123,30 @@ var stockConnDataWire = [rsproto.ConnDataSize]byte{
 	0x00, 0x00, 0x7f, 0x44, 0x55, 0x66, 0x00, 0x00, 0x00, 0x00, 0xc3, 0xd4, 0x00, 0x01, 0x00, 0x00,
 }
 
-func TestConnDataEncode(t *testing.T) {
-	bigEndian := stockConnData
-	bigEndian.BigEndian = true
-	bigEndianWire := stockConnDataWire
-	bigEndianWire[1] = 0x03 // RS_CONN_FLAG_IOMAP | RS_CONN_FLAG_NET
+// bigEndianConnData and bigEndianConnDataWire are the same from a big-endian
+// host, which adds RS_CONN_FLAG_NET.
+var (
+	bigEndianConnData = rsproto.ConnData{
+		BigEndian:  true,
+		Credits:    stockConnData.Credits,
+		GrantTable: stockConnData.GrantTable,
+		FirstGrant: stockConnData.FirstGrant,
+	}
+	bigEndianConnDataWire = [rsproto.ConnDataSize]byte{
+		0x01, 0x03, 0x01, 0x80, 0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x7f, 0x11, 0x22, 0x33, 0x00, 0x00, 0x00, 0x00, 0xa1, 0xb2, 0x00, 0x00, 0x00, 0x02,
+		0x00, 0x00, 0x7f, 0x44, 0x55, 0x66, 0x00, 0x00, 0x00, 0x00, 0xc3, 0xd4, 0x00, 0x01, 0x00, 0x00,
+	}
+)
 
+func TestConnDataEncode(t *testing.T) {
 	tests := []struct {
 		c    string // the C function and case that formats the bytes
 		data rsproto.ConnData
 		wire [rsproto.ConnDataSize]byte
 	}{
 		{"rs_format_conn_data on a little-endian host", stockConnData, stockConnDataWire},
-		{"rs_format_conn_data on a big-endian host, RS_CONN_FLAG_NET set", bigEndian, bigEndianWire},
+		{"rs_format_conn_data on a big-endian host, RS_CONN_FLAG_NET set", bigEndianConnData, bigEndianConnDataWire},
 	}
 	for _, tt := range tests {
 		t.Run(tt.c, func(t *testing.T) {
@@ -147,10 +158,6 @@ func TestConnDataEncode(t *testing.T) {
 }
 
 func TestDecodeConnData(t *testing.T) {
-	bigEndian := stockConnData
-	bigEndian.BigEndian = true
-	bigEndianWire := stockConnDataWire
-	bigEndianWire[1] = 0x03 // RS_CONN_FLAG_IOMAP | RS_CONN_FLAG_NET
 	iomapWire := stockConnDataWire
 	iomapWire[7] = 5 // target_iomap_size
 
@@ -160,7 +167,7 @@ func TestDecodeConnData(t *testing.T) {
 		want rsproto.ConnData
 	}{
 		{"rs_save_conn_data of a little-endian peer", stockConnDataWire[:], stockConnData},
-		{"rs_save_conn_data of a big-endian peer, RS_OPT_SWAP_SGL on a little-endian host", bigEndianWire[:], bigEndian},
+		{"rs_save_conn_data of a big-endian peer, RS_OPT_SWAP_SGL on a little-endian host", bigEndianConnDataWire[:], bigEndianConnData},
 		{"rs_save_conn_data of a peer with an iomap, which is never written", iomapWire[:], stockConnData},
 		{"rs_accept of a request the IB CM zero-pads to 56 bytes", append(stockConnDataWire[:], make([]byte, 16)...), stockConnData},
 	}
