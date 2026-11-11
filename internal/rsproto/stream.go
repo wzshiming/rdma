@@ -225,7 +225,9 @@ func (s *Stream) Received(msg Msg) {
 		}
 		s.rbufArrived += int(msg.Data())
 	}
-	s.link.PostRecv(recvID)
+	if err := s.link.PostRecv(recvID); err != nil && s.err == nil {
+		s.err = fmt.Errorf("rsproto: post failed: %w", err)
+	}
 }
 
 // Peek lends the bytes that have arrived and lie contiguous in the receive

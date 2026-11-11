@@ -883,6 +883,21 @@ func TestRefusedReceiveFailsNewStream(t *testing.T) {
 	}
 }
 
+// rs_poll_cq turns a receive it cannot post in place of an arrival into
+// rs_error with errno.
+func TestRefusedReceiveBreaksTheStream(t *testing.T) {
+	refused := errors.New("ibv_post_recv: EINVAL")
+	l := &recorder{}
+	s := rsproto.NewStream(l, testConfig())
+	s.Connect(testPeer)
+	l.err = refused
+	s.Received(rsproto.MakeMsg(rsproto.OpData, 100))
+
+	if err := s.Err(); !errors.Is(err, refused) {
+		t.Errorf("Err() after the receive in place of an arrival was refused = %v, want an error wrapping %q", err, refused)
+	}
+}
+
 func TestStreamConnData(t *testing.T) {
 	c := testConfig()
 	little := rsproto.ConnData{
