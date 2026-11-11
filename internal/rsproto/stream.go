@@ -188,7 +188,9 @@ func (s *Stream) Writable() bool { return s.CanSend() || s.state&StateWritable =
 // SendsDone mirrors rs_conn_all_sends_done, which rshutdown waits for:
 // whether every post has completed or the connection has ended, though not
 // while an end held as the peer's RS_CTRL_SHUTDOWN ended it has yet to go out
-// and complete.
+// and complete. rshutdown waits only while the rsocket is rs_connected; the
+// engine waits before it takes the link down even once the connection has
+// ended.
 func (s *Stream) SendsDone() bool {
 	return int(s.ctrlMaxSeqNo-s.ctrlSeqNo)+s.sqeAvail == s.c.SendQueueSize || s.state&StateConnected == 0 && !s.endOwed
 }
@@ -358,8 +360,9 @@ func (s *Stream) EOF() bool { return s.state&StateReadable == 0 && s.rbufArrived
 
 // CloseWrite mirrors rshutdown(SHUT_WR): the write side ends, which the peer
 // learns by RS_CTRL_SHUTDOWN, or by RS_CTRL_DISCONNECT once the read side has
-// ended too, held until a control slot is free. Once the connection has ended
-// it does nothing.
+// ended too, held until a control slot is free, even if the peer's
+// RS_CTRL_SHUTDOWN ends the connection meanwhile, where rshutdown drops it.
+// Once the connection has ended it does nothing.
 func (s *Stream) CloseWrite() {
 	if s.state&(StateDisconnected|StateError) != 0 {
 		return
@@ -375,7 +378,8 @@ func (s *Stream) CloseWrite() {
 
 // Disconnect mirrors rshutdown(SHUT_RDWR), which rclose makes: both sides
 // end, which the peer learns by RS_CTRL_DISCONNECT, held until a control slot
-// is free. Once the connection has ended it does nothing.
+// is free, even if the peer's RS_CTRL_SHUTDOWN ends the connection meanwhile.
+// Once the connection has ended it does nothing.
 func (s *Stream) Disconnect() {
 	if s.state&(StateDisconnected|StateError) != 0 {
 		return
