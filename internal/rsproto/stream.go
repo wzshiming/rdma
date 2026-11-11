@@ -46,7 +46,9 @@ type Stream struct {
 	rbufOffset  int              // where the arrived bytes start in the receive buffer: rbuf_offset
 	rbufArrived int              // bytes arrived and not yet consumed
 	rbufAvail   int              // bytes of the receive buffer free and not granted: rbuf_bytes_avail
+	rbufFree    int              // where the next grant starts: rbuf_free_offset
 	remote      SGE              // the peer's grant table, Length counting entries: remote_sgl
+	remoteSGE   int              // the entry of it the next grant goes to
 	remoteOrder binary.ByteOrder // of the peer's host, which its grant table is in
 
 	err error
@@ -67,6 +69,7 @@ func NewStream(l Link, c Config) *Stream {
 		sqeAvail:  c.SendQueueSize - QPCtrlSize,
 		sbufAvail: len(c.SendBuffer.Buf),
 		rbufAvail: len(c.ReceiveBuffer.Buf) / 2,
+		rbufFree:  len(c.ReceiveBuffer.Buf) / 2,
 	}
 	for range c.ReceiveQueueSize {
 		l.PostRecv(recvID)
@@ -91,6 +94,7 @@ func (s *Stream) Connect(peer ConnData) {
 	s.setGrant(0, peer.FirstGrant)
 	s.sseqComp = peer.Credits
 	s.remote = peer.GrantTable
+	s.remoteSGE = 1
 	s.remoteOrder = peer.ByteOrder()
 	s.updateCredits()
 }
@@ -106,11 +110,17 @@ func (s *Stream) updateCredits() {
 func (s *Stream) sendCredits() {
 	half := len(s.c.ReceiveBuffer.Buf) / 2
 	ctrl := s.c.ControlBuffer
-	PutSGE(ctrl.Buf, s.remoteOrder, SGE{Addr: s.c.ReceiveBuffer.Addr + uint64(half), Key: s.c.ReceiveBuffer.Key, Length: uint32(half)})
+	PutSGE(ctrl.Buf, s.remoteOrder, SGE{Addr: s.c.ReceiveBuffer.Addr + uint64(s.rbufFree), Key: s.c.ReceiveBuffer.Key, Length: uint32(half)})
 	s.sgl[0] = Segment{Addr: ctrl.Addr, Length: SGESize, Key: ctrl.Key}
 	msg := MakeMsg(OpSGL, uint32(s.c.ReceiveQueueSize))
-	s.link.PostWriteMsg(uint64(msg), s.sgl[:], msg, s.remote.Addr+SGESize, s.remote.Key)
+	s.link.PostWriteMsg(uint64(msg), s.sgl[:], msg, s.remote.Addr+uint64(s.remoteSGE)*SGESize, s.remote.Key)
 	s.rbufAvail -= half
+	if s.rbufFree += half; s.rbufFree >= len(s.c.ReceiveBuffer.Buf) {
+		s.rbufFree = 0
+	}
+	if s.remoteSGE++; s.remoteSGE == int(s.remote.Length) {
+		s.remoteSGE = 0
+	}
 }
 
 // grant returns entry i of the grant table, target_sgl[i] in C, which the

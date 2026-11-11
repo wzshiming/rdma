@@ -627,6 +627,52 @@ func TestReadingHalfTheBufferEarnsAGrant(t *testing.T) {
 	grantPosted(t, c, l.posts[1])
 }
 
+// rs_send_credits grants the halves of the receive buffer in turn from
+// rbuf_free_offset on, into the entries of the peer's grant table in turn
+// from remote_sge 1 on, wrapping at the count of entries the peer sent.
+func TestGrantsRotateOverHalvesAndEntries(t *testing.T) {
+	tests := []struct {
+		c       string // the C function and case that rotates the grants
+		entries uint32
+		want    []int // the entry each grant goes to
+	}{
+		{"rs_send_credits for a peer of RS_SGL_SIZE entries", rsproto.SGLSize, []int{1, 0, 1}},
+		{"rs_send_credits for a peer of 3 entries", 3, []int{1, 2, 0}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.c, func(t *testing.T) {
+			c := testConfig()
+			peer := testPeer
+			peer.GrantTable.Length = tt.entries
+			l := &recorder{}
+			s := rsproto.NewStream(l, c)
+			s.Connect(peer)
+			half := len(c.ReceiveBuffer.Buf) / 2
+			granted := func(p post) rsproto.SGE {
+				b := grantPosted(t, c, p)
+				return rsproto.GetSGE(b[:], binary.LittleEndian)
+			}
+			grants := []rsproto.SGE{granted(l.posts[0])}
+			for _, off := range []int{0, half} {
+				peerWrites(s, c, off, make([]byte, half))
+				s.Peek()
+				s.Consume(half)
+				grants = append(grants, granted(l.posts[len(l.posts)-1]))
+			}
+
+			if len(l.posts) != len(tt.want) {
+				t.Fatalf("Connect and reading the whole receive buffer posted %d messages, want %d grants", len(l.posts), len(tt.want))
+			}
+			for i, entry := range tt.want {
+				wantAddr, wantGrant := peer.GrantTable.Addr+uint64(entry)*rsproto.SGESize, c.ReceiveBuffer.Addr+uint64(half*(1-i%2))
+				if l.posts[i].addr != wantAddr || grants[i].Addr != wantGrant {
+					t.Errorf("grant %d gave %#x in %#x, want %#x in entry %d, %#x", i, grants[i].Addr, l.posts[i].addr, wantGrant, entry, wantAddr)
+				}
+			}
+		})
+	}
+}
+
 func TestStreamConnData(t *testing.T) {
 	c := testConfig()
 	little := rsproto.ConnData{
