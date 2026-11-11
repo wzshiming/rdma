@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/netip"
 	"runtime"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -241,5 +242,95 @@ func TestRXENativeListenerGoroutinesReturnToBaseline(t *testing.T) {
 		t.Run(dial.name, func(t *testing.T) {
 			testRXEGoroutinesReturnToBaseline(t, dial.eng, EngineNative)
 		})
+	}
+}
+
+// qpTransportOf returns the transport under c, a connection of the native
+// engine.
+func qpTransportOf(c *Conn) *qpTransport { return c.s.(*nativeStream).t.(*qpTransport) }
+
+// registeredMemory returns the memory c, a connection of the native engine,
+// registered with its device for its buffers: the send buffer, with the
+// control slots behind it, and the receive buffer.
+func registeredMemory(c *Conn) (send, recv []byte) {
+	t := qpTransportOf(c)
+	return t.smr.Bytes(), t.rmr.Bytes()
+}
+
+// ReadFrom hands its source and WriteTo its destination nothing but views of
+// the memory the connection registered, while 64 MiB go each way at once
+// between two native connections.
+func TestRXENativeCopyLendsRegisteredMemory(t *testing.T) {
+	rdmatest.Device(t)
+	for _, tt := range []struct {
+		name string
+		cfg  Config
+	}{
+		{"defaults", Config{}},
+		{"small", smallConfig},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			client, server := rxeEnginePair(t, tt.cfg, EngineNative, EngineNative)
+			testCopyLendsRegisteredMemory(t, client, server, 64<<20, registeredMemory)
+		})
+	}
+}
+
+// testCopyLendsRegisteredMemory moves total bytes each way at once between
+// client and server with io.Copy, which enters ReadFrom on the sending ends
+// and WriteTo on the receiving ones, and checks the hashes, and that every
+// buffer ReadFrom hands its source lies in the send memory of its end and
+// every buffer WriteTo hands its destination in the receive memory of its
+// own, as registered reports them.
+func testCopyLendsRegisteredMemory(t *testing.T, client, server *Conn, total int, registered func(*Conn) (send, recv []byte)) {
+	var wg sync.WaitGroup
+	var ins, outs [2]*testStream
+	var reads, writes, foreignReads, foreignWrites [2]int
+	for i, ends := range [][2]*Conn{{client, server}, {server, client}} {
+		ins[i], outs[i] = newStream(byte(i)), newStream(byte(i))
+		send, _ := registered(ends[0])
+		_, recv := registered(ends[1])
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			src := &fullSource{s: ins[i], left: total}
+			_, err := io.Copy(ends[0], readerFunc(func(p []byte) (int, error) {
+				reads[i]++
+				if !within(p, send) {
+					foreignReads[i]++
+				}
+				return src.Read(p)
+			}))
+			if err != nil {
+				t.Errorf("io.Copy(conn, src) #%d error: %v", i, err)
+			}
+			if err := ends[0].CloseWrite(); err != nil {
+				t.Errorf("CloseWrite #%d error: %v", i, err)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			dst := &sink{s: outs[i]}
+			_, err := io.Copy(writerFunc(func(p []byte) (int, error) {
+				writes[i]++
+				if !within(p, recv) {
+					foreignWrites[i]++
+				}
+				return dst.Write(p)
+			}), ends[1])
+			if err != nil {
+				t.Errorf("io.Copy(dst, conn) #%d error: %v", i, err)
+			}
+		}()
+	}
+	wg.Wait()
+	for i := range ins {
+		t.Logf("direction #%d: ReadFrom handed the source %d buffers, WriteTo the destination %d", i, reads[i], writes[i])
+		if foreignReads[i] > 0 || foreignWrites[i] > 0 {
+			t.Errorf("direction #%d: %d of the source's buffers lie outside the registered send memory, %d of the destination's outside the receive memory", i, foreignReads[i], foreignWrites[i])
+		}
+		if ins[i].sum() != outs[i].sum() {
+			t.Errorf("direction #%d: sent %s, received %s", i, ins[i].sum(), outs[i].sum())
+		}
 	}
 }
