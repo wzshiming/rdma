@@ -128,14 +128,18 @@ func (s *Stream) sendCredits() {
 	msg := MakeMsg(OpSGL, uint32(s.rseqNo)+uint32(s.c.ReceiveQueueSize))
 	half := len(s.c.ReceiveBuffer.Buf) / 2
 	if s.rbufAvail < half {
-		s.link.PostMsg(uint64(msg), msg)
+		if err := s.link.PostMsg(uint64(msg), msg); err != nil && s.err == nil {
+			s.err = fmt.Errorf("rsproto: post failed: %w", err)
+		}
 		return
 	}
 	ctrl := s.c.ControlBuffer
 	slot := int(s.ctrlSeqNo%QPCtrlSize) * SGESize
 	PutSGE(ctrl.Buf[slot:], s.remoteOrder, SGE{Addr: s.c.ReceiveBuffer.Addr + uint64(s.rbufFree), Key: s.c.ReceiveBuffer.Key, Length: uint32(half)})
 	s.sgl[0] = Segment{Addr: ctrl.Addr + uint64(slot), Length: SGESize, Key: ctrl.Key}
-	s.link.PostWriteMsg(uint64(msg), s.sgl[:], msg, s.remote.Addr+uint64(s.remoteSGE)*SGESize, s.remote.Key)
+	if err := s.link.PostWriteMsg(uint64(msg), s.sgl[:], msg, s.remote.Addr+uint64(s.remoteSGE)*SGESize, s.remote.Key); err != nil && s.err == nil {
+		s.err = fmt.Errorf("rsproto: post failed: %w", err)
+	}
 	s.rbufAvail -= half
 	if s.rbufFree += half; s.rbufFree >= len(s.c.ReceiveBuffer.Buf) {
 		s.rbufFree = 0

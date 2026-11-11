@@ -898,6 +898,39 @@ func TestRefusedReceiveBreaksTheStream(t *testing.T) {
 	}
 }
 
+// rs_send_credits leaves a grant or credits the link refuses to show at a
+// later post; here the stream breaks at once.
+func TestRefusedCreditBreaksTheStream(t *testing.T) {
+	tests := []struct {
+		c              string // the post of rs_send_credits refused
+		rqSize         int
+		messages, size int // what is read
+	}{
+		{"rs_post_write_msg of the grant for half the receive buffer", rsproto.DefaultReceiveQueueSize, 1, rsproto.DefaultReceiveBufferSize / 2},
+		{"rs_post_msg of the credits for rq_size/2 messages", rsproto.QPMinSize, rsproto.QPMinSize / 2, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.c, func(t *testing.T) {
+			refused := errors.New("ibv_post_send: EINVAL")
+			c := testConfig()
+			c.ReceiveQueueSize = tt.rqSize
+			l := &recorder{}
+			s := rsproto.NewStream(l, c)
+			s.Connect(testPeer)
+			for i := range tt.messages {
+				peerWrites(s, c, i*tt.size, make([]byte, tt.size))
+			}
+			s.Peek()
+			l.err = refused
+			s.Consume(tt.messages * tt.size)
+
+			if err := s.Err(); len(l.posts) != 2 || !errors.Is(err, refused) {
+				t.Errorf("Err() after %d posts were refused = %v, want 1 and an error wrapping %q", len(l.posts)-1, err, refused)
+			}
+		})
+	}
+}
+
 func TestStreamConnData(t *testing.T) {
 	c := testConfig()
 	little := rsproto.ConnData{
