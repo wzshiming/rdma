@@ -872,6 +872,17 @@ func TestNoCreditsBeforeConnect(t *testing.T) {
 	}
 }
 
+// rs_create_ep fails at the first receive rs_post_recv cannot post.
+func TestRefusedReceiveFailsNewStream(t *testing.T) {
+	refused := errors.New("ibv_post_recv: ENOMEM")
+	l := &recorder{err: refused}
+	s := rsproto.NewStream(l, testConfig())
+
+	if err := s.Err(); !errors.Is(err, refused) || len(l.recvs) != 1 {
+		t.Errorf("NewStream on a link refusing receives posted %d and left Err() = %v, want 1 and an error wrapping %q", len(l.recvs), err, refused)
+	}
+}
+
 func TestStreamConnData(t *testing.T) {
 	c := testConfig()
 	little := rsproto.ConnData{

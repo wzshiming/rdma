@@ -67,7 +67,7 @@ const recvID = 1 << 63
 
 // NewStream returns a stream on memory the caller registered, as
 // rs_create_ep leaves it for a connection to be set up: with
-// ReceiveQueueSize receives posted.
+// ReceiveQueueSize receives posted. A receive the link refuses breaks it.
 func NewStream(l Link, c Config) *Stream {
 	clear(c.GrantTable.Buf[:SGLSize*SGESize])
 	s := &Stream{
@@ -83,7 +83,10 @@ func NewStream(l Link, c Config) *Stream {
 		ctrlMaxSeqNo: QPCtrlSize,
 	}
 	for range c.ReceiveQueueSize {
-		l.PostRecv(recvID)
+		if err := l.PostRecv(recvID); err != nil {
+			s.err = fmt.Errorf("rsproto: post failed: %w", err)
+			break
+		}
 	}
 	return s
 }
