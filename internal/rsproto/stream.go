@@ -47,6 +47,7 @@ type Stream struct {
 // NewStream returns a stream on memory the caller registered, as
 // rs_create_ep leaves it for a connection to be set up.
 func NewStream(l Link, c Config) *Stream {
+	clear(c.GrantTable.Buf[:SGLSize*SGESize])
 	return &Stream{
 		link:      l,
 		c:         c,

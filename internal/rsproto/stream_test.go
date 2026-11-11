@@ -387,6 +387,26 @@ func TestCommitOfNothingPostsNothing(t *testing.T) {
 	}
 }
 
+// rs_init_bufs gets the grant table zeroed from forksafe_alloc, so an entry
+// no grant has reached is empty, whatever the memory held before.
+func TestNewStreamClearsTheGrantTable(t *testing.T) {
+	c := testConfig()
+	for i := range c.GrantTable.Buf {
+		c.GrantTable.Buf[i] = 0xff
+	}
+	peer := testPeer
+	peer.FirstGrant.Length = 100
+	s := rsproto.NewStream(&recorder{}, c)
+	s.Connect(peer)
+
+	if err := s.Commit(len(s.Reserve())); err != nil {
+		t.Fatalf("Commit of the first grant = %v", err)
+	}
+	if s.CanSend() {
+		t.Errorf("CanSend() with the first grant used up and no grant written into a table that held 0xff bytes")
+	}
+}
+
 func TestStreamConnData(t *testing.T) {
 	c := testConfig()
 	little := rsproto.ConnData{
