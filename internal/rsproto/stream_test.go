@@ -19,24 +19,26 @@ type post struct {
 	key  uint32
 }
 
-// recorder is a link that records what a stream posts.
+// recorder is a link that records what a stream posts and answers each post
+// with err.
 type recorder struct {
 	posts []post
+	err   error
 }
 
 func (r *recorder) PostWriteMsg(id uint64, sgl []rsproto.Segment, msg rsproto.Msg, addr uint64, key uint32) error {
 	r.posts = append(r.posts, post{"rs_post_write_msg", id, slices.Clone(sgl), msg, addr, key})
-	return nil
+	return r.err
 }
 
 func (r *recorder) PostMsg(id uint64, msg rsproto.Msg) error {
 	r.posts = append(r.posts, post{op: "rs_post_msg", id: id, msg: msg})
-	return nil
+	return r.err
 }
 
 func (r *recorder) PostRecv(id uint64) error {
 	r.posts = append(r.posts, post{op: "rs_post_recv", id: id})
-	return nil
+	return r.err
 }
 
 // testConfig describes local memory of the stock sizes as an engine registers
@@ -404,6 +406,18 @@ func TestNewStreamClearsTheGrantTable(t *testing.T) {
 	}
 	if s.CanSend() {
 		t.Errorf("CanSend() with the first grant used up and no grant written into a table that held 0xff bytes")
+	}
+}
+
+// rsend returns the error of the post rs_write_data could not make.
+func TestCommitReturnsThePostError(t *testing.T) {
+	refused := errors.New("ibv_post_send: ENOMEM")
+	s := rsproto.NewStream(&recorder{err: refused}, testConfig())
+	s.Connect(testPeer)
+
+	s.Reserve()
+	if err := s.Commit(1); !errors.Is(err, refused) {
+		t.Errorf("Commit(1) with the post refused = %v, want %v", err, refused)
 	}
 }
 

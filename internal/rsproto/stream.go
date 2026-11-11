@@ -122,8 +122,7 @@ func (s *Stream) Commit(n int) error {
 		s.sbufPos = 0
 	}
 	msg := MakeMsg(OpData, uint32(n))
-	s.link.PostWriteMsg(uint64(msg), s.sgl[:1], msg, addr, key)
-	return nil
+	return s.link.PostWriteMsg(uint64(msg), s.sgl[:1], msg, addr, key)
 }
 
 // Sent takes the completion of the post with the given id, as rs_poll_cq
