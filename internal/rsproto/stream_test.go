@@ -1391,6 +1391,22 @@ func TestSendsDoneOnceAllCompleteOrTheEnd(t *testing.T) {
 	}
 }
 
+// rshutdown returns the error of the rs_post_msg it could not make, and
+// rs_poll_cq turns a receive it cannot post into rs_error; the stream breaks
+// at a control message refused too, as at any post it makes on its own.
+func TestRefusedControlBreaksTheStream(t *testing.T) {
+	refused := errors.New("ibv_post_send: EINVAL")
+	l := &recorder{}
+	s := rsproto.NewStream(l, testConfig())
+	s.Connect(testPeer)
+	l.err = refused
+	s.CloseWrite()
+
+	if err := s.Err(); s.State() != rsproto.StateError || !errors.Is(err, refused) {
+		t.Errorf("CloseWrite with the post refused left the state %#x and Err() = %v, want %#x and an error wrapping %q", s.State(), err, rsproto.StateError, refused)
+	}
+}
+
 func TestStreamConnData(t *testing.T) {
 	c := testConfig()
 	little := rsproto.ConnData{

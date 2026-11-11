@@ -387,13 +387,14 @@ func (s *Stream) postHeld() {
 func (s *Stream) postCtrl(ctrl uint32) {
 	s.ctrlSeqNo++
 	msg := MakeMsg(OpCtrl, ctrl)
-	s.link.PostMsg(uint64(msg), msg)
+	s.checkPost(s.link.PostMsg(uint64(msg), msg))
 }
 
 // checkPost breaks the stream on err, the refusal of a post it made on its
 // own, unless it broke before.
 func (s *Stream) checkPost(err error) {
 	if err != nil && s.err == nil {
+		s.state = StateError
 		s.err = fmt.Errorf("rsproto: post failed: %w", err)
 	}
 }
