@@ -1347,6 +1347,26 @@ func TestReadableWithDataOrTheEnd(t *testing.T) {
 	}
 }
 
+// rs_conn_can_send, which rsend waits for, holds once rs_can_send does or
+// rs_writable is clear, when rsend fails.
+func TestWritableWithRoomOrTheEnd(t *testing.T) {
+	peer := testPeer
+	peer.Credits = 1
+	s := rsproto.NewStream(&recorder{}, testConfig())
+	s.Connect(peer)
+	if !s.Writable() {
+		t.Fatal("Writable() = false with room and a credit")
+	}
+	sendWhileCan(t, s, 1)
+	if s.Writable() {
+		t.Fatal("Writable() with no credit left")
+	}
+	s.CloseWrite()
+	if !s.Writable() {
+		t.Error("Writable() = false after CloseWrite")
+	}
+}
+
 func TestStreamConnData(t *testing.T) {
 	c := testConfig()
 	little := rsproto.ConnData{

@@ -180,6 +180,10 @@ func (s *Stream) CanSend() bool {
 	return s.state&StateWritable != 0 && s.sqeAvail > 0 && s.sbufAvail >= SndLowat && s.sseqNo != s.sseqComp && s.grant(s.targetSGE).Length != 0
 }
 
+// Writable mirrors rs_conn_can_send, which rsend waits for: whether Reserve
+// would lend room or the write side has ended.
+func (s *Stream) Writable() bool { return s.CanSend() || s.state&StateWritable == 0 }
+
 // Reserve lends the room of the send buffer that one message can carry now,
 // nil when there is none.
 func (s *Stream) Reserve() []byte {
