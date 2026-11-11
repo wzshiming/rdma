@@ -20,3 +20,36 @@ const (
 	DefaultReceiveQueueSize  = 384     // def_rqsize
 	DefaultMaxInline         = 64      // def_inline
 )
+
+// Op is the operation in the top 3 bits of a message word (rsocket.c lines
+// 163-171). rs_poll_cq takes the reserved values 1, 3 and 5 for OpData.
+type Op uint8
+
+const (
+	OpData     Op = 0 // RS_OP_DATA: bytes written into the current grant; the data is their count
+	OpWrite    Op = 2 // RS_OP_WRITE: a direct write, which never travels; ignored when received
+	OpSGL      Op = 4 // RS_OP_SGL: a grant or bare credits; the data is the new credit limit
+	OpIOMapSGL Op = 6 // RS_OP_IOMAP_SGL: a direct-I/O mapping; ignored when received
+	OpCtrl     Op = 7 // RS_OP_CTRL: a control message; the data is a Ctrl code
+)
+
+// Control codes, the data of an OpCtrl message (rsocket.c lines 186-189).
+const (
+	CtrlDisconnect = 0 // RS_CTRL_DISCONNECT: the connection ends
+	CtrlKeepalive  = 1 // RS_CTRL_KEEPALIVE: stock rsockets sends it without immediate data, so it never arrives; ignored when received
+	CtrlShutdown   = 2 // RS_CTRL_SHUTDOWN: the peer writes no more
+)
+
+// Msg is a message word, the immediate data of every message: an Op in the
+// top 3 bits and 29 bits of data (rsocket.c lines 173-175). It travels in
+// network byte order, as verbs sends immediate data.
+type Msg uint32
+
+// MakeMsg mirrors rs_msg_set, which does not mask data to 29 bits.
+func MakeMsg(op Op, data uint32) Msg { return Msg(op)<<29 | Msg(data) }
+
+// Op mirrors rs_msg_op.
+func (m Msg) Op() Op { return Op(m >> 29) }
+
+// Data mirrors rs_msg_data.
+func (m Msg) Data() uint32 { return uint32(m) & 0x1FFFFFFF }
