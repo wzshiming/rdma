@@ -51,6 +51,8 @@ type Stream struct {
 	remoteSGE   int              // the entry of it the next grant goes to
 	remoteOrder binary.ByteOrder // of the peer's host, which its grant table is in
 	ctrlSeqNo   uint32           // credit messages posted: ctrl_seqno
+	rseqNo      uint16           // data messages read, wrapping
+	rseqComp    uint16           // the rseqNo to give credits at
 
 	err error
 }
@@ -71,6 +73,7 @@ func NewStream(l Link, c Config) *Stream {
 		sbufAvail: len(c.SendBuffer.Buf),
 		rbufAvail: len(c.ReceiveBuffer.Buf) / 2,
 		rbufFree:  len(c.ReceiveBuffer.Buf) / 2,
+		rseqComp:  uint16(c.ReceiveQueueSize / 2),
 	}
 	for range c.ReceiveQueueSize {
 		l.PostRecv(recvID)
@@ -102,7 +105,7 @@ func (s *Stream) Connect(peer ConnData) {
 
 // updateCredits mirrors rs_update_credits, which rs_give_credits decides.
 func (s *Stream) updateCredits() {
-	if s.rbufAvail >= len(s.c.ReceiveBuffer.Buf)/2 {
+	if s.rbufAvail >= len(s.c.ReceiveBuffer.Buf)/2 || s.rseqNo >= s.rseqComp {
 		s.sendCredits()
 	}
 }
@@ -110,12 +113,17 @@ func (s *Stream) updateCredits() {
 // sendCredits mirrors rs_send_credits.
 func (s *Stream) sendCredits() {
 	s.ctrlSeqNo++
+	s.rseqComp = s.rseqNo + uint16(s.c.ReceiveQueueSize/2)
+	msg := MakeMsg(OpSGL, uint32(s.rseqNo+uint16(s.c.ReceiveQueueSize)))
 	half := len(s.c.ReceiveBuffer.Buf) / 2
+	if s.rbufAvail < half {
+		s.link.PostMsg(uint64(msg), msg)
+		return
+	}
 	ctrl := s.c.ControlBuffer
 	slot := int(s.ctrlSeqNo%QPCtrlSize) * SGESize
 	PutSGE(ctrl.Buf[slot:], s.remoteOrder, SGE{Addr: s.c.ReceiveBuffer.Addr + uint64(s.rbufFree), Key: s.c.ReceiveBuffer.Key, Length: uint32(half)})
 	s.sgl[0] = Segment{Addr: ctrl.Addr + uint64(slot), Length: SGESize, Key: ctrl.Key}
-	msg := MakeMsg(OpSGL, uint32(s.c.ReceiveQueueSize))
 	s.link.PostWriteMsg(uint64(msg), s.sgl[:], msg, s.remote.Addr+uint64(s.remoteSGE)*SGESize, s.remote.Key)
 	s.rbufAvail -= half
 	if s.rbufFree += half; s.rbufFree >= len(s.c.ReceiveBuffer.Buf) {
@@ -213,6 +221,7 @@ func (s *Stream) Peek() []byte {
 func (s *Stream) Consume(n int) {
 	s.rbufArrived -= n
 	s.rbufAvail += n
+	s.rseqNo++
 	if s.rbufOffset += n; s.rbufOffset == len(s.c.ReceiveBuffer.Buf) {
 		s.rbufOffset = 0
 	}

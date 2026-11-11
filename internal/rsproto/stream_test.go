@@ -692,6 +692,42 @@ func TestGrantsInFlightKeepTheirBytes(t *testing.T) {
 	}
 }
 
+// readMessages reads n messages of one byte each that arrive at s one after
+// the other, the first at off of the receive buffer of c.
+func readMessages(s *rsproto.Stream, c rsproto.Config, off, n int) {
+	for i := range n {
+		peerWrites(s, c, off+i, []byte{byte(i)})
+		s.Peek()
+		s.Consume(1)
+	}
+}
+
+// isCredit reports whether p is the bare credit message rs_send_credits posts
+// with rs_post_msg, RS_OP_SGL carrying the credit limit credits.
+func isCredit(p post, credits uint32) bool {
+	return p.op == "rs_post_msg" && p.msg == rsproto.MakeMsg(rsproto.OpSGL, credits)
+}
+
+// rs_give_credits gives credits too once rseq_no, the messages rrecv has
+// read, reaches rseq_comp, rq_size/2 past rseq_no at the last credits; with
+// less than half the receive buffer free, rs_send_credits sends them bare.
+func TestCreditsBelowHalfABufferGoBare(t *testing.T) {
+	c := testConfig()
+	c.ReceiveQueueSize = rsproto.QPMinSize
+	l := &recorder{}
+	s := rsproto.NewStream(l, c)
+	s.Connect(testPeer)
+
+	readMessages(s, c, 0, rsproto.QPMinSize/2-1)
+	if len(l.posts) != 1 {
+		t.Fatalf("reading %d messages posted %+v after the grant of Connect, want nothing", rsproto.QPMinSize/2-1, l.posts[1:])
+	}
+	readMessages(s, c, rsproto.QPMinSize/2-1, 1)
+	if want := uint32(rsproto.QPMinSize/2 + rsproto.QPMinSize); len(l.posts) != 2 || !isCredit(l.posts[1], want) {
+		t.Errorf("reading rq_size/2, %d, messages posted %+v after the grant of Connect, want credits for %d", rsproto.QPMinSize/2, l.posts[1:], want)
+	}
+}
+
 func TestStreamConnData(t *testing.T) {
 	c := testConfig()
 	little := rsproto.ConnData{
