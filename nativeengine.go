@@ -74,14 +74,8 @@ func (e nativeEngine) dial(ctx context.Context, laddr, raddr *Addr, c Config) (s
 		id.Close()
 		return nil, err
 	}
-	t, err := newQPTransport(id, c)
+	s, err := newQPStream(id, c)
 	if err != nil {
-		return nil, err
-	}
-	s, err := newNativeStream(t, t.mem, id.LocalAddr(), id.RemoteAddr())
-	if err != nil {
-		t.down()
-		t.release()
 		return nil, err
 	}
 	data := s.connData().Encode()
@@ -96,6 +90,22 @@ func (e nativeEngine) dial(ctx context.Context, laddr, raddr *Addr, c Config) (s
 		return nil, err
 	}
 	s.connect(peer)
+	return s, nil
+}
+
+// newQPStream builds a native stream sized for c on a connection set up on
+// id, which it owns from then on: when it fails, id is closed.
+func newQPStream(id *cm.ID, c Config) (*nativeStream, error) {
+	t, err := newQPTransport(id, c)
+	if err != nil {
+		return nil, err
+	}
+	s, err := newNativeStream(t, t.mem, id.LocalAddr(), id.RemoteAddr())
+	if err != nil {
+		t.down()
+		t.release()
+		return nil, err
+	}
 	return s, nil
 }
 
