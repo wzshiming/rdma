@@ -6,6 +6,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -24,7 +25,7 @@ func readREADME(t *testing.T) string {
 }
 
 func TestREADMESections(t *testing.T) {
-	want := []string{"# rdma", "## Requirements", "## Install", "## Usage", "## Packages", "## Command line", "## Docker", "## Soft-RoCE", "## Platforms", "## License"}
+	want := []string{"# rdma", "## Requirements", "## Install", "## Usage", "## Packages", "## Command line", "## Docker", "## Soft-RoCE", "## Benchmarks", "## Platforms", "## License"}
 	var got []string
 	inCode := false
 	for _, line := range strings.Split(readREADME(t), "\n") {
@@ -223,6 +224,54 @@ func TestREADMEPlatforms(t *testing.T) {
 	}
 }
 
+// TestREADMEBenchmarks checks that the Benchmarks section names the device
+// benchmarks of the root package, exactly those, and quotes what the Go
+// workflow runs and where it shows the comparison.
+func TestREADMEBenchmarks(t *testing.T) {
+	bench := section(readREADME(t), "## Benchmarks")
+	if bench == "" {
+		t.Fatal("README has no Benchmarks section")
+	}
+	declared := benchmarks(t, "BenchmarkRXE")
+	if len(declared) == 0 {
+		t.Fatal("the root package declares no BenchmarkRXE function")
+	}
+	named := regexp.MustCompile(`BenchmarkRXE\w+`).FindAllString(bench, -1)
+	for _, name := range declared {
+		if !slices.Contains(named, name) {
+			t.Errorf("the Benchmarks section does not name %s", name)
+		}
+	}
+	for _, name := range named {
+		if !slices.Contains(declared, name) {
+			t.Errorf("the Benchmarks section names %s, which the root package does not declare", name)
+		}
+	}
+	workflow, err := os.ReadFile(filepath.Join(repoRoot, ".github", "workflows", "go.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, quote := range []string{
+		"go test -run '^$' -bench '^BenchmarkRXE' -benchtime 500ms -count 1 .",
+		"go tool benchstat -col /engine",
+		"Engines on rxe0",
+		"Summarize the benchmarks",
+		"engine-benchmarks",
+	} {
+		if !strings.Contains(bench, quote) {
+			t.Errorf("the Benchmarks section lacks %q", quote)
+		}
+		if !strings.Contains(string(workflow), quote) {
+			t.Errorf("the Go workflow lacks %q, which the Benchmarks section quotes", quote)
+		}
+	}
+	for _, want := range []string{"`RDMA_TEST_DEVICE`", "Summary", "base", "relative"} {
+		if !strings.Contains(bench, want) {
+			t.Errorf("the Benchmarks section lacks %q", want)
+		}
+	}
+}
+
 // TestREADMENamesTheDependencies checks that the README names purego beside
 // the standard library and rdma-core, and installs no development package
 // anywhere, the Soft-RoCE recipe included.
@@ -314,4 +363,27 @@ func exampleBody(t *testing.T, name string) string {
 	}
 	t.Fatalf("%s has no %s", path, name)
 	return ""
+}
+
+// benchmarks returns the names of the functions of the root package's test
+// files, whatever their build constraints, that begin with prefix.
+func benchmarks(t *testing.T, prefix string) []string {
+	t.Helper()
+	paths, err := filepath.Glob(filepath.Join(repoRoot, "*_test.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, path := range paths {
+		f, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, d := range f.Decls {
+			if fn, ok := d.(*ast.FuncDecl); ok && fn.Recv == nil && strings.HasPrefix(fn.Name.Name, prefix) {
+				names = append(names, fn.Name.Name)
+			}
+		}
+	}
+	return names
 }

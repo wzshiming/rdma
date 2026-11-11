@@ -3,7 +3,7 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/wzshiming/rdma.svg)](https://pkg.go.dev/github.com/wzshiming/rdma)
 [![Go](https://github.com/wzshiming/rdma/actions/workflows/go.yml/badge.svg)](https://github.com/wzshiming/rdma/actions/workflows/go.yml)
 
-Reliable byte streams over RDMA with the vocabulary of the `net` package: `Dial` and `Listen` give out `net.Conn` and `net.Listener` values addressed by IP address and port like TCP. The connections speak the rsockets protocol, so any rsockets application can be their peer, and one of two engines carries them, as `Config.Engine` picks: the native engine, the default, runs the protocol in Go on the module's own `verbs` and `cm` bindings, over InfiniBand and RoCE, and lends its registered buffers to `io.Copy`; the librdmacm engine drives the rsockets of librdmacm, iWARP included, and stays at hand as the compatibility peer and the control of the benchmarks. The module depends on the standard library, [`github.com/ebitengine/purego`](https://github.com/ebitengine/purego) and rdma-core, which the bindings load at run time.
+Reliable byte streams over RDMA with the vocabulary of the `net` package: `Dial` and `Listen` give out `net.Conn` and `net.Listener` values addressed by IP address and port like TCP. The connections speak the rsockets protocol, so any rsockets application can be their peer, and one of two engines carries them, as `Config.Engine` picks: the native engine, the default, runs the protocol in Go on the module's own `verbs` and `cm` bindings, over InfiniBand and RoCE, and lends its registered buffers to `io.Copy`; the librdmacm engine drives the rsockets of librdmacm, iWARP included, and stays at hand as the compatibility peer and the control of the [benchmarks](#benchmarks). The module depends on the standard library, [`github.com/ebitengine/purego`](https://github.com/ebitengine/purego) and rdma-core, which the bindings load at run time.
 
 ## Requirements
 
@@ -171,6 +171,28 @@ go run ./examples/echo -connect 10.200.0.1:4791 -message "hello, rdma"
 rdma pingpong -listen 10.200.0.1:4791 &
 rdma pingpong -connect 10.200.0.1:4791
 ```
+
+## Benchmarks
+
+The root package has Go benchmarks that put the two engines side by side on one device: `BenchmarkRXERoundTrip` times the round trip of 64 B and of 4 KiB, a `Write` that the peer reads and writes back and a `ReadFull` of the echo; `BenchmarkRXEWriteRead` measures the throughput one way of a loop of `Write` calls against a loop of `Read` calls, and `BenchmarkRXEReadFromWriteTo` that of `ReadFrom` on the sending end against `WriteTo` on the receiving one, both at 4 KiB, 64 KiB and 1 MiB a call, the latter failing unless the copy takes the path of its engine: the lent registered buffers on the native engine, a buffer of its own on the librdmacm engine. Each size runs on `engine=librdmacm` and then on `engine=native`. The benchmarks find their device as the tests do, `RDMA_TEST_DEVICE` naming one, and skip without one.
+
+Ten rounds of every benchmark, in which the engines take turns on the machine, make the samples, and benchstat, at the version `go.mod` pins as a tool, compares them: a row per benchmark and size, a column per engine, the native one set against librdmacm's, the base. From a checkout, on a host with a device:
+
+```sh
+ulimit -l unlimited
+for i in $(seq 10); do go test -run '^$' -bench '^BenchmarkRXE' -benchtime 500ms -count 1 .; done > bench.txt
+go tool benchstat -col /engine bench.txt
+```
+
+Every run of the [Go workflow](https://github.com/wzshiming/rdma/actions/workflows/go.yml) does the same on Soft-RoCE in its integration job, after the tests: the run's Summary page shows the table under "Engines on rxe0", with the runner's CPU, kernel, Go and rdma-core versions and its load before and after, the log of the step "Summarize the benchmarks" repeats it, and the artifact `engine-benchmarks` holds the raw output. The figures never fail the job; a benchmark that fails does. Soft-RoCE is a software device, so only the relative differences mean anything; for orientation, one run on 4 CPUs of an AMD EPYC 9V45 gave:
+
+| Benchmark | librdmacm | native |
+| --- | --- | --- |
+| Round trip, 64 B | 95 µs | 63 µs |
+| `Write` / `Read`, 4 KiB | 139 MiB/s | 338 MiB/s |
+| `Write` / `Read`, 64 KiB | 329 MiB/s | 358 MiB/s |
+| `ReadFrom` / `WriteTo`, 4 KiB | 142 MiB/s | 340 MiB/s |
+| `ReadFrom` / `WriteTo`, 1 MiB | 328 MiB/s | 358 MiB/s |
 
 ## Platforms
 
