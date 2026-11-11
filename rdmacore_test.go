@@ -17,17 +17,19 @@ const (
 	verdictFatal verdict = "fatal"
 )
 
-// manyConnectionsVerdict decides for the rdma-core release in use (0 when
-// unknown) under the environment getenv reads: before 53, once a fourth
-// rsocket is registered with one of librdmacm's service threads, the thread
-// keeps polling the descriptor array it has just freed and reallocated (fixed
-// upstream by 24061f015bd9, "rsockets: Fix for cm_svc_run thread"), after
-// which rsockets hang in raccept and rclose or crash, so the test skips, or
-// fails under RDMA_TEST_REQUIRE=1 so that CI never skips it silently.
+// manyConnectionsVerdict decides for the engine e and the rdma-core release
+// in use (0 when unknown) under the environment getenv reads. The native
+// engine registers no rsocket, so it runs on any release. On the librdmacm
+// engine before 53, once a fourth rsocket is registered with one of
+// librdmacm's service threads, the thread keeps polling the descriptor array
+// it has just freed and reallocated (fixed upstream by 24061f015bd9,
+// "rsockets: Fix for cm_svc_run thread"), after which rsockets hang in
+// raccept and rclose or crash, so the test skips, or fails under
+// RDMA_TEST_REQUIRE=1 so that CI never skips it silently.
 // RDMA_TEST_MANY_CONNS=1 runs it regardless.
-func manyConnectionsVerdict(release int, getenv func(string) string) verdict {
+func manyConnectionsVerdict(e Engine, release int, getenv func(string) string) verdict {
 	switch {
-	case getenv("RDMA_TEST_MANY_CONNS") == "1", release == 0, release >= 53:
+	case e != EngineLibrdmacm, getenv("RDMA_TEST_MANY_CONNS") == "1", release == 0, release >= 53:
 		return verdictRun
 	case getenv("RDMA_TEST_REQUIRE") == "1":
 		return verdictFatal
@@ -62,23 +64,26 @@ func rdmaCoreReleaseIn(maps string) int {
 func TestManyConnectionsVerdict(t *testing.T) {
 	tests := []struct {
 		name    string
+		engine  Engine
 		release int
 		env     map[string]string
 		want    verdict
 	}{
-		{"required on 50 fails", 50, map[string]string{"RDMA_TEST_REQUIRE": "1"}, verdictFatal},
-		{"50 skips", 50, nil, verdictSkip},
-		{"56 runs", 56, nil, verdictRun},
-		{"53 runs when required", 53, map[string]string{"RDMA_TEST_REQUIRE": "1"}, verdictRun},
-		{"forced on 50 runs", 50, map[string]string{"RDMA_TEST_MANY_CONNS": "1"}, verdictRun},
-		{"forced on 50 runs when required", 50, map[string]string{"RDMA_TEST_MANY_CONNS": "1", "RDMA_TEST_REQUIRE": "1"}, verdictRun},
-		{"unknown release runs", 0, map[string]string{"RDMA_TEST_REQUIRE": "1"}, verdictRun},
+		{"required on 50 fails", EngineLibrdmacm, 50, map[string]string{"RDMA_TEST_REQUIRE": "1"}, verdictFatal},
+		{"50 skips", EngineLibrdmacm, 50, nil, verdictSkip},
+		{"56 runs", EngineLibrdmacm, 56, nil, verdictRun},
+		{"53 runs when required", EngineLibrdmacm, 53, map[string]string{"RDMA_TEST_REQUIRE": "1"}, verdictRun},
+		{"forced on 50 runs", EngineLibrdmacm, 50, map[string]string{"RDMA_TEST_MANY_CONNS": "1"}, verdictRun},
+		{"forced on 50 runs when required", EngineLibrdmacm, 50, map[string]string{"RDMA_TEST_MANY_CONNS": "1", "RDMA_TEST_REQUIRE": "1"}, verdictRun},
+		{"unknown release runs", EngineLibrdmacm, 0, map[string]string{"RDMA_TEST_REQUIRE": "1"}, verdictRun},
+		{"native on 50 runs", EngineNative, 50, nil, verdictRun},
+		{"native on 50 runs when required", EngineNative, 50, map[string]string{"RDMA_TEST_REQUIRE": "1"}, verdictRun},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := manyConnectionsVerdict(tt.release, func(name string) string { return tt.env[name] })
+			got := manyConnectionsVerdict(tt.engine, tt.release, func(name string) string { return tt.env[name] })
 			if got != tt.want {
-				t.Errorf("manyConnectionsVerdict(%d, %v) = %q, want %q", tt.release, tt.env, got, tt.want)
+				t.Errorf("manyConnectionsVerdict(%q, %d, %v) = %q, want %q", tt.engine, tt.release, tt.env, got, tt.want)
 			}
 		})
 	}

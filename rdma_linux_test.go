@@ -67,16 +67,17 @@ func testOnEachPair(t *testing.T, cfg Config, exchange func(t *testing.T, client
 	})
 }
 
-// manyConnections gates a test that keeps more than three connections alive
-// in this process by the rdma-core release in use, as manyConnectionsVerdict
-// decides: a skip before 53, a failure under RDMA_TEST_REQUIRE=1, and a run
-// under RDMA_TEST_MANY_CONNS=1 regardless.
-func manyConnections(t *testing.T) {
+// manyConnections gates a test that keeps more than three connections of the
+// engine e alive in this process by the rdma-core release in use, as
+// manyConnectionsVerdict decides: on the librdmacm engine a skip before 53, a
+// failure under RDMA_TEST_REQUIRE=1, and a run under RDMA_TEST_MANY_CONNS=1
+// regardless; a run on the native engine.
+func manyConnections(t *testing.T, e Engine) {
 	t.Helper()
 	rdmatest.Device(t)
 	release := rdmaCoreRelease()
 	msg := "rdma-core " + strconv.Itoa(release) + " corrupts its service threads beyond three registered rsockets (fixed in 53); RDMA_TEST_MANY_CONNS=1 runs the test anyway"
-	switch manyConnectionsVerdict(release, os.Getenv) {
+	switch manyConnectionsVerdict(e, release, os.Getenv) {
 	case verdictSkip:
 		t.Skip(msg)
 	case verdictFatal:
@@ -222,7 +223,7 @@ func TestRXETransfer(t *testing.T) {
 
 func TestRXEConcurrentConnections(t *testing.T) {
 	forEachEngine(t, func(t *testing.T, e Engine) {
-		manyConnections(t)
+		manyConnections(t, e)
 		cfg := Config{Engine: e}
 		ln := rxeListen(t, cfg)
 		const conns = 32
@@ -562,7 +563,7 @@ func TestRXEResourcesReturnToBaseline(t *testing.T) {
 
 func TestRXEIdleConnectionsAreCheap(t *testing.T) {
 	forEachEngine(t, func(t *testing.T, e Engine) {
-		manyConnections(t)
+		manyConnections(t, e)
 		cfg := smallConfig
 		cfg.Engine = e
 		ln := rxeListen(t, cfg)
