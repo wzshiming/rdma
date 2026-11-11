@@ -1,5 +1,7 @@
 package rsproto
 
+import "encoding/binary"
+
 // Sizes and limits of the protocol (rsocket.c lines 65-72).
 const (
 	OLAPStartSize = 2048   // RS_OLAP_START_SIZE: the first message of a send, each next one doubling up to MaxTransfer
@@ -53,3 +55,28 @@ func (m Msg) Op() Op { return Op(m >> 29) }
 
 // Data mirrors rs_msg_data.
 func (m Msg) Data() uint32 { return uint32(m) & 0x1FFFFFFF }
+
+// SGE mirrors struct rs_sge (rsocket.c line 209): memory of one side that
+// the other may write, in a grant entry or the connection data.
+type SGE struct {
+	Addr   uint64
+	Key    uint32
+	Length uint32
+}
+
+// SGESize is sizeof(struct rs_sge), the size of a grant entry.
+const SGESize = 16
+
+// PutSGE writes s into b[:SGESize] in the given byte order.
+func PutSGE(b []byte, order binary.ByteOrder, s SGE) {
+	b = b[:SGESize]
+	order.PutUint64(b[0:8], s.Addr)
+	order.PutUint32(b[8:12], s.Key)
+	order.PutUint32(b[12:16], s.Length)
+}
+
+// GetSGE reads an SGE from b[:SGESize] in the given byte order.
+func GetSGE(b []byte, order binary.ByteOrder) SGE {
+	b = b[:SGESize]
+	return SGE{Addr: order.Uint64(b[0:8]), Key: order.Uint32(b[8:12]), Length: order.Uint32(b[12:16])}
+}

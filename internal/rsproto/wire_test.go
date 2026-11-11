@@ -67,3 +67,38 @@ func TestMsgWireFormat(t *testing.T) {
 		})
 	}
 }
+
+// A grant entry is a struct rs_sge, an address, a key and a length, which
+// rs_send_credits writes into the peer's grant table field by field in one
+// byte order, and which rs_can_send and rs_write_data read in place.
+func TestSGEWireFormat(t *testing.T) {
+	grant := rsproto.SGE{Addr: 0x00007f1122334400, Key: 0x55667788, Length: 0x00010000}
+	tests := []struct {
+		c     string // the C function and case that writes the entry
+		order binary.ByteOrder
+		wire  [rsproto.SGESize]byte
+	}{
+		{
+			"rs_send_credits on a little-endian host for a little-endian peer, in host order",
+			binary.LittleEndian,
+			[rsproto.SGESize]byte{0x00, 0x44, 0x33, 0x22, 0x11, 0x7f, 0x00, 0x00, 0x88, 0x77, 0x66, 0x55, 0x00, 0x00, 0x01, 0x00},
+		},
+		{
+			"rs_send_credits on a little-endian host for a big-endian peer, swapped by bswap_64 and bswap_32",
+			binary.BigEndian,
+			[rsproto.SGESize]byte{0x00, 0x00, 0x7f, 0x11, 0x22, 0x33, 0x44, 0x00, 0x55, 0x66, 0x77, 0x88, 0x00, 0x01, 0x00, 0x00},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.c, func(t *testing.T) {
+			var got [rsproto.SGESize]byte
+			rsproto.PutSGE(got[:], tt.order, grant)
+			if got != tt.wire {
+				t.Errorf("PutSGE(%v, %+v) = % x, want % x", tt.order, grant, got, tt.wire)
+			}
+			if back := rsproto.GetSGE(tt.wire[:], tt.order); back != grant {
+				t.Errorf("GetSGE(% x, %v) = %+v, want %+v", tt.wire, tt.order, back, grant)
+			}
+		})
+	}
+}
