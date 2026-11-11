@@ -2,6 +2,7 @@ package rsproto_test
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"io"
 	"math/rand/v2"
@@ -62,6 +63,7 @@ func testConfig() rsproto.Config {
 		SendBuffer:       rsproto.Region{Buf: make([]byte, rsproto.DefaultSendBufferSize), Addr: 0x00007e0000000000, Key: 0x5e4d},
 		ReceiveBuffer:    rsproto.Region{Buf: make([]byte, rsproto.DefaultReceiveBufferSize), Addr: 0x00007e1000000000, Key: 0x4ecf},
 		GrantTable:       rsproto.Region{Buf: make([]byte, rsproto.SGLSize*rsproto.SGESize), Addr: 0x00007e2000000000, Key: 0x6a17},
+		ControlBuffer:    rsproto.Region{Buf: make([]byte, rsproto.QPCtrlSize*rsproto.SGESize), Addr: 0x00007e3000000000, Key: 0x5e4e},
 		SendQueueSize:    rsproto.DefaultSendQueueSize,
 		ReceiveQueueSize: rsproto.DefaultReceiveQueueSize,
 	}
@@ -528,6 +530,44 @@ func TestWhichOpsArriveAsData(t *testing.T) {
 		if got := len(s.Peek()); got != want {
 			t.Errorf("a message of op %d and data 100 lent a view of %d bytes, want %d", op, got, want)
 		}
+	}
+}
+
+// grantPosted returns the grant entry p writes into the peer's grant table,
+// failing t unless p is an rs_post_write_msg of one entry from the control
+// buffer of c.
+func grantPosted(t *testing.T, c rsproto.Config, p post) [rsproto.SGESize]byte {
+	t.Helper()
+	ctrl := c.ControlBuffer
+	if p.op != "rs_post_write_msg" || len(p.sgl) != 1 || p.sgl[0].Length != rsproto.SGESize || p.sgl[0].Key != ctrl.Key ||
+		p.sgl[0].Addr < ctrl.Addr || p.sgl[0].Addr+rsproto.SGESize > ctrl.Addr+uint64(len(ctrl.Buf)) {
+		t.Fatalf("%+v is no write of a grant entry from the control buffer at %#x under %#x", p, ctrl.Addr, ctrl.Key)
+	}
+	return [rsproto.SGESize]byte(ctrl.Buf[p.sgl[0].Addr-ctrl.Addr:])
+}
+
+// rs_init_bufs leaves the second half of the receive buffer for the first
+// rs_update_credits of the connection to grant: rs_send_credits writes it
+// into entry 1 of the peer's grant table, remote_sge, with RS_OP_SGL
+// carrying the credit limit rseq_no + rq_size.
+func TestConnectGrantsTheSecondHalf(t *testing.T) {
+	c := testConfig()
+	l := &recorder{}
+	s := rsproto.NewStream(l, c)
+	s.Connect(testPeer)
+
+	if len(l.posts) != 1 {
+		t.Fatalf("Connect posted %+v, want one grant", l.posts)
+	}
+	p := l.posts[0]
+	msg, entry1 := rsproto.MakeMsg(rsproto.OpSGL, rsproto.DefaultReceiveQueueSize), testPeer.GrantTable.Addr+rsproto.SGESize
+	if p.msg != msg || p.addr != entry1 || p.key != testPeer.GrantTable.Key {
+		t.Errorf("Connect wrote message %#x to %#x under %#x, want %#x to entry 1 of the peer's grant table, %#x under %#x", p.msg, p.addr, p.key, msg, entry1, testPeer.GrantTable.Key)
+	}
+	half := uint32(len(c.ReceiveBuffer.Buf) / 2)
+	b := grantPosted(t, c, p)
+	if got, want := rsproto.GetSGE(b[:], binary.LittleEndian), (rsproto.SGE{Addr: c.ReceiveBuffer.Addr + uint64(half), Key: c.ReceiveBuffer.Key, Length: half}); got != want {
+		t.Errorf("Connect granted %+v, want the second half of the receive buffer, %+v", got, want)
 	}
 }
 

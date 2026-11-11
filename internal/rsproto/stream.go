@@ -18,6 +18,7 @@ type Config struct {
 	SendBuffer    Region // Key is the local key the link reads it by
 	ReceiveBuffer Region // the peer writes it; Key is the remote key
 	GrantTable    Region // SGLSize entries of SGESize bytes the peer writes; Key is the remote key
+	ControlBuffer Region // QPCtrlSize slots of SGESize bytes grants are posted from, rs_get_ctrl_buf's; Key is the local key
 
 	// The depths of the queue pair's queues, as rs_set_qp_size leaves them
 	// within QPMinSize and QPMaxSize.
@@ -44,6 +45,7 @@ type Stream struct {
 
 	rbufOffset  int // where the arrived bytes start in the receive buffer: rbuf_offset
 	rbufArrived int // bytes arrived and not yet consumed
+	remote      SGE // the peer's grant table, Length counting entries: remote_sgl
 
 	err error
 }
@@ -80,10 +82,23 @@ func (s *Stream) ConnData() ConnData {
 }
 
 // Connect mirrors rs_save_conn_data: the stream takes the connection data of
-// its peer.
+// its peer. It grants the peer room as the first rs_process_cq of the
+// connection does, so the link must be able to send.
 func (s *Stream) Connect(peer ConnData) {
 	s.setGrant(0, peer.FirstGrant)
 	s.sseqComp = peer.Credits
+	s.remote = peer.GrantTable
+	s.sendCredits()
+}
+
+// sendCredits mirrors rs_send_credits.
+func (s *Stream) sendCredits() {
+	half := len(s.c.ReceiveBuffer.Buf) / 2
+	ctrl := s.c.ControlBuffer
+	PutSGE(ctrl.Buf, s.order, SGE{Addr: s.c.ReceiveBuffer.Addr + uint64(half), Key: s.c.ReceiveBuffer.Key, Length: uint32(half)})
+	s.sgl[0] = Segment{Addr: ctrl.Addr, Length: SGESize, Key: ctrl.Key}
+	msg := MakeMsg(OpSGL, uint32(s.c.ReceiveQueueSize))
+	s.link.PostWriteMsg(uint64(msg), s.sgl[:], msg, s.remote.Addr+SGESize, s.remote.Key)
 }
 
 // grant returns entry i of the grant table, target_sgl[i] in C, which the
