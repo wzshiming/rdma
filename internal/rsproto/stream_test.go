@@ -1315,6 +1315,42 @@ func TestRefusedEndHeldAtThePeerShutdownIsNotWaitedFor(t *testing.T) {
 	}
 }
 
+// rshutdown posts nothing once the rsocket is not rs_connected: the end a
+// stream holds past the peer's RS_CTRL_SHUTDOWN goes out alone, whether
+// rclose comes while it waits for a slot or once it has completed.
+func TestNoEndJoinsTheOneHeldAtThePeerShutdown(t *testing.T) {
+	tests := []struct {
+		c     string // when rclose comes
+		close func(s *rsproto.Stream, complete func())
+	}{
+		{"while RS_CTRL_SHUTDOWN waits for a slot", func(s *rsproto.Stream, complete func()) {
+			s.Disconnect()
+			complete()
+		}},
+		{"once RS_CTRL_SHUTDOWN has completed", func(s *rsproto.Stream, complete func()) {
+			complete()
+			s.Disconnect()
+			complete()
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.c, func(t *testing.T) {
+			s, l := fourCreditsDue(t)
+			s.CloseWrite()
+			s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlShutdown))
+			done := 0
+			tt.close(s, func() {
+				for ; done < len(l.posts); done++ {
+					s.Sent(l.posts[done].id, nil)
+				}
+			})
+			if got := l.posts[rsproto.QPCtrlSize:]; len(got) != 1 || !isCtrl(got[0], rsproto.CtrlShutdown) {
+				t.Errorf("Disconnect after the peer's shutdown, and the completions, posted %+v; want the RS_CTRL_SHUTDOWN held alone", got)
+			}
+		})
+	}
+}
+
 // rs_give_credits gives none unless the rsocket is rs_connected, which a
 // failed send, rs_error, and a disconnect, rs_disconnected, end.
 func TestNoCreditsAfterTheEnd(t *testing.T) {
