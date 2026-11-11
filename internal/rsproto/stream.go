@@ -34,13 +34,13 @@ type Stream struct {
 	c     Config
 	order binary.ByteOrder // of the host, which the grant table is in
 
-	targetSGE int    // the entry of the grant table data goes to
-	sqeAvail  int    // send queue entries free for data
-	sbufAvail int    // bytes of the send buffer free
-	sbufPos   int    // where the free bytes of the send buffer start: ssgl[0].addr
-	sseqNo    uint16 // data messages sent, wrapping
-	sseqComp  uint16 // the sseqNo the peer's credits stop sending at
-	sgl       [2]Segment
+	targetSGE int        // the entry of the grant table data goes to
+	sqeAvail  int        // send queue entries free for data
+	sbufAvail int        // bytes of the send buffer free
+	sbufPos   int        // where the free bytes of the send buffer start: ssgl[0].addr
+	sseqNo    uint16     // data messages sent, wrapping
+	sseqComp  uint16     // the sseqNo the peer's credits stop sending at
+	sgl       [1]Segment // of a post, here so that passing it allocates nothing
 	err       error
 }
 
@@ -122,7 +122,7 @@ func (s *Stream) Commit(n int) error {
 		s.sbufPos = 0
 	}
 	msg := MakeMsg(OpData, uint32(n))
-	return s.link.PostWriteMsg(uint64(msg), s.sgl[:1], msg, addr, key)
+	return s.link.PostWriteMsg(uint64(msg), s.sgl[:], msg, addr, key)
 }
 
 // Sent takes the completion of the post with the given id, as rs_poll_cq
