@@ -1185,6 +1185,32 @@ func TestCloseWriteAfterPeerShutdownSendsDisconnect(t *testing.T) {
 	}
 }
 
+// rshutdown posts nothing unless the rsocket is rs_connected, neither at once
+// nor once a control slot it waited for is free.
+func TestNoControlMessageOnceTheStreamEnds(t *testing.T) {
+	end := rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlDisconnect)
+	tests := []struct {
+		c     string // the C function and case that posts nothing
+		close func(s *rsproto.Stream)
+	}{
+		{"rshutdown(SHUT_WR) of an rs_disconnected rsocket", func(s *rsproto.Stream) { s.Received(end); s.CloseWrite() }},
+		{"rshutdown(SHUT_RDWR) of an rs_disconnected rsocket", func(s *rsproto.Stream) { s.Received(end); s.Disconnect() }},
+		{"rshutdown(SHUT_WR) waiting for a control slot as the peer disconnects", func(s *rsproto.Stream) { s.CloseWrite(); s.Received(end) }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.c, func(t *testing.T) {
+			s, l := fourCreditsDue(t)
+			tt.close(s)
+			for _, p := range l.posts[:rsproto.QPCtrlSize] {
+				s.Sent(p.id, nil)
+			}
+			if got := l.posts[rsproto.QPCtrlSize:]; len(got) != 0 {
+				t.Errorf("the control slots coming back posted %+v, want nothing", got)
+			}
+		})
+	}
+}
+
 func TestStreamConnData(t *testing.T) {
 	c := testConfig()
 	little := rsproto.ConnData{

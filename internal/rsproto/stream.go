@@ -335,10 +335,11 @@ func (s *Stream) Disconnect() {
 	s.postHeld()
 }
 
-// postHeld posts the control messages held for control slots while slots are
-// free, RS_CTRL_SHUTDOWN before RS_CTRL_DISCONNECT.
+// postHeld posts the control messages held for control slots while the
+// stream is connected and slots are free, RS_CTRL_SHUTDOWN before
+// RS_CTRL_DISCONNECT.
 func (s *Stream) postHeld() {
-	for s.ctrlSeqNo != s.ctrlMaxSeqNo {
+	for s.state&StateConnected != 0 && s.ctrlSeqNo != s.ctrlMaxSeqNo {
 		switch {
 		case s.shutdownHeld:
 			s.shutdownHeld = false
