@@ -1,11 +1,38 @@
 package rdma
 
 import (
+	"errors"
 	"fmt"
 	"math"
 
 	"github.com/wzshiming/rdma/internal/rsproto"
+	"github.com/wzshiming/rdma/verbs"
 )
+
+// nativeEngine is the engine that speaks the rsockets protocol in Go, each
+// connection a native stream on an RC queue pair of verbs that cm connects.
+type nativeEngine struct {
+	// transportType reports the transport of a device, nil meaning the
+	// device's own; tests make a device look like iWARP.
+	transportType func(*verbs.Context) verbs.TransportType
+}
+
+// errIWARP refuses a device of the iWARP transport, whose mode of rsockets
+// the native engine leaves out.
+var errIWARP = fmt.Errorf("rdma: the native engine does not run on iWARP devices, the librdmacm engine does: %w", errors.ErrUnsupported)
+
+// checkDevice reports why the engine cannot run on dev, nil when it can: on
+// every transport but iWARP, the one rs_create_ep sets up differently.
+func (e nativeEngine) checkDevice(dev *verbs.Context) error {
+	transport := e.transportType
+	if transport == nil {
+		transport = (*verbs.Context).TransportType
+	}
+	if transport(dev) == verbs.TransportIWARP {
+		return errIWARP
+	}
+	return nil
+}
 
 // connSizes are the sizes of the buffers and queues of a native connection.
 type connSizes struct {

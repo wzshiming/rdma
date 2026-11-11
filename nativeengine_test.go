@@ -2,8 +2,12 @@ package rdma
 
 import (
 	"errors"
+	"fmt"
 	"math"
+	"strings"
 	"testing"
+
+	"github.com/wzshiming/rdma/verbs"
 )
 
 // A native connection is sized as rsockets sizes an rsocket that the
@@ -54,5 +58,34 @@ func TestNativeSizesRefuseBuffersBeyond32Bits(t *testing.T) {
 	c := Config{SendBufferSize: fits, ReceiveBufferSize: fits}
 	if got, err := sizesFor(c, 1<<20); err != nil || got.sendBuffer != 2*fits || got.receiveBuffer != 2*fits {
 		t.Errorf("sizesFor(%+v) = %+v, %v; want buffers of %d bytes", c, got, err, 2*fits)
+	}
+}
+
+// The native engine refuses a device of the iWARP transport, whose mode of
+// rsockets it leaves out, with an error matching errors.ErrUnsupported that
+// points at the librdmacm engine, and takes every other one, as rs_create_ep
+// sets up only iWARP differently.
+func TestNativeEngineRefusesIWARPDevices(t *testing.T) {
+	for _, tt := range []struct {
+		transport verbs.TransportType
+		refused   bool
+	}{
+		{verbs.TransportIB, false},
+		{verbs.TransportIWARP, true},
+		{verbs.TransportUSNIC, false},
+		{verbs.TransportUSNICUDP, false},
+		{verbs.TransportUnspecified, false},
+		{verbs.TransportUnknown, false},
+	} {
+		t.Run(tt.transport.String(), func(t *testing.T) {
+			e := nativeEngine{transportType: func(*verbs.Context) verbs.TransportType { return tt.transport }}
+			err := e.checkDevice(nil)
+			switch {
+			case !tt.refused && err != nil:
+				t.Errorf("checkDevice on %v = %v, want nil", tt.transport, err)
+			case tt.refused && (!errors.Is(err, errors.ErrUnsupported) || !strings.Contains(fmt.Sprint(err), "librdmacm engine")):
+				t.Errorf("checkDevice on %v = %v, want an error matching errors.ErrUnsupported that names the librdmacm engine", tt.transport, err)
+			}
+		})
 	}
 }
