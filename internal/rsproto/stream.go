@@ -235,7 +235,11 @@ func (s *Stream) Received(msg Msg) {
 	switch msg.Op() {
 	case OpSGL:
 		s.sseqComp = uint16(msg.Data())
-	case OpWrite, OpIOMapSGL, OpCtrl: // no data
+	case OpCtrl:
+		if msg.Data() == CtrlShutdown {
+			s.state &^= StateReadable
+		}
+	case OpWrite, OpIOMapSGL: // no data
 	default:
 		s.rmsg[s.rmsgTail] = msg.Data()
 		if s.rmsgTail++; s.rmsgTail == len(s.rmsg) {
@@ -276,6 +280,10 @@ func (s *Stream) Consume(n int) {
 	}
 	s.updateCredits()
 }
+
+// EOF reports whether the read side has ended and what arrived before has
+// been consumed, where rrecv returns 0.
+func (s *Stream) EOF() bool { return s.state&StateReadable == 0 && s.rbufArrived == 0 }
 
 // CloseWrite mirrors rshutdown(SHUT_WR): the write side ends, which the peer
 // learns by RS_CTRL_SHUTDOWN.

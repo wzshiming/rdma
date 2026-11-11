@@ -993,6 +993,31 @@ func TestWritesAreRefusedAfterCloseWrite(t *testing.T) {
 	}
 }
 
+// rs_poll_cq takes the peer's RS_CTRL_SHUTDOWN, while the rsocket is still
+// writable, by clearing rs_readable alone: rrecv returns what arrived before
+// and then 0, and rsend goes on.
+func TestPeerShutdownEndsReadsBehindTheDataAndWritesGoOn(t *testing.T) {
+	c := testConfig()
+	l := &recorder{}
+	s := rsproto.NewStream(l, c)
+	s.Connect(testPeer)
+	peerWrites(s, c, 0, []byte("before"))
+	l.recvs = nil
+	s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlShutdown))
+
+	if want := rsproto.StateConnected | rsproto.StateWritable; s.State() != want || s.EOF() || string(s.Peek()) != "before" || len(l.recvs) != 1 {
+		t.Fatalf("after the peer's shutdown the state is %#x, EOF() = %v with %q lent and %d receives posted; want %#x, false with %q and 1", s.State(), s.EOF(), s.Peek(), len(l.recvs), want, "before")
+	}
+	s.Consume(len("before"))
+	if !s.EOF() {
+		t.Errorf("EOF() = false once the data before the peer's shutdown is read")
+	}
+	l.posts = nil
+	if v := s.Reserve(); len(v) == 0 || s.Commit(1) != nil || len(l.data()) != 1 {
+		t.Errorf("after the peer's shutdown Reserve() lent %d bytes and Commit(1) posted %+v, want room and a data message", len(v), l.data())
+	}
+}
+
 func TestStreamConnData(t *testing.T) {
 	c := testConfig()
 	little := rsproto.ConnData{
