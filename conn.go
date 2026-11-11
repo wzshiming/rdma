@@ -139,20 +139,27 @@ func (c *Conn) write(p []byte) (int, error) {
 // writeState reports why writing cannot go on, if it cannot, and returns the
 // channel that a change of the write deadline closes.
 func (c *Conn) writeState() (changed <-chan struct{}, err error) {
-	c.mu.Lock()
-	closed, writeClosed := c.closed, c.writeClosed
-	c.mu.Unlock()
-	switch {
-	case closed:
-		return nil, net.ErrClosed
-	case writeClosed:
-		return nil, errPipe
+	if err := c.writeClosedError(); err != nil {
+		return nil, err
 	}
 	expired, changed := c.wd.state()
 	if expired {
 		return nil, os.ErrDeadlineExceeded
 	}
 	return changed, nil
+}
+
+// writeClosedError returns the error of a write after Close or CloseWrite.
+func (c *Conn) writeClosedError() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	switch {
+	case c.closed:
+		return net.ErrClosed
+	case c.writeClosed:
+		return errPipe
+	}
+	return nil
 }
 
 // CloseWrite closes the sending side: the peer reads io.EOF after the data
