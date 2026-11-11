@@ -40,7 +40,7 @@ func newConn(s stream) *Conn {
 	return c
 }
 
-// opError wraps err the way the net package reports errors; a socket closed
+// opError wraps err the way the net package reports errors; a stream closed
 // underneath reads as net.ErrClosed.
 func (c *Conn) opError(op string, err error) error {
 	if errors.Is(err, os.ErrClosed) {
