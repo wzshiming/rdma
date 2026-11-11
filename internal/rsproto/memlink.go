@@ -1,6 +1,7 @@
 package rsproto
 
 import (
+	"fmt"
 	"slices"
 	"sync"
 )
@@ -186,19 +187,40 @@ func (e *MemEnd) Deliver() (Msg, bool) {
 	if e.recvs == 0 {
 		return 0, false
 	}
-	e.recvs--
 	p := from.sends[0]
+	if err := e.write(from, p); err != nil {
+		e.link.fail(err)
+		return 0, false
+	}
+	e.recvs--
 	from.sends = slices.Delete(from.sends, 0, 1)
+	from.done = append(from.done, memDone{id: p.id})
+	return p.msg, true
+}
+
+// write copies the bytes of p, from the memory registered at from under the
+// keys of its segments, to the memory registered here under its key. A write
+// of no bytes touches no memory.
+func (e *MemEnd) write(from *MemEnd, p memSend) error {
 	var n uint64
 	for _, s := range p.sgl[:p.nsge] {
 		n += uint64(s.Length)
 	}
-	dst := e.bytes(p.addr, n, p.key)
-	for _, s := range p.sgl[:p.nsge] {
-		dst = dst[copy(dst, from.bytes(s.Addr, uint64(s.Length), s.Key)):]
+	if n == 0 {
+		return nil
 	}
-	from.done = append(from.done, memDone{id: p.id})
-	return p.msg, true
+	dst, ok := e.bytes(p.addr, n, p.key)
+	if !ok {
+		return fmt.Errorf("rsproto: remote access error: no %d bytes at %#x under key %#x", n, p.addr, p.key)
+	}
+	for _, s := range p.sgl[:p.nsge] {
+		src, ok := from.bytes(s.Addr, uint64(s.Length), s.Key)
+		if !ok {
+			return fmt.Errorf("rsproto: local protection error: no %d bytes at %#x under key %#x", s.Length, s.Addr, s.Key)
+		}
+		dst = dst[copy(dst, src):]
+	}
+	return nil
 }
 
 // Completion takes the completion of the oldest send of this end not yet
@@ -216,12 +238,13 @@ func (e *MemEnd) Completion() (id uint64, err error, ok bool) {
 	return d.id, d.err, true
 }
 
-// bytes returns the n bytes at addr of the memory registered under key.
-func (e *MemEnd) bytes(addr, n uint64, key uint32) []byte {
+// bytes returns the n bytes at addr of the memory registered under key, and
+// whether they all are.
+func (e *MemEnd) bytes(addr, n uint64, key uint32) ([]byte, bool) {
 	for _, r := range e.mem {
-		if r.Key == key {
-			return r.Buf[addr-r.Addr:][:n]
+		if r.Key == key && addr >= r.Addr && addr-r.Addr <= uint64(len(r.Buf)) && n <= uint64(len(r.Buf))-(addr-r.Addr) {
+			return r.Buf[addr-r.Addr:][:n], true
 		}
 	}
-	return nil
+	return nil, false
 }

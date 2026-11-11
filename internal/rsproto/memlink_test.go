@@ -36,6 +36,50 @@ func TestMemLinkWriteLandsAtAddressAndKey(t *testing.T) {
 	}
 }
 
+// A write to memory the peer has not registered under the key it names, or
+// from memory this end has not, lands nothing and completes with an error,
+// as IBV_WC_REM_ACCESS_ERR and IBV_WC_LOC_PROT_ERR do, which leaves the link
+// carrying nothing more.
+func TestMemLinkWriteOutsideRegisteredMemoryFails(t *testing.T) {
+	tests := []struct {
+		name string
+		seg  rsproto.Segment
+		addr uint64
+		key  uint32
+	}{
+		{"remote key unknown", rsproto.Segment{Addr: 0x1000, Length: 4, Key: 1}, 0x2000, 9},
+		{"remote address before the memory", rsproto.Segment{Addr: 0x1000, Length: 4, Key: 1}, 0x1ffe, 3},
+		{"remote bytes past its end", rsproto.Segment{Addr: 0x1000, Length: 4, Key: 1}, 0x200d, 3},
+		{"local key unknown", rsproto.Segment{Addr: 0x1000, Length: 4, Key: 9}, 0x2000, 3},
+		{"local bytes past its end", rsproto.Segment{Addr: 0x1006, Length: 4, Key: 1}, 0x2000, 3},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a, b := rsproto.NewMemLink()
+			dst := rsproto.Region{Buf: make([]byte, 16), Addr: 0x2000, Key: 3}
+			a.Register(rsproto.Region{Buf: []byte("abcdefgh"), Addr: 0x1000, Key: 1})
+			b.Register(dst)
+			msg := rsproto.MakeMsg(rsproto.OpData, 4)
+			if b.PostRecv(1<<63) != nil || a.PostWriteMsg(1, []rsproto.Segment{tt.seg}, msg, tt.addr, tt.key) != nil {
+				t.Fatal("the posts failed")
+			}
+
+			if got, ok := b.Deliver(); ok || !bytes.Equal(dst.Buf, make([]byte, 16)) {
+				t.Fatalf("Deliver() = %#x, %v, leaving %q, want nothing delivered and nothing landed", got, ok, dst.Buf)
+			}
+			if id, err, ok := a.Completion(); !ok || id != 1 || err == nil {
+				t.Fatalf("Completion() = %d, %v, %v, want 1 and an error", id, err, ok)
+			}
+			if a.PostMsg(2, msg) != nil {
+				t.Fatal("PostMsg failed")
+			}
+			if id, err, ok := a.Completion(); !ok || id != 2 || err == nil {
+				t.Errorf("Completion() of a send after the failed write = %d, %v, %v, want 2 and an error", id, err, ok)
+			}
+		})
+	}
+}
+
 // A message word alone, an RDMA write with immediate data of no bytes,
 // arrives at the peer, once, and not back at its sender.
 func TestMemLinkMessageAloneArrivesAtThePeer(t *testing.T) {
