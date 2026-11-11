@@ -12,11 +12,14 @@ import (
 	"github.com/wzshiming/rdma/internal/rdmatest"
 )
 
-// TestRXECopy runs io.Copy both ways over the librdmacm engine, whose
-// streams lend nothing, so that ReadFrom and WriteTo copy through their own
-// buffers.
+// TestRXECopy runs io.Copy both ways on each pair of engines with small
+// buffers. ReadFrom and WriteTo move the bytes through the buffers of the
+// native engine's streams, which they lend, and through buffers of their own
+// over the librdmacm engine's, which lend nothing.
 func TestRXECopy(t *testing.T) {
-	testRXECopy(t, Config{}, EngineLibrdmacm, EngineLibrdmacm, 1<<30)
+	forEachPair(t, func(t *testing.T, dial, listen Engine) {
+		testRXECopy(t, smallConfig, dial, listen, 1<<30)
+	})
 }
 
 // fullSource reads left bytes of the stream s, filling every buffer.

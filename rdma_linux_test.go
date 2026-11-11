@@ -39,6 +39,34 @@ func forEachEngine(t *testing.T, test func(t *testing.T, e Engine)) {
 	}
 }
 
+// forEachPair runs test on each pair of the engine of a Dialer and that of
+// a Listener, as a subtest named after them.
+func forEachPair(t *testing.T, test func(t *testing.T, dial, listen Engine)) {
+	for _, dial := range engines {
+		for _, listen := range engines {
+			t.Run(string(dial)+" to "+string(listen), func(t *testing.T) { test(t, dial, listen) })
+		}
+	}
+}
+
+// testOnEachPair runs exchange on each pair of engines, between a connection
+// dialed with the one and the connection a listener of the other accepts,
+// both with cfg otherwise, the dialed end as the client and then as the
+// server.
+func testOnEachPair(t *testing.T, cfg Config, exchange func(t *testing.T, client, server *Conn)) {
+	rdmatest.Device(t)
+	forEachPair(t, func(t *testing.T, dial, listen Engine) {
+		t.Run("dialed end as client", func(t *testing.T) {
+			dialed, accepted := rxeEnginePair(t, cfg, dial, listen)
+			exchange(t, dialed, accepted)
+		})
+		t.Run("dialed end as server", func(t *testing.T) {
+			dialed, accepted := rxeEnginePair(t, cfg, dial, listen)
+			exchange(t, accepted, dialed)
+		})
+	})
+}
+
 // manyConnections gates a test that keeps more than three connections alive
 // in this process by the rdma-core release in use, as manyConnectionsVerdict
 // decides: a skip before 53, a failure under RDMA_TEST_REQUIRE=1, and a run
@@ -147,8 +175,7 @@ func TestRXEConn(t *testing.T) {
 }
 
 func TestRXEEcho(t *testing.T) {
-	client, server := rxePair(t, smallConfig)
-	testRXEEcho(t, client, server)
+	testOnEachPair(t, smallConfig, testRXEEcho)
 }
 
 // testRXEEcho has server echo what client writes, in writes around the
@@ -284,7 +311,7 @@ func testRXEListenerCloseUnblocksAccept(t *testing.T, e Engine) {
 }
 
 func TestRXEDialRefusedWithoutListener(t *testing.T) {
-	testRXEDialRefusedWithoutListener(t, EngineNative, EngineNative)
+	forEachPair(t, testRXEDialRefusedWithoutListener)
 }
 
 // testRXEDialRefusedWithoutListener has a Dialer of the engine dial dial the
@@ -403,8 +430,7 @@ func TestRXECloseWakesBlockedReadAndWrite(t *testing.T) {
 }
 
 func TestRXECloseWriteLetsThePeerWriteBack(t *testing.T) {
-	client, server := rxePair(t, Config{})
-	testRXECloseWriteLetsThePeerWriteBack(t, client, server)
+	testOnEachPair(t, Config{}, testRXECloseWriteLetsThePeerWriteBack)
 }
 
 // testRXECloseWriteLetsThePeerWriteBack has client write and shut down
@@ -594,11 +620,10 @@ func TestRXEIdleConnectionsAreCheap(t *testing.T) {
 
 // TestRXEBufferedDataPrecedesEOF checks that what a peer wrote before closing
 // arrives in full ahead of io.EOF. The write stays within the half of the
-// receive buffer a fresh rsocket advertises, since the peer reads nothing
+// receive buffer a fresh connection advertises, since the peer reads nothing
 // until the close.
 func TestRXEBufferedDataPrecedesEOF(t *testing.T) {
-	client, server := rxePair(t, Config{})
-	testRXEBufferedDataPrecedesEOF(t, client, server)
+	testOnEachPair(t, Config{}, testRXEBufferedDataPrecedesEOF)
 }
 
 // testRXEBufferedDataPrecedesEOF has client write and close at once, and
