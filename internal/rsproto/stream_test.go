@@ -1222,6 +1222,9 @@ func TestNoCreditsAfterTheEnd(t *testing.T) {
 		{"rs_poll_cq of the peer's RS_CTRL_DISCONNECT", func(s *rsproto.Stream, l *recorder) {
 			s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlDisconnect))
 		}},
+		{"rs_handle_cm_event of RDMA_CM_EVENT_DISCONNECTED", func(s *rsproto.Stream, l *recorder) {
+			s.LinkDown(errors.New("RDMA_CM_EVENT_DISCONNECTED"))
+		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.c, func(t *testing.T) {
@@ -1274,6 +1277,20 @@ func TestFailureStaysTheCauseOfTheEnd(t *testing.T) {
 				t.Errorf("the end after a failed send left the state %#x and Err() = %v, want %#x and an error wrapping %q", s.State(), err, rsproto.StateDisconnected, failed)
 			}
 		})
+	}
+}
+
+// rs_handle_cm_event makes a connected rsocket rs_disconnected at
+// RDMA_CM_EVENT_DISCONNECTED, err 0 as for an orderly end; the stream keeps
+// the state but has the loss for its cause, not io.EOF.
+func TestLinkLossWhileConnectedIsAnError(t *testing.T) {
+	s := rsproto.NewStream(&recorder{}, testConfig())
+	s.Connect(testPeer)
+	lost := errors.New("RDMA_CM_EVENT_DISCONNECTED")
+	s.LinkDown(lost)
+
+	if err := s.Err(); s.State() != rsproto.StateDisconnected || !errors.Is(err, lost) || errors.Is(err, io.EOF) {
+		t.Errorf("the link lost left the state %#x and Err() = %v, want %#x and an error wrapping %q, not the io.EOF of an orderly end", s.State(), err, rsproto.StateDisconnected, lost)
 	}
 }
 

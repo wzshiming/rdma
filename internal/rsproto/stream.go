@@ -283,6 +283,14 @@ func (s *Stream) disconnect() {
 	}
 }
 
+// LinkDown takes the loss of the link under the stream, err telling why, as
+// rs_handle_cm_event takes RDMA_CM_EVENT_DISCONNECTED: the connection ends,
+// with the loss for its cause.
+func (s *Stream) LinkDown(err error) {
+	s.state = StateDisconnected
+	s.err = fmt.Errorf("rsproto: link down: %w", err)
+}
+
 // Peek lends the bytes that have arrived and lie contiguous in the receive
 // buffer, in the order they arrived: what rs_peek copies, without the copy.
 func (s *Stream) Peek() []byte {
