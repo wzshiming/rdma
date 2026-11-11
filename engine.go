@@ -55,6 +55,26 @@ type stream interface {
 	close() error
 }
 
+// lender is the capability of a stream to lend its own buffers, through
+// which ReadFrom and WriteTo then move their bytes. A view stays valid until
+// it is returned, even when the stream is closed meanwhile, and the front end
+// returns every view it takes, at most one in each direction at a time and
+// with no other call in that direction while it is out.
+type lender interface {
+	// lendRead lends the bytes that have arrived and lie contiguous in the
+	// receive buffer: errAgain when none has, io.EOF once the peer has shut
+	// down writing and everything before has been read.
+	lendRead() ([]byte, error)
+	// returnRead returns the read view with its first n bytes consumed,
+	// which frees their room for the peer.
+	returnRead(n int) error
+	// lendWrite lends contiguous room of the send buffer that can be sent at
+	// once: errAgain when there is none.
+	lendWrite() ([]byte, error)
+	// commitWrite returns the write view and sends its first n bytes.
+	commitWrite(n int) error
+}
+
 // direction is what a wait on a stream waits for.
 type direction int
 

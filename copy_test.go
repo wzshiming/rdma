@@ -98,6 +98,10 @@ func testCopyPaths(t *testing.T, e engineUnderTest) {
 		{"CopyEcho", testCopyEcho},
 		{"CopyIsIntactUnderBackPressure", testCopyIsIntactUnderBackPressure},
 		{"CopyKeepsOrderWithReadAndWrite", testCopyKeepsOrderWithReadAndWrite},
+		{"CopyLendsEngineBuffers", testCopyLendsEngineBuffers},
+		{"WriteToLeavesWhatTheDestinationRefused", testWriteToLeavesWhatTheDestinationRefused},
+		{"WriteToFreesRoomOnlyOnceTaken", testWriteToFreesRoomOnlyOnceTaken},
+		{"LendingRoundsDoNotAllocate", testLendingRoundsDoNotAllocate},
 	} {
 		t.Run(tt.name, func(t *testing.T) { tt.test(t, e) })
 	}
@@ -473,5 +477,192 @@ func testCopyKeepsOrderWithReadAndWrite(t *testing.T, e engineUnderTest) {
 	}
 	if in.sum() != out.sum() {
 		t.Errorf("sent %s, received %s", in.sum(), out.sum())
+	}
+}
+
+// lending skips t unless e's streams lend their buffers.
+func lending(t *testing.T, e engineUnderTest) {
+	t.Helper()
+	if e.owns == nil {
+		t.Skip("the engine does not lend its buffers")
+	}
+}
+
+// testCopyLendsEngineBuffers checks that every slice ReadFrom hands to the
+// source and WriteTo to the destination lies in the engine's buffers.
+func testCopyLendsEngineBuffers(t *testing.T, e engineUnderTest) {
+	lending(t, e)
+	client, server := e.pair(t, Config{})
+	in, out := newStream(7), newStream(7)
+	src := &chunkySource{s: in, rng: rand.New(rand.NewPCG(7, 0)), left: 4 << 20}
+	foreignReads := make(chan int, 1)
+	go func() {
+		foreign := 0
+		_, err := client.ReadFrom(readerFunc(func(p []byte) (int, error) {
+			if !e.owns(client.s, p) {
+				foreign++
+			}
+			return src.Read(p)
+		}))
+		if err != nil {
+			t.Errorf("ReadFrom error: %v", err)
+		}
+		client.CloseWrite()
+		foreignReads <- foreign
+	}()
+	foreignWrites := 0
+	dst := &sink{s: out}
+	_, err := server.WriteTo(writerFunc(func(p []byte) (int, error) {
+		if !e.owns(server.s, p) {
+			foreignWrites++
+		}
+		return dst.Write(p)
+	}))
+	if err != nil {
+		t.Errorf("WriteTo error: %v", err)
+	}
+	if n := <-foreignReads; n > 0 {
+		t.Errorf("ReadFrom gave the source %d buffers outside the engine's", n)
+	}
+	if foreignWrites > 0 {
+		t.Errorf("WriteTo gave the destination %d buffers outside the engine's", foreignWrites)
+	}
+	if in.sum() != out.sum() {
+		t.Errorf("sent %s, received %s", in.sum(), out.sum())
+	}
+}
+
+// testWriteToLeavesWhatTheDestinationRefused checks that the bytes a failing
+// destination did not take stay in the stream for Read.
+func testWriteToLeavesWhatTheDestinationRefused(t *testing.T, e engineUnderTest) {
+	lending(t, e)
+	client, server := e.pair(t, Config{})
+	if _, err := server.Write([]byte("hello world")); err != nil {
+		t.Fatalf("Write error: %v", err)
+	}
+	n, err := client.WriteTo(writerFunc(func(p []byte) (int, error) { return min(len(p), 5), errDest }))
+	if n != 5 || !isOpError(err, "writeto", errDest) {
+		t.Fatalf("WriteTo(a writer failing after 5 bytes) = %d, %v; want 5 and a writeto *net.OpError with %v", n, err, errDest)
+	}
+	client.SetReadDeadline(time.Now().Add(time.Second))
+	rest := make([]byte, 6)
+	if _, err := io.ReadFull(client, rest); err != nil || string(rest) != " world" {
+		t.Fatalf("Read after WriteTo = %q, %v; want %q", rest, err, " world")
+	}
+}
+
+// testWriteToFreesRoomOnlyOnceTaken checks that the peer gets the room of
+// the bytes WriteTo hands over only once the destination has taken them.
+func testWriteToFreesRoomOnlyOnceTaken(t *testing.T, e engineUnderTest) {
+	lending(t, e)
+	client, server := e.pair(t, Config{ReceiveBufferSize: 4096})
+	if _, err := server.Write(make([]byte, 4096)); err != nil {
+		t.Fatalf("Write error: %v", err)
+	}
+	handed, release := make(chan struct{}), make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		once := false
+		_, err := client.WriteTo(writerFunc(func(p []byte) (int, error) {
+			if !once {
+				once = true
+				close(handed)
+				<-release
+			}
+			return len(p), nil
+		}))
+		done <- err
+	}()
+	<-handed
+	server.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
+	if _, err := server.Write([]byte("x")); !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Errorf("peer Write while the destination holds the bytes error = %v, want a deadline error", err)
+	}
+	close(release)
+	server.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	if _, err := server.Write([]byte("x")); err != nil {
+		t.Errorf("peer Write once the destination took the bytes error: %v", err)
+	}
+	server.CloseWrite()
+	if err := <-done; err != nil {
+		t.Errorf("WriteTo error: %v", err)
+	}
+}
+
+// fill is a source that fills every buffer of the engine it is given, rounds
+// times, and fails on any other.
+type fill struct {
+	rounds int
+	owns   func([]byte) bool
+}
+
+var errForeign = errors.New("buffer outside the engine's")
+
+func (f *fill) Read(p []byte) (int, error) {
+	if !f.owns(p) {
+		return 0, errForeign
+	}
+	if f.rounds == 0 {
+		return 0, io.EOF
+	}
+	f.rounds--
+	return len(p), nil
+}
+
+// testLendingRoundsDoNotAllocate checks that a round of ReadFrom or WriteTo
+// through lent buffers allocates nothing: twice the rounds cost as many
+// allocations.
+func testLendingRoundsDoNotAllocate(t *testing.T, e engineUnderTest) {
+	lending(t, e)
+	const chunk = 1 << 10
+	client, server := e.pair(t, Config{SendBufferSize: chunk, ReceiveBufferSize: 1 << 20})
+	src := &fill{owns: func(p []byte) bool { return e.owns(client.s, p) }}
+	buf := make([]byte, 1<<20)
+	readFrom := func(rounds int) float64 {
+		return testing.AllocsPerRun(20, func() {
+			src.rounds = rounds
+			if _, err := client.ReadFrom(src); err != nil {
+				t.Fatalf("ReadFrom error: %v", err)
+			}
+			for got := 0; got < rounds*chunk; {
+				n, err := server.Read(buf)
+				if err != nil {
+					t.Fatalf("Read error: %v", err)
+				}
+				got += n
+			}
+		})
+	}
+	if few, many := readFrom(64), readFrom(128); many != few {
+		t.Errorf("ReadFrom of 64 and 128 rounds: %v and %v allocations; want as many", few, many)
+	}
+
+	rounds := 0
+	dst := writerFunc(func(p []byte) (int, error) {
+		if !e.owns(server.s, p) {
+			return 0, errForeign
+		}
+		if rounds == 0 {
+			return len(p), errStop
+		}
+		rounds--
+		if _, err := client.Write(buf[:chunk]); err != nil {
+			t.Fatalf("Write error: %v", err)
+		}
+		return len(p), nil
+	})
+	writeTo := func(n int) float64 {
+		return testing.AllocsPerRun(20, func() {
+			rounds = n
+			if _, err := client.Write(buf[:chunk]); err != nil {
+				t.Fatalf("Write error: %v", err)
+			}
+			if _, err := server.WriteTo(dst); !errors.Is(err, errStop) {
+				t.Fatalf("WriteTo error = %v, want %v", err, errStop)
+			}
+		})
+	}
+	if few, many := writeTo(64), writeTo(128); many != few {
+		t.Errorf("WriteTo of 64 and 128 rounds: %v and %v allocations; want as many", few, many)
 	}
 }

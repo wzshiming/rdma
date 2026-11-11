@@ -1,8 +1,14 @@
 package rdma
 
-import "io"
+import (
+	"errors"
+	"io"
+	"net"
+	"os"
+)
 
-// copyBufferSize is the size of the buffer a copy moves its bytes through.
+// copyBufferSize is the size of the buffer a copy moves its bytes through
+// when the stream does not lend its own.
 const copyBufferSize = 32 << 10
 
 // ReadFrom implements io.ReaderFrom, which io.Copy to the connection uses: it
@@ -12,11 +18,67 @@ const copyBufferSize = 32 << 10
 func (c *Conn) ReadFrom(r io.Reader) (int64, error) {
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
-	n, err := c.readFrom(r)
+	var n int64
+	var err error
+	if l, ok := c.s.(lender); ok {
+		n, err = c.readFromLent(l, r)
+	} else {
+		n, err = c.readFrom(r)
+	}
 	if err != nil {
 		return n, c.opError("readfrom", err)
 	}
 	return n, nil
+}
+
+// readFromLent has r read into the room the stream lends. The caller holds
+// wmu.
+func (c *Conn) readFromLent(l lender, r io.Reader) (int64, error) {
+	var total int64
+	for {
+		view, err := c.lendWrite(l)
+		if err != nil {
+			return total, err
+		}
+		n, rerr := r.Read(view)
+		if err := l.commitWrite(n); err != nil {
+			return total, err
+		}
+		total += int64(n)
+		if rerr == io.EOF {
+			return total, nil
+		}
+		if rerr != nil {
+			return total, rerr
+		}
+	}
+}
+
+// lendWrite borrows room from l, waiting for it within the write deadline.
+// The caller holds wmu.
+func (c *Conn) lendWrite(l lender) ([]byte, error) {
+	for {
+		c.mu.Lock()
+		closed, writeClosed := c.closed, c.writeClosed
+		c.mu.Unlock()
+		switch {
+		case closed:
+			return nil, net.ErrClosed
+		case writeClosed:
+			return nil, errPipe
+		}
+		expired, changed := c.wd.state()
+		if expired {
+			return nil, os.ErrDeadlineExceeded
+		}
+		view, err := l.lendWrite()
+		if !errors.Is(err, errAgain) {
+			return view, err
+		}
+		if err := c.s.wait(writable, changed); err != nil {
+			return nil, err
+		}
+	}
 }
 
 // readFrom copies r to the stream through a buffer. The caller holds wmu.
@@ -50,11 +112,64 @@ func (c *Conn) readFrom(r io.Reader) (int64, error) {
 func (c *Conn) WriteTo(w io.Writer) (int64, error) {
 	c.rmu.Lock()
 	defer c.rmu.Unlock()
-	n, err := c.writeTo(w)
+	var n int64
+	var err error
+	if l, ok := c.s.(lender); ok {
+		n, err = c.writeToLent(l, w)
+	} else {
+		n, err = c.writeTo(w)
+	}
 	if err != nil {
 		return n, c.opError("writeto", err)
 	}
 	return n, nil
+}
+
+// writeToLent hands w the bytes the stream lends and consumes what w takes.
+// The caller holds rmu.
+func (c *Conn) writeToLent(l lender, w io.Writer) (int64, error) {
+	var total int64
+	for {
+		view, err := c.lendRead(l)
+		if err == io.EOF {
+			return total, nil
+		}
+		if err != nil {
+			return total, err
+		}
+		n, werr := w.Write(view)
+		total += int64(n)
+		if err := l.returnRead(n); err != nil {
+			return total, err
+		}
+		if werr != nil {
+			return total, werr
+		}
+		if n < len(view) {
+			return total, io.ErrShortWrite
+		}
+	}
+}
+
+// lendRead borrows the bytes that have arrived from l, waiting for them
+// within the read deadline. The caller holds rmu.
+func (c *Conn) lendRead(l lender) ([]byte, error) {
+	for {
+		if c.isClosed() {
+			return nil, net.ErrClosed
+		}
+		expired, changed := c.rd.state()
+		if expired {
+			return nil, os.ErrDeadlineExceeded
+		}
+		view, err := l.lendRead()
+		if !errors.Is(err, errAgain) {
+			return view, err
+		}
+		if err := c.s.wait(readable, changed); err != nil {
+			return nil, err
+		}
+	}
 }
 
 // writeTo copies the stream to w through a buffer. The caller holds rmu.
