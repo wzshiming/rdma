@@ -1,5 +1,12 @@
 package rdmaabi
 
+// IbvDevice is the leading part of struct ibv_device, up to transport_type.
+type IbvDevice struct {
+	_              [2]uint64 // _ops: two function pointers
+	Node_type      int32
+	Transport_type int32
+}
+
 // IbvDeviceAttr is struct ibv_device_attr, filled by ibv_query_device.
 type IbvDeviceAttr struct {
 	Fw_ver                    [64]byte

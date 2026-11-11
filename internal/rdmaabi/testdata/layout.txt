@@ -1,6 +1,9 @@
 # Layout of the rdma-core mirrors in bytes: "<C type> <size>" and
 # "<C type>.<member> <offset> <size>". Regenerate with go test -update
 # once TestLayoutsMatchC passes.
+struct ibv_device 24
+struct ibv_device.node_type 16 4
+struct ibv_device.transport_type 20 4
 struct ibv_device_attr 232
 struct ibv_device_attr.fw_ver 0 64
 struct ibv_device_attr.node_guid 64 8

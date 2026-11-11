@@ -18,12 +18,12 @@ type mirror struct {
 	c string       // the C type, e.g. "struct ibv_wc"
 	t reflect.Type // the Go type
 	// prefix marks a type that mirrors the leading fields of its C type
-	// only, the rest depending on the architecture; the library allocates
-	// these, never Go code.
+	// only; the library allocates these, never Go code.
 	prefix bool
 }
 
 var mirrors = []mirror{
+	{c: "struct ibv_device", t: reflect.TypeFor[IbvDevice](), prefix: true},
 	{c: "struct ibv_device_attr", t: reflect.TypeFor[IbvDeviceAttr]()},
 	{c: "struct ibv_port_attr", t: reflect.TypeFor[IbvPortAttr]()},
 	{c: "struct ibv_gid_entry", t: reflect.TypeFor[IbvGidEntry]()},
