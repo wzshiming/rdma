@@ -22,6 +22,7 @@ type memLink struct {
 	mu     sync.Mutex
 	ends   [2]MemEnd
 	broken error // why the link carries nothing any more
+	lost   error // the loss of the link Down reports
 }
 
 // MemEnd is one end of a link NewMemLink makes: the Link of the stream on
@@ -139,6 +140,28 @@ func (l *memLink) fail(err error) {
 		}
 		e.sends = e.sends[:0]
 	}
+}
+
+// Break loses the link, as RDMA_CM_EVENT_DISCONNECTED tells either side:
+// the link carries nothing more, the sends in flight both ways, and those
+// posted later, complete with err, and Down reports err at both ends.
+func (e *MemEnd) Break(err error) {
+	e.link.mu.Lock()
+	defer e.link.mu.Unlock()
+	e.link.fail(err)
+	e.link.lost = err
+}
+
+// Down returns the loss of the link Break caused, for Stream.LinkDown, once
+// this end has taken the completions before it, which its stream needs to
+// tell an orderly end from the loss; nil before.
+func (e *MemEnd) Down() error {
+	e.link.mu.Lock()
+	defer e.link.mu.Unlock()
+	if len(e.done) > 0 {
+		return nil
+	}
+	return e.link.lost
 }
 
 // Deliver carries the oldest message the peer posted and this end has not

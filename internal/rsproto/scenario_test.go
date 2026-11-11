@@ -380,3 +380,47 @@ func TestFailedWriteIsNoOrderlyEnd(t *testing.T) {
 		})
 	}
 }
+
+// down hands each stream the loss of the link once its end reports it.
+func down(xs ...*side) {
+	for _, x := range xs {
+		if err := x.l.Down(); err != nil {
+			x.s.LinkDown(err)
+		}
+	}
+}
+
+// The loss of the link ends both streams with it for their cause, directly
+// or through the failure of a send in flight it flushed, not with the io.EOF
+// of an orderly end; once a stream has ended in order, the loss changes
+// nothing, though it come before the stream took its last completion.
+func TestLinkLossIsNoOrderlyEnd(t *testing.T) {
+	lost := errors.New("RDMA_CM_EVENT_DISCONNECTED")
+	t.Run("while connected", func(t *testing.T) {
+		a, b := join(smallConfig(0xa0000000), smallConfig(0xb0000000))
+		send(t, a, "in flight")
+		a.l.Break(lost)
+		down(a, b)
+		pump(a, b)
+		down(a, b)
+		for _, x := range []*side{a, b} {
+			if err := x.s.Err(); !errors.Is(err, lost) || errors.Is(err, io.EOF) || x.s.State()&rsproto.StateConnected != 0 {
+				t.Errorf("the loss left a side in state %#x with Err() = %v, want it ended with an error wrapping %q", x.s.State(), err, lost)
+			}
+		}
+	})
+	t.Run("after an orderly end", func(t *testing.T) {
+		a, b := join(smallConfig(0xa0000000), smallConfig(0xb0000000))
+		a.s.Disconnect()
+		b.deliver()
+		a.l.Break(lost)
+		down(a, b)
+		pump(a, b)
+		down(a, b)
+		for _, x := range []*side{a, b} {
+			if x.s.State() != rsproto.StateDisconnected || x.s.Err() != io.EOF {
+				t.Errorf("the loss after the disconnect left a side in state %#x with Err() = %v, want %#x and io.EOF", x.s.State(), x.s.Err(), rsproto.StateDisconnected)
+			}
+		}
+	})
+}

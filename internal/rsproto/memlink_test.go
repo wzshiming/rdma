@@ -209,3 +209,37 @@ func TestMemLinkFailsTheInjectedSend(t *testing.T) {
 		}
 	}
 }
+
+// The loss of the link completes the sends in flight both ways with the
+// error given, carries nothing more, and reaches each end through Down once
+// that end has taken the completions before it, for its stream to take
+// them first.
+func TestMemLinkLossComesAfterTheCompletions(t *testing.T) {
+	lost := errors.New("RDMA_CM_EVENT_DISCONNECTED")
+	msg := rsproto.MakeMsg(rsproto.OpSGL, 1)
+	a, b := rsproto.NewMemLink()
+	for i, e := range []*rsproto.MemEnd{a, b} {
+		if e.PostRecv(1<<63) != nil || e.PostMsg(uint64(i+1), msg) != nil {
+			t.Fatal("the posts failed")
+		}
+		if err := e.Down(); err != nil {
+			t.Fatalf("Down() before the loss = %v, want nil", err)
+		}
+	}
+	a.Break(lost)
+
+	for i, e := range []*rsproto.MemEnd{a, b} {
+		if got, ok := e.Deliver(); ok {
+			t.Errorf("Deliver() after the loss = %#x, want nothing", got)
+		}
+		if err := e.Down(); err != nil {
+			t.Errorf("Down() with a completion not taken = %v, want nil", err)
+		}
+		if id, err, ok := e.Completion(); !ok || id != uint64(i+1) || !errors.Is(err, lost) {
+			t.Errorf("Completion() after the loss = %d, %v, %v, want %d, %v, true", id, err, ok, i+1, lost)
+		}
+		if err := e.Down(); !errors.Is(err, lost) {
+			t.Errorf("Down() with the completions taken = %v, want %v", err, lost)
+		}
+	}
+}
