@@ -399,6 +399,26 @@ func TestRCLoopback(t *testing.T) {
 			t.Errorf("idle Wait() error = %v, want context.DeadlineExceeded", err)
 		}
 	})
+
+	t.Run("WriteImmZeroLength", func(t *testing.T) {
+		if err := p.b.PostRecv(verbs.RecvWR{ID: 17}); err != nil {
+			t.Fatalf("PostRecv() error: %v", err)
+		}
+		// As rsockets sends a control message (RS_OP_CTRL, RS_CTRL_SHUTDOWN): no SGE, remote address or key.
+		if err := p.a.PostSend(verbs.SendWR{ID: 18, Op: verbs.WRWriteImm, Imm: 0xe0000002, Flags: verbs.SendSignaled}); err != nil {
+			t.Fatalf("PostSend() error: %v", err)
+		}
+		recv := pollOne(t, p.cqB)
+		t.Logf("receive completion: %+v", recv)
+		if recv.ID != 17 || recv.Opcode != verbs.WCOpRecvRDMAWithImm || !recv.HasImm() || recv.Imm != 0xe0000002 || recv.Len != 0 {
+			t.Errorf("receive completion = %+v, want id 17, RECV_RDMA_WITH_IMM, imm 0xe0000002, 0 bytes", recv)
+		}
+		send := pollOne(t, p.cqA)
+		t.Logf("send completion: %+v", send)
+		if send.ID != 18 || send.Opcode != verbs.WCOpRDMAWrite {
+			t.Errorf("send completion = %+v, want id 18, RDMA_WRITE", send)
+		}
+	})
 }
 
 func TestCompChannelWaitCancel(t *testing.T) {
