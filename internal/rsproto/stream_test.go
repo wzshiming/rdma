@@ -931,6 +931,23 @@ func TestRefusedCreditBreaksTheStream(t *testing.T) {
 	}
 }
 
+// rs_do_connect and rs_accept leave a connection rs_connect_rdwr, and
+// rs_poll_cq ignores the control data it does not know, RS_CTRL_KEEPALIVE
+// among them, but for the receive it posts in place of the one used up.
+func TestKeepaliveAndUnknownControlDataAreIgnored(t *testing.T) {
+	for _, ctrl := range []uint32{rsproto.CtrlKeepalive, 3, 0x1FFFFFFF} {
+		l := &recorder{}
+		s := rsproto.NewStream(l, testConfig())
+		s.Connect(testPeer)
+		l.posts, l.recvs = nil, nil
+		s.Received(rsproto.MakeMsg(rsproto.OpCtrl, ctrl))
+
+		if want := rsproto.StateConnected | rsproto.StateReadable | rsproto.StateWritable; s.State() != want || len(l.posts) != 0 || len(l.recvs) != 1 {
+			t.Errorf("control data %d left the state %#x, posted %+v and %d receives; want %#x, nothing and 1 receive", ctrl, s.State(), l.posts, len(l.recvs), want)
+		}
+	}
+}
+
 func TestStreamConnData(t *testing.T) {
 	c := testConfig()
 	little := rsproto.ConnData{

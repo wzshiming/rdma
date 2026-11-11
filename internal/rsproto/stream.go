@@ -28,6 +28,16 @@ type Config struct {
 	BigEndian bool // the host is big-endian
 }
 
+// State is the state of a stream as enum rs_state keeps it from the
+// connection on (rsocket.c lines 256-272).
+type State uint16
+
+const (
+	StateConnected State = 0x0100 // rs_connected
+	StateWritable  State = 0x0200 // rs_writable: the write side is open
+	StateReadable  State = 0x0400 // rs_readable: the peer has not ended its writing
+)
+
 // Stream is the state machine of one rsockets stream connection. It does no
 // I/O but through its Link, and its caller drives it one call at a time.
 type Stream struct {
@@ -55,11 +65,11 @@ type Stream struct {
 	remoteOrder  binary.ByteOrder // of the peer's host, which its grant table is in
 	ctrlSeqNo    uint32           // credit messages posted: ctrl_seqno
 	ctrlMaxSeqNo uint32           // the ctrlSeqNo the slots for them run out at
-	connected    bool             // Connect has taken the peer's connection data
 	rseqNo       uint16           // data messages read, wrapping
 	rseqComp     uint16           // the rseqNo to give credits at
 
-	err error
+	state State
+	err   error
 }
 
 // recvID is the id of every receive, rs_recv_wr_id(0).
@@ -110,13 +120,13 @@ func (s *Stream) Connect(peer ConnData) {
 	s.remote = peer.GrantTable
 	s.remoteSGE = 1
 	s.remoteOrder = peer.ByteOrder()
-	s.connected = true
+	s.state = StateConnected | StateReadable | StateWritable
 	s.updateCredits()
 }
 
 // updateCredits mirrors rs_update_credits, which rs_give_credits decides.
 func (s *Stream) updateCredits() {
-	if (s.rbufAvail >= len(s.c.ReceiveBuffer.Buf)/2 || int16(s.rseqNo-s.rseqComp) >= 0) && s.ctrlSeqNo != s.ctrlMaxSeqNo && s.connected {
+	if (s.rbufAvail >= len(s.c.ReceiveBuffer.Buf)/2 || int16(s.rseqNo-s.rseqComp) >= 0) && s.ctrlSeqNo != s.ctrlMaxSeqNo && s.state&StateConnected != 0 {
 		s.sendCredits()
 	}
 }
@@ -269,3 +279,6 @@ func (s *Stream) checkPost(err error) {
 
 // Err returns why the stream broke, nil while it has not.
 func (s *Stream) Err() error { return s.err }
+
+// State returns the state of the stream, none of the bits before Connect.
+func (s *Stream) State() State { return s.state }
