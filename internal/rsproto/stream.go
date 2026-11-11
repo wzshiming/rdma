@@ -64,8 +64,9 @@ type Stream struct {
 	remote       SGE              // the peer's grant table, Length counting entries: remote_sgl
 	remoteSGE    int              // the entry of it the next grant goes to
 	remoteOrder  binary.ByteOrder // of the peer's host, which its grant table is in
-	ctrlSeqNo    uint32           // credit messages posted: ctrl_seqno
+	ctrlSeqNo    uint32           // credit and control messages posted: ctrl_seqno
 	ctrlMaxSeqNo uint32           // the ctrlSeqNo the slots for them run out at
+	shutdownHeld bool             // RS_CTRL_SHUTDOWN waits for a slot
 	rseqNo       uint16           // data messages read, wrapping
 	rseqComp     uint16           // the rseqNo to give credits at
 
@@ -226,6 +227,7 @@ func (s *Stream) Sent(id uint64, err error) {
 	if err != nil && s.err == nil {
 		s.err = fmt.Errorf("rsproto: send failed: %w", err)
 	}
+	s.postHeld()
 	s.updateCredits()
 }
 
@@ -286,11 +288,21 @@ func (s *Stream) Consume(n int) {
 func (s *Stream) EOF() bool { return s.state&StateReadable == 0 && s.rbufArrived == 0 }
 
 // CloseWrite mirrors rshutdown(SHUT_WR): the write side ends, which the peer
-// learns by RS_CTRL_SHUTDOWN.
+// learns by RS_CTRL_SHUTDOWN, held until a control slot is free.
 func (s *Stream) CloseWrite() {
 	s.state &^= StateWritable
-	msg := MakeMsg(OpCtrl, CtrlShutdown)
-	s.link.PostMsg(uint64(msg), msg)
+	s.shutdownHeld = true
+	s.postHeld()
+}
+
+// postHeld posts the control message held for a control slot if one is free.
+func (s *Stream) postHeld() {
+	if s.shutdownHeld && s.ctrlSeqNo != s.ctrlMaxSeqNo {
+		s.shutdownHeld = false
+		s.ctrlSeqNo++
+		msg := MakeMsg(OpCtrl, CtrlShutdown)
+		s.link.PostMsg(uint64(msg), msg)
+	}
 }
 
 // checkPost breaks the stream on err, the refusal of a post it made on its

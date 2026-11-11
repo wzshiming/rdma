@@ -1018,6 +1018,22 @@ func TestPeerShutdownEndsReadsBehindTheDataAndWritesGoOn(t *testing.T) {
 	}
 }
 
+// rshutdown waits for rs_ctrl_avail before it posts its control message,
+// which takes a slot of ctrl_seqno as grants and credits do; the stream holds
+// the message and posts it at the first slot a completion gives back, ahead
+// of the credits held for one too.
+func TestShutdownWaitsForAControlSlot(t *testing.T) {
+	s, l := fourCreditsDue(t)
+	s.CloseWrite()
+	if len(l.posts) != rsproto.QPCtrlSize {
+		t.Fatalf("CloseWrite with %d grants and credits in flight posted %+v, want nothing", rsproto.QPCtrlSize, l.posts[rsproto.QPCtrlSize:])
+	}
+	s.Sent(l.posts[0].id, nil)
+	if len(l.posts) != rsproto.QPCtrlSize+1 || !isCtrl(l.posts[rsproto.QPCtrlSize], rsproto.CtrlShutdown) {
+		t.Errorf("the completion of the grant of Connect posted %+v, want RS_CTRL_SHUTDOWN alone", l.posts[rsproto.QPCtrlSize:])
+	}
+}
+
 func TestStreamConnData(t *testing.T) {
 	c := testConfig()
 	little := rsproto.ConnData{
