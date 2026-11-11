@@ -238,7 +238,8 @@ func (s *Stream) Commit(n int) error {
 
 // Sent takes the completion of the post with the given id, err telling why it
 // failed, as rs_poll_cq does: a failure breaks the stream only while it is
-// connected. What was held for a control slot is posted then.
+// connected, and drops an end held for a control slot. What was held for a
+// control slot is posted then.
 func (s *Stream) Sent(id uint64, err error) {
 	switch msg := Msg(id); msg.Op() {
 	case OpSGL:
@@ -252,9 +253,12 @@ func (s *Stream) Sent(id uint64, err error) {
 		s.sqeAvail++
 		s.sbufAvail += int(msg.Data())
 	}
-	if err != nil && s.state&StateConnected != 0 {
-		s.state = StateError
-		s.err = fmt.Errorf("rsproto: send failed: %w", err)
+	if err != nil {
+		s.endOwed = false
+		if s.state&StateConnected != 0 {
+			s.state = StateError
+			s.err = fmt.Errorf("rsproto: send failed: %w", err)
+		}
 	}
 	s.postHeld()
 	s.updateCredits()
@@ -269,12 +273,13 @@ func (s *Stream) Received(msg Msg) {
 	case OpCtrl:
 		switch msg.Data() {
 		case CtrlDisconnect:
+			s.endOwed = false
 			s.disconnect()
 		case CtrlShutdown:
 			if s.state&StateWritable != 0 {
 				s.state &^= StateReadable
 			} else {
-				s.endOwed = s.shutdownHeld || s.disconnectHeld
+				s.endOwed = s.state&StateConnected != 0 && (s.shutdownHeld || s.disconnectHeld)
 				s.disconnect()
 			}
 		}
@@ -302,8 +307,10 @@ func (s *Stream) disconnect() {
 
 // LinkDown takes the loss of the link under the stream, err telling why, as
 // rs_handle_cm_event takes RDMA_CM_EVENT_DISCONNECTED: a connection still up
-// ends, with the loss for its cause.
+// ends, with the loss for its cause, and an end held for a control slot is
+// dropped.
 func (s *Stream) LinkDown(err error) {
+	s.endOwed = false
 	if s.state&StateConnected != 0 {
 		s.state = StateDisconnected
 		s.err = fmt.Errorf("rsproto: link down: %w", err)
@@ -400,9 +407,13 @@ func (s *Stream) postCtrl(ctrl uint32) {
 }
 
 // checkPost breaks the stream on err, the refusal of a post it made, unless
-// it broke before.
+// it broke before, and drops an end held for a control slot.
 func (s *Stream) checkPost(err error) {
-	if err != nil && s.err == nil {
+	if err == nil {
+		return
+	}
+	s.endOwed = false
+	if s.err == nil {
 		s.state = StateError
 		s.err = fmt.Errorf("rsproto: post failed: %w", err)
 	}

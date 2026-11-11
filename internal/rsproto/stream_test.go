@@ -1263,6 +1263,58 @@ func TestSendsDoneWaitsForTheEndHeldAtThePeerShutdown(t *testing.T) {
 	}
 }
 
+// The end a stream holds past the peer's RS_CTRL_SHUTDOWN is still dropped,
+// as rshutdown drops it, by the peer's RS_CTRL_DISCONNECT, a failure and the
+// loss of the link, before the peer's RS_CTRL_SHUTDOWN or after it; nothing
+// waits for it then.
+func TestHeldEndIsDroppedAtADisconnectAFailureOrTheLinkLoss(t *testing.T) {
+	disconnect := func(s *rsproto.Stream, l *recorder) {
+		s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlDisconnect))
+	}
+	fail := func(s *rsproto.Stream, l *recorder) { s.Sent(l.posts[0].id, errors.New("IBV_WC_RETRY_EXC_ERR")) }
+	lose := func(s *rsproto.Stream, l *recorder) { s.LinkDown(errors.New("RDMA_CM_EVENT_DISCONNECTED")) }
+	none := func(s *rsproto.Stream, l *recorder) {}
+	tests := []struct {
+		c             string // the C function and case that drops it
+		before, after func(s *rsproto.Stream, l *recorder)
+	}{
+		{"rs_poll_cq of the peer's RS_CTRL_DISCONNECT after its RS_CTRL_SHUTDOWN", none, disconnect},
+		{"rs_poll_cq of a failed send after the peer's RS_CTRL_SHUTDOWN", none, fail},
+		{"rs_poll_cq of a failed send before the peer's RS_CTRL_SHUTDOWN", fail, none},
+		{"rs_handle_cm_event of RDMA_CM_EVENT_DISCONNECTED after the peer's RS_CTRL_SHUTDOWN", none, lose},
+	}
+	for _, tt := range tests {
+		t.Run(tt.c, func(t *testing.T) {
+			s, l := fourCreditsDue(t)
+			s.CloseWrite()
+			tt.before(s, l)
+			s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlShutdown))
+			tt.after(s, l)
+			for _, p := range l.posts[1:rsproto.QPCtrlSize] {
+				s.Sent(p.id, nil)
+			}
+			if got := l.posts[rsproto.QPCtrlSize:]; len(got) != 0 || !s.SendsDone() {
+				t.Errorf("the control slots coming back posted %+v, and SendsDone() = %v; want nothing and true", got, s.SendsDone())
+			}
+		})
+	}
+}
+
+// The end a stream holds past the peer's RS_CTRL_SHUTDOWN and the link
+// refuses to post never completes, and SendsDone does not wait for it.
+func TestRefusedEndHeldAtThePeerShutdownIsNotWaitedFor(t *testing.T) {
+	s, l := fourCreditsDue(t)
+	s.CloseWrite()
+	s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlShutdown))
+	l.err = errors.New("ibv_post_send: EINVAL")
+	for _, p := range l.posts[:rsproto.QPCtrlSize] {
+		s.Sent(p.id, nil)
+	}
+	if got := l.posts[rsproto.QPCtrlSize:]; len(got) != 1 || !isCtrl(got[0], rsproto.CtrlShutdown) || !s.SendsDone() {
+		t.Errorf("the control slots coming back posted %+v, refused, and SendsDone() = %v; want RS_CTRL_SHUTDOWN and true", got, s.SendsDone())
+	}
+}
+
 // rs_give_credits gives none unless the rsocket is rs_connected, which a
 // failed send, rs_error, and a disconnect, rs_disconnected, end.
 func TestNoCreditsAfterTheEnd(t *testing.T) {
