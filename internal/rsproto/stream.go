@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 )
 
 // Region is a block of local memory registered for RDMA: its bytes, and the
@@ -37,6 +38,8 @@ const (
 	StateConnected State = 0x0100 // rs_connected
 	StateWritable  State = 0x0200 // rs_writable: the write side is open
 	StateReadable  State = 0x0400 // rs_readable: the peer has not ended its writing
+
+	StateDisconnected State = 0x1000 // rs_disconnected: the connection has ended
 )
 
 // Stream is the state machine of one rsockets stream connection. It does no
@@ -220,11 +223,18 @@ func (s *Stream) Commit(n int) error {
 // does, and posts the control message or gives the peer the credits held for
 // a control slot.
 func (s *Stream) Sent(id uint64, err error) {
-	if op := Msg(id).Op(); op == OpSGL || op == OpCtrl {
+	switch msg := Msg(id); msg.Op() {
+	case OpSGL:
 		s.ctrlMaxSeqNo++
-	} else {
+	case OpCtrl:
+		s.ctrlMaxSeqNo++
+		if msg.Data() == CtrlDisconnect {
+			s.state = StateDisconnected
+			s.err = io.EOF
+		}
+	default:
 		s.sqeAvail++
-		s.sbufAvail += int(Msg(id).Data())
+		s.sbufAvail += int(msg.Data())
 	}
 	if err != nil && s.err == nil {
 		s.err = fmt.Errorf("rsproto: send failed: %w", err)
@@ -339,7 +349,8 @@ func (s *Stream) checkPost(err error) {
 	}
 }
 
-// Err returns why the stream broke, nil while it has not.
+// Err returns why the stream ended: nil while it has not, io.EOF for an
+// orderly end, else what broke it.
 func (s *Stream) Err() error { return s.err }
 
 // State returns the state of the stream, none of the bits before Connect.

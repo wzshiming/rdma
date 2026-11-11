@@ -1087,6 +1087,42 @@ func TestHeldShutdownAndDisconnectGoOutInOrder(t *testing.T) {
 	}
 }
 
+// rs_poll_cq turns a failed send into rs_error with EIO only while the
+// rsocket is rs_connected, so the sends flushed after an orderly end of the
+// connection are no errors, and the completion of its own RS_CTRL_DISCONNECT
+// ends it, failed or not.
+func TestCompletionFlushedAfterAnOrderlyEndIsNoError(t *testing.T) {
+	flushed := errors.New("IBV_WC_WR_FLUSH_ERR")
+	tests := []struct {
+		c   string // the C function and case that ends the connection
+		end func(s *rsproto.Stream, l *recorder)
+	}{
+		{"rs_poll_cq of the completion of RS_CTRL_DISCONNECT", func(s *rsproto.Stream, l *recorder) {
+			s.Disconnect()
+			s.Sent(l.posts[len(l.posts)-1].id, nil)
+		}},
+		{"rs_poll_cq of RS_CTRL_DISCONNECT flushed itself", func(s *rsproto.Stream, l *recorder) {
+			s.Disconnect()
+			s.Sent(l.posts[len(l.posts)-1].id, flushed)
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.c, func(t *testing.T) {
+			l := &recorder{}
+			s := rsproto.NewStream(l, testConfig())
+			s.Connect(testPeer)
+			sendWhileCan(t, s, 1)
+			data := l.data()[0]
+			tt.end(s, l)
+			s.Sent(data.id, flushed)
+
+			if err := s.Err(); s.State() != rsproto.StateDisconnected || !errors.Is(err, io.EOF) {
+				t.Errorf("a send flushed after the end left the state %#x and Err() = %v, want %#x and io.EOF", s.State(), err, rsproto.StateDisconnected)
+			}
+		})
+	}
+}
+
 func TestStreamConnData(t *testing.T) {
 	c := testConfig()
 	little := rsproto.ConnData{
