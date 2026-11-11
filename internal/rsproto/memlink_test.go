@@ -57,3 +57,33 @@ func TestMemLinkMessageAloneArrivesAtThePeer(t *testing.T) {
 		t.Errorf("a second Deliver() = %#x, want nothing", got)
 	}
 }
+
+// Each send completes once the peer has taken it, with the id it was posted
+// with, in the order of the posts, which is the order the messages arrive in.
+func TestMemLinkSendsCompleteInOrderOnceTaken(t *testing.T) {
+	a, b := rsproto.NewMemLink()
+	msgs := []rsproto.Msg{rsproto.MakeMsg(rsproto.OpSGL, 1), rsproto.MakeMsg(rsproto.OpSGL, 2), rsproto.MakeMsg(rsproto.OpSGL, 3)}
+	for i, msg := range msgs {
+		if err := b.PostRecv(1 << 63); err != nil {
+			t.Fatalf("PostRecv = %v", err)
+		}
+		if err := a.PostMsg(uint64(10+i), msg); err != nil {
+			t.Fatalf("PostMsg = %v", err)
+		}
+	}
+
+	for i, msg := range msgs {
+		if id, _, ok := a.Completion(); ok {
+			t.Fatalf("send %d completed before the peer took it", id)
+		}
+		if got, ok := b.Deliver(); !ok || got != msg {
+			t.Fatalf("Deliver() %d = %#x, %v, want %#x", i, got, ok, msg)
+		}
+		if id, err, ok := a.Completion(); !ok || id != uint64(10+i) || err != nil {
+			t.Fatalf("Completion() once message %d arrived = %d, %v, %v, want %d, nil, true", i, id, err, ok, 10+i)
+		}
+	}
+	if id, _, ok := a.Completion(); ok {
+		t.Errorf("Completion() after all three = %d, want nothing", id)
+	}
+}

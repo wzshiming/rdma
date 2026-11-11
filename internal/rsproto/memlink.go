@@ -30,10 +30,12 @@ type MemEnd struct {
 	peer  *MemEnd
 	mem   []Region  // registered
 	sends []memSend // posted and not yet carried to the peer
+	done  []uint64  // the ids of sends carried and not yet taken by Completion
 }
 
 // memSend is a send posted and not yet carried.
 type memSend struct {
+	id   uint64
 	sgl  [2]Segment
 	nsge int
 	msg  Msg
@@ -52,7 +54,7 @@ func (e *MemEnd) Register(r Region) {
 // PostWriteMsg puts the write and its message word on the link for the
 // peer.
 func (e *MemEnd) PostWriteMsg(id uint64, sgl []Segment, msg Msg, addr uint64, key uint32) error {
-	p := memSend{nsge: len(sgl), msg: msg, addr: addr, key: key}
+	p := memSend{id: id, nsge: len(sgl), msg: msg, addr: addr, key: key}
 	copy(p.sgl[:], sgl)
 	e.link.mu.Lock()
 	defer e.link.mu.Unlock()
@@ -64,7 +66,7 @@ func (e *MemEnd) PostWriteMsg(id uint64, sgl []Segment, msg Msg, addr uint64, ke
 func (e *MemEnd) PostMsg(id uint64, msg Msg) error {
 	e.link.mu.Lock()
 	defer e.link.mu.Unlock()
-	e.sends = append(e.sends, memSend{msg: msg})
+	e.sends = append(e.sends, memSend{id: id, msg: msg})
 	return nil
 }
 
@@ -92,7 +94,23 @@ func (e *MemEnd) Deliver() (Msg, bool) {
 	for _, s := range p.sgl[:p.nsge] {
 		dst = dst[copy(dst, from.bytes(s.Addr, uint64(s.Length), s.Key)):]
 	}
+	from.done = append(from.done, p.id)
 	return p.msg, true
+}
+
+// Completion takes the completion of the oldest send of this end not yet
+// taken, for Stream.Sent: the id it was posted with and why it failed. It
+// reports false when no send has completed: a send completes once the peer
+// has taken it, and the sends of an end complete in the order of the posts.
+func (e *MemEnd) Completion() (id uint64, err error, ok bool) {
+	e.link.mu.Lock()
+	defer e.link.mu.Unlock()
+	if len(e.done) == 0 {
+		return 0, nil, false
+	}
+	id = e.done[0]
+	e.done = slices.Delete(e.done, 0, 1)
+	return id, nil, true
 }
 
 // bytes returns the n bytes at addr of the memory registered under key.
