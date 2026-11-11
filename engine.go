@@ -29,8 +29,9 @@ type acceptor interface {
 }
 
 // stream is a connected byte stream whose only blocking call is wait. The
-// front end makes the calls of one direction one at a time, read in one,
-// write in the other and wait in the direction it names, and lets the two
+// front end makes the calls of one direction one at a time, read and a
+// lender's lendRead and returnRead in one, write, lendWrite and commitWrite
+// in the other and wait in the direction it names, and lets the two
 // directions run concurrently; closeWrite and close may come at any time.
 type stream interface {
 	// addrs returns the local and the peer's address, the zero AddrPort for
@@ -48,7 +49,8 @@ type stream interface {
 	// report errAgain, and the caller asks again either way.
 	wait(dir direction, cancel <-chan struct{}) error
 	// closeWrite shuts down the sending side: the peer reads io.EOF after
-	// the data written so far.
+	// the data written so far, and the calls of that side fail from then
+	// on, the commit of a view lent before included.
 	closeWrite() error
 	// close releases the stream: waits return net.ErrClosed, so do the
 	// calls that follow, and a second close does nothing.
