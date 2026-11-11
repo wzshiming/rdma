@@ -229,8 +229,7 @@ func (s *Stream) Sent(id uint64, err error) {
 	case OpCtrl:
 		s.ctrlMaxSeqNo++
 		if msg.Data() == CtrlDisconnect {
-			s.state = StateDisconnected
-			s.err = io.EOF
+			s.disconnect()
 		}
 	default:
 		s.sqeAvail++
@@ -252,8 +251,7 @@ func (s *Stream) Received(msg Msg) {
 	case OpCtrl:
 		switch msg.Data() {
 		case CtrlDisconnect:
-			s.state = StateDisconnected
-			s.err = io.EOF
+			s.disconnect()
 		case CtrlShutdown:
 			s.state &^= StateReadable
 		}
@@ -268,6 +266,12 @@ func (s *Stream) Received(msg Msg) {
 	if s.state&StateConnected != 0 {
 		s.checkPost(s.link.PostRecv(recvID))
 	}
+}
+
+// disconnect ends the connection in order, as rs_disconnected.
+func (s *Stream) disconnect() {
+	s.state = StateDisconnected
+	s.err = io.EOF
 }
 
 // Peek lends the bytes that have arrived and lie contiguous in the receive
