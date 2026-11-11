@@ -43,19 +43,20 @@ type Stream struct {
 	sseqComp  uint16     // the sseqNo the peer's credits stop sending at
 	sgl       [1]Segment // of a post, here so that passing it allocates nothing
 
-	rbufOffset  int              // where the arrived bytes start in the receive buffer: rbuf_offset
-	rbufArrived int              // bytes arrived and not yet consumed
-	rmsg        []uint32         // a ring of what is left of the data messages not read whole
-	rmsgHead    int              // the oldest of them
-	rmsgTail    int              // where the next goes
-	rbufAvail   int              // bytes of the receive buffer free and not granted: rbuf_bytes_avail
-	rbufFree    int              // where the next grant starts: rbuf_free_offset
-	remote      SGE              // the peer's grant table, Length counting entries: remote_sgl
-	remoteSGE   int              // the entry of it the next grant goes to
-	remoteOrder binary.ByteOrder // of the peer's host, which its grant table is in
-	ctrlSeqNo   uint32           // credit messages posted: ctrl_seqno
-	rseqNo      uint16           // data messages read, wrapping
-	rseqComp    uint16           // the rseqNo to give credits at
+	rbufOffset   int              // where the arrived bytes start in the receive buffer: rbuf_offset
+	rbufArrived  int              // bytes arrived and not yet consumed
+	rmsg         []uint32         // a ring of what is left of the data messages not read whole
+	rmsgHead     int              // the oldest of them
+	rmsgTail     int              // where the next goes
+	rbufAvail    int              // bytes of the receive buffer free and not granted: rbuf_bytes_avail
+	rbufFree     int              // where the next grant starts: rbuf_free_offset
+	remote       SGE              // the peer's grant table, Length counting entries: remote_sgl
+	remoteSGE    int              // the entry of it the next grant goes to
+	remoteOrder  binary.ByteOrder // of the peer's host, which its grant table is in
+	ctrlSeqNo    uint32           // credit messages posted: ctrl_seqno
+	ctrlMaxSeqNo uint32           // the ctrlSeqNo the slots for them run out at
+	rseqNo       uint16           // data messages read, wrapping
+	rseqComp     uint16           // the rseqNo to give credits at
 
 	err error
 }
@@ -69,15 +70,16 @@ const recvID = 1 << 63
 func NewStream(l Link, c Config) *Stream {
 	clear(c.GrantTable.Buf[:SGLSize*SGESize])
 	s := &Stream{
-		link:      l,
-		c:         c,
-		order:     ConnData{BigEndian: c.BigEndian}.ByteOrder(),
-		sqeAvail:  c.SendQueueSize - QPCtrlSize,
-		sbufAvail: len(c.SendBuffer.Buf),
-		rbufAvail: len(c.ReceiveBuffer.Buf) / 2,
-		rbufFree:  len(c.ReceiveBuffer.Buf) / 2,
-		rmsg:      make([]uint32, c.ReceiveQueueSize+1),
-		rseqComp:  uint16(c.ReceiveQueueSize / 2),
+		link:         l,
+		c:            c,
+		order:        ConnData{BigEndian: c.BigEndian}.ByteOrder(),
+		sqeAvail:     c.SendQueueSize - QPCtrlSize,
+		sbufAvail:    len(c.SendBuffer.Buf),
+		rbufAvail:    len(c.ReceiveBuffer.Buf) / 2,
+		rbufFree:     len(c.ReceiveBuffer.Buf) / 2,
+		rmsg:         make([]uint32, c.ReceiveQueueSize+1),
+		rseqComp:     uint16(c.ReceiveQueueSize / 2),
+		ctrlMaxSeqNo: QPCtrlSize,
 	}
 	for range c.ReceiveQueueSize {
 		l.PostRecv(recvID)
@@ -109,7 +111,7 @@ func (s *Stream) Connect(peer ConnData) {
 
 // updateCredits mirrors rs_update_credits, which rs_give_credits decides.
 func (s *Stream) updateCredits() {
-	if s.rbufAvail >= len(s.c.ReceiveBuffer.Buf)/2 || int16(s.rseqNo-s.rseqComp) >= 0 {
+	if (s.rbufAvail >= len(s.c.ReceiveBuffer.Buf)/2 || int16(s.rseqNo-s.rseqComp) >= 0) && s.ctrlSeqNo != s.ctrlMaxSeqNo {
 		s.sendCredits()
 	}
 }
@@ -190,13 +192,17 @@ func (s *Stream) Commit(n int) error {
 }
 
 // Sent takes the completion of the post with the given id, as rs_poll_cq
-// does.
+// does, and gives the peer the credits held for a control slot.
 func (s *Stream) Sent(id uint64, err error) {
+	if Msg(id).Op() == OpSGL {
+		s.ctrlMaxSeqNo++
+	}
 	s.sqeAvail++
 	s.sbufAvail += int(Msg(id).Data())
 	if err != nil && s.err == nil {
 		s.err = fmt.Errorf("rsproto: send failed: %w", err)
 	}
+	s.updateCredits()
 }
 
 // Received takes a message word the peer sent, as rs_poll_cq does, and posts

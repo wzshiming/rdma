@@ -808,6 +808,38 @@ func TestCreditsKeepComingAsTheSequenceWraps(t *testing.T) {
 	}
 }
 
+// fourCreditsDue returns a stream that has posted RS_QP_CTRL_SIZE grants and
+// credits, none of them completed, and is due a fifth.
+func fourCreditsDue(t *testing.T) (*rsproto.Stream, *recorder) {
+	t.Helper()
+	c := testConfig()
+	c.ReceiveQueueSize = rsproto.QPMinSize
+	l := &recorder{}
+	s := rsproto.NewStream(l, c)
+	s.Connect(testPeer)
+	readMessages(s, c, 0, rsproto.QPCtrlSize*rsproto.QPMinSize/2)
+	return s, l
+}
+
+// rs_give_credits waits for rs_ctrl_avail, ctrl_seqno short of
+// ctrl_max_seqno, which rs_alloc starts at RS_QP_CTRL_SIZE.
+func TestAtMostFourCreditsInFlight(t *testing.T) {
+	_, l := fourCreditsDue(t)
+	if len(l.posts) != rsproto.QPCtrlSize {
+		t.Errorf("Connect and reading %d messages posted %d grants and credits with none completed, want %d", rsproto.QPCtrlSize*rsproto.QPMinSize/2, len(l.posts), rsproto.QPCtrlSize)
+	}
+}
+
+// rs_poll_cq gives a control slot back, ctrl_max_seqno++, when an RS_OP_SGL
+// send completes, and rs_process_cq then sends the credits held for it.
+func TestCreditCompletionGivesBackItsSlot(t *testing.T) {
+	s, l := fourCreditsDue(t)
+	s.Sent(l.posts[0].id, nil)
+	if want := uint32(rsproto.QPCtrlSize*rsproto.QPMinSize/2 + rsproto.QPMinSize); len(l.posts) != rsproto.QPCtrlSize+1 || !isCredit(l.posts[rsproto.QPCtrlSize], want) {
+		t.Errorf("the completion of the grant of Connect posted %+v, want the credits for %d held for it", l.posts[rsproto.QPCtrlSize:], want)
+	}
+}
+
 func TestStreamConnData(t *testing.T) {
 	c := testConfig()
 	little := rsproto.ConnData{
