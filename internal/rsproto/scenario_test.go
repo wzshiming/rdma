@@ -262,6 +262,36 @@ func TestDisconnectEndsBothInOrder(t *testing.T) {
 	}
 }
 
+// rshutdown and rclose wait for a control slot for their control message and
+// drop it once the peer's RS_CTRL_SHUTDOWN, crossing it, makes the rsocket
+// rs_disconnected, which leaves the peer that shut down writing to learn the
+// end from the loss of the link; the stream sends it at the next free slot,
+// and both sides end in order.
+func TestHeldEndCrossingAShutdownEndsBothInOrder(t *testing.T) {
+	tests := []struct {
+		name string
+		end  func(s *rsproto.Stream) // what a does as b shuts down writing
+	}{
+		{"half-closes", (*rsproto.Stream).CloseWrite},
+		{"a disconnect and a half-close", (*rsproto.Stream).Disconnect},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a, b := join(smallConfig(0xa0000000), smallConfig(0xb0000000))
+			fillControlSlots(t, a, b)
+			tt.end(a.s)
+			b.s.CloseWrite()
+			a.deliver()
+			pump(a, b)
+			for _, x := range []*side{a, b} {
+				if x.s.State() != rsproto.StateDisconnected || x.s.Err() != io.EOF {
+					t.Errorf("a side ended in state %#x with Err() = %v, want %#x and io.EOF", x.s.State(), x.s.Err(), rsproto.StateDisconnected)
+				}
+			}
+		})
+	}
+}
+
 // RS_CTRL_KEEPALIVE between data changes nothing at the stream it reaches.
 // Stock rsockets sends it as an RDMA write without immediate data, which
 // never arrives; a peer sending it with immediate data is ignored.

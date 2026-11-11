@@ -67,7 +67,6 @@ type randomEnd struct {
 	written, read int // of out, committed; of in, consumed
 	wview, rview  []byte
 	delivered     []rsproto.Msg
-	closeAfterEOF bool // it shuts down writing only once it has read the end too
 	closed        bool
 }
 
@@ -148,7 +147,7 @@ func (x *randomEnd) complete(t *testing.T) bool {
 }
 
 func (x *randomEnd) shutdown() bool {
-	if x.closed || x.wview != nil || x.written < len(x.out) || x.closeAfterEOF && !x.s.EOF() {
+	if x.closed || x.wview != nil || x.written < len(x.out) {
 		return false
 	}
 	x.s.CloseWrite()
@@ -174,10 +173,8 @@ func (x *randomEnd) String() string {
 // phase each event runs ahead of the others or lags behind, deliveries ahead
 // of the stream taking them until the receives run out. Memory and queues are
 // of random sizes as small as rsockets allows, the hosts of random byte
-// orders. One side, picked at random, shuts down writing once it has written
-// everything, the other once it has read the end too: when both do so at
-// once, an RS_CTRL_SHUTDOWN held for a control slot is dropped at the peer's,
-// as rshutdown drops it, which leaves the end to the loss of the link.
+// orders. Each side shuts down writing at a random point once it has written
+// everything.
 func TestRandomSchedulesCarryBytesIntactToTheEnd(t *testing.T) {
 	for seed := range 16 {
 		t.Run(fmt.Sprint("seed ", seed), func(t *testing.T) {
@@ -192,7 +189,6 @@ func TestRandomSchedulesCarryBytesIntactToTheEnd(t *testing.T) {
 			}
 			a, b := ends[0], ends[1]
 			a.in, b.in = b.out, a.out
-			ends[rng.IntN(2)].closeAfterEOF = true
 			a.s.Connect(b.s.ConnData())
 			b.s.Connect(a.s.ConnData())
 

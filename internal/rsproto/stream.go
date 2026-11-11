@@ -72,6 +72,7 @@ type Stream struct {
 	ctrlMaxSeqNo   uint32           // the ctrlSeqNo the slots for them run out at
 	shutdownHeld   bool             // RS_CTRL_SHUTDOWN waits for a slot
 	disconnectHeld bool             // RS_CTRL_DISCONNECT waits for a slot
+	endOwed        bool             // the peer's RS_CTRL_SHUTDOWN ended the stream with one of them held, which rshutdown drops
 	rseqNo         uint16           // data messages read, wrapping
 	rseqComp       uint16           // the rseqNo to give credits at
 
@@ -271,6 +272,7 @@ func (s *Stream) Received(msg Msg) {
 			if s.state&StateWritable != 0 {
 				s.state &^= StateReadable
 			} else {
+				s.endOwed = s.shutdownHeld || s.disconnectHeld
 				s.disconnect()
 			}
 		}
@@ -367,11 +369,13 @@ func (s *Stream) Disconnect() {
 	s.postHeld()
 }
 
-// postHeld posts the control messages held for control slots while the
-// stream is connected and slots are free, RS_CTRL_SHUTDOWN before
-// RS_CTRL_DISCONNECT.
+// postHeld posts the control messages held for control slots while slots are
+// free and the stream is connected, or the peer's RS_CTRL_SHUTDOWN ended it
+// with them held, so that the peer, which has shut down writing, learns the
+// end from them rather than from the loss of the link; RS_CTRL_SHUTDOWN goes
+// before RS_CTRL_DISCONNECT.
 func (s *Stream) postHeld() {
-	for s.state&StateConnected != 0 && s.ctrlSeqNo != s.ctrlMaxSeqNo {
+	for (s.state&StateConnected != 0 || s.endOwed) && s.ctrlSeqNo != s.ctrlMaxSeqNo {
 		switch {
 		case s.shutdownHeld:
 			s.shutdownHeld = false

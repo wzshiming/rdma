@@ -1211,6 +1211,35 @@ func TestNoControlMessageOnceTheStreamEnds(t *testing.T) {
 	}
 }
 
+// rshutdown drops the control message it waits a slot for once the peer's
+// RS_CTRL_SHUTDOWN makes the rsocket rs_disconnected, which leaves the peer
+// to learn the end from the loss of the link; the stream posts it at the next
+// free slot, and the peer, which has shut down writing, takes either message
+// as the end in rs_poll_cq.
+func TestHeldEndGoesOutAfterThePeerShutdown(t *testing.T) {
+	tests := []struct {
+		c    string // the control message and the C call that holds it
+		end  func(s *rsproto.Stream)
+		ctrl uint32
+	}{
+		{"RS_CTRL_SHUTDOWN of rshutdown(SHUT_WR)", (*rsproto.Stream).CloseWrite, rsproto.CtrlShutdown},
+		{"RS_CTRL_DISCONNECT of rshutdown(SHUT_RDWR)", (*rsproto.Stream).Disconnect, rsproto.CtrlDisconnect},
+	}
+	for _, tt := range tests {
+		t.Run(tt.c, func(t *testing.T) {
+			s, l := fourCreditsDue(t)
+			tt.end(s)
+			s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlShutdown))
+			for _, p := range l.posts[:rsproto.QPCtrlSize] {
+				s.Sent(p.id, nil)
+			}
+			if got := l.posts[rsproto.QPCtrlSize:]; len(got) != 1 || !isCtrl(got[0], tt.ctrl) {
+				t.Errorf("the control slots coming back after the peer's shutdown posted %+v, want the %s held", got, tt.c)
+			}
+		})
+	}
+}
+
 // rs_give_credits gives none unless the rsocket is rs_connected, which a
 // failed send, rs_error, and a disconnect, rs_disconnected, end.
 func TestNoCreditsAfterTheEnd(t *testing.T) {
