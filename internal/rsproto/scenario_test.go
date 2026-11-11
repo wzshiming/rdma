@@ -289,13 +289,11 @@ func TestKeepaliveBetweenDataIsIgnored(t *testing.T) {
 	}
 }
 
-// rs_give_credits waits for a control slot, and only completions give slots
-// back: while a reader takes none, at most RS_QP_CTRL_SIZE of its credits
-// reach the writer, which runs out and waits though the reader has earned
-// more; once the reader takes its completions the credits held go out.
-func TestAtMostFourControlMessagesInFlight(t *testing.T) {
-	a, b := join(smallConfig(0xa0000000), smallConfig(0xb0000000))
-	before := b.arrived[rsproto.OpSGL]
+// fillControlSlots has b write to a and a read what arrives, taking none of
+// its completions, round after round until the credits a earns no longer
+// reach b.
+func fillControlSlots(t *testing.T, a, b *side) {
+	t.Helper()
 	for range 8 {
 		for b.s.CanSend() {
 			send(t, b, "x")
@@ -306,6 +304,16 @@ func TestAtMostFourControlMessagesInFlight(t *testing.T) {
 		for a.deliver() || b.deliver() || b.complete() {
 		}
 	}
+}
+
+// rs_give_credits waits for a control slot, and only completions give slots
+// back: while a reader takes none, at most RS_QP_CTRL_SIZE of its credits
+// reach the writer, which runs out and waits though the reader has earned
+// more; once the reader takes its completions the credits held go out.
+func TestAtMostFourControlMessagesInFlight(t *testing.T) {
+	a, b := join(smallConfig(0xa0000000), smallConfig(0xb0000000))
+	before := b.arrived[rsproto.OpSGL]
+	fillControlSlots(t, a, b)
 	if got := b.arrived[rsproto.OpSGL] - before; got != rsproto.QPCtrlSize || b.s.CanSend() {
 		t.Fatalf("with a's completions held, %d credit messages reached b and CanSend() = %v, want %d and false", got, b.s.CanSend(), rsproto.QPCtrlSize)
 	}
