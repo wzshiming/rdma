@@ -59,23 +59,30 @@ func (c *Conn) isClosed() bool {
 func (c *Conn) Read(p []byte) (int, error) {
 	c.rmu.Lock()
 	defer c.rmu.Unlock()
+	n, err := c.read(p)
+	if err != nil && err != io.EOF {
+		return n, c.opError("read", err)
+	}
+	return n, err
+}
+
+// read reads from the stream, waiting for data within the read deadline. The
+// caller holds rmu.
+func (c *Conn) read(p []byte) (int, error) {
 	for {
 		if c.isClosed() {
-			return 0, c.opError("read", net.ErrClosed)
+			return 0, net.ErrClosed
 		}
 		expired, changed := c.rd.state()
 		if expired {
-			return 0, c.opError("read", os.ErrDeadlineExceeded)
+			return 0, os.ErrDeadlineExceeded
 		}
 		n, err := c.s.read(p)
-		switch {
-		case err == nil || err == io.EOF:
+		if !errors.Is(err, errAgain) {
 			return n, err
-		case !errors.Is(err, errAgain):
-			return n, c.opError("read", err)
 		}
 		if err := c.s.wait(readable, changed); err != nil {
-			return 0, c.opError("read", err)
+			return 0, err
 		}
 	}
 }
@@ -85,6 +92,16 @@ func (c *Conn) Read(p []byte) (int, error) {
 func (c *Conn) Write(p []byte) (int, error) {
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
+	n, err := c.write(p)
+	if err != nil {
+		return n, c.opError("write", err)
+	}
+	return n, nil
+}
+
+// write writes all of p to the stream, waiting for room within the write
+// deadline. The caller holds wmu.
+func (c *Conn) write(p []byte) (int, error) {
 	total := 0
 	for {
 		c.mu.Lock()
@@ -92,13 +109,13 @@ func (c *Conn) Write(p []byte) (int, error) {
 		c.mu.Unlock()
 		switch {
 		case closed:
-			return total, c.opError("write", net.ErrClosed)
+			return total, net.ErrClosed
 		case writeClosed:
-			return total, c.opError("write", errPipe)
+			return total, errPipe
 		}
 		expired, changed := c.wd.state()
 		if expired {
-			return total, c.opError("write", os.ErrDeadlineExceeded)
+			return total, os.ErrDeadlineExceeded
 		}
 		if len(p) == 0 {
 			return total, nil
@@ -107,13 +124,13 @@ func (c *Conn) Write(p []byte) (int, error) {
 		total += n
 		p = p[n:]
 		if err != nil && !errors.Is(err, errAgain) {
-			return total, c.opError("write", err)
+			return total, err
 		}
 		if err == nil && n > 0 {
 			continue
 		}
 		if err := c.s.wait(writable, changed); err != nil {
-			return total, c.opError("write", err)
+			return total, err
 		}
 	}
 }
