@@ -36,7 +36,13 @@ func (c *Conn) readFromLent(l lender, r io.Reader) (int64, error) {
 	for {
 		view, err := c.lendWrite(l)
 		if err != nil {
-			return total, err
+			if _, local := c.writeState(); local != nil {
+				return total, local
+			}
+			// The peer's end stops the lending; the buffered copy reads the
+			// source before it fails, so that an empty one still ends in nil.
+			n, err := c.readFrom(r)
+			return total + n, err
 		}
 		n, rerr := r.Read(view)
 		if err := l.commitWrite(n); err != nil {

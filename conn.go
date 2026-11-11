@@ -17,8 +17,9 @@ type Conn struct {
 	s             stream
 	local, remote net.Addr
 
-	rmu sync.Mutex // serialises Read calls
-	wmu sync.Mutex // serialises Write and CloseWrite calls
+	rmu  sync.Mutex // serialises Read and WriteTo calls
+	wmu  sync.Mutex // serialises Write and ReadFrom calls
+	wcmu sync.Mutex // serialises Write and CloseWrite calls
 
 	mu          sync.Mutex
 	closed      bool
@@ -102,6 +103,8 @@ func (c *Conn) readState() (changed <-chan struct{}, err error) {
 func (c *Conn) Write(p []byte) (int, error) {
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
+	c.wcmu.Lock()
+	defer c.wcmu.Unlock()
 	n, err := c.write(p)
 	if err != nil {
 		return n, c.opError("write", err)
@@ -137,12 +140,13 @@ func (c *Conn) write(p []byte) (int, error) {
 }
 
 // writeState reports why writing cannot go on, if it cannot, and returns the
-// channel that a change of the write deadline closes.
+// channel that a change of the write deadline, or CloseWrite, closes.
 func (c *Conn) writeState() (changed <-chan struct{}, err error) {
+	// The channel comes first: a CloseWrite after the check closes it.
+	expired, changed := c.wd.state()
 	if err := c.writeClosedError(); err != nil {
 		return nil, err
 	}
-	expired, changed := c.wd.state()
 	if expired {
 		return nil, os.ErrDeadlineExceeded
 	}
@@ -164,11 +168,13 @@ func (c *Conn) writeClosedError() error {
 
 // CloseWrite closes the sending side: the peer reads io.EOF after the data
 // written so far, later Writes fail with EPIPE, and Read keeps working. It
-// waits for the posted sends to complete, which may take the transport's
-// retry timeout when the peer has vanished.
+// waits for a Write in progress but not for ReadFrom, which fails with EPIPE
+// once its source returns or at once when it waits for room. It waits for
+// the posted sends to complete, which may take the transport's retry timeout
+// when the peer has vanished.
 func (c *Conn) CloseWrite() error {
-	c.wmu.Lock()
-	defer c.wmu.Unlock()
+	c.wcmu.Lock()
+	defer c.wcmu.Unlock()
 	c.mu.Lock()
 	switch {
 	case c.closed:
@@ -180,6 +186,7 @@ func (c *Conn) CloseWrite() error {
 	}
 	c.writeClosed = true
 	c.mu.Unlock()
+	c.wd.interrupt()
 	if err := c.s.closeWrite(); err != nil {
 		return c.opError("close", err)
 	}
@@ -294,6 +301,13 @@ func (d *deadline) stop() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.disarm()
+}
+
+// interrupt wakes the waiters without changing the deadline.
+func (d *deadline) interrupt() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.wake()
 }
 
 // disarm stops the timer. The caller holds mu.

@@ -113,6 +113,11 @@ func testCopyPaths(t *testing.T, e engineUnderTest) {
 		{"WriteToTimesOutWaitingForData", testWriteToTimesOutWaitingForData},
 		{"DeadlineLetsTheSourceFinish", testDeadlineLetsTheSourceFinish},
 		{"DeadlineLetsTheDestinationFinish", testDeadlineLetsTheDestinationFinish},
+		{"CloseWakesWaitingCopies", testCloseWakesWaitingCopies},
+		{"CloseLeavesTheSourceItsBuffer", testCloseLeavesTheSourceItsBuffer},
+		{"CloseLeavesTheDestinationItsBuffer", testCloseLeavesTheDestinationItsBuffer},
+		{"CloseWriteDoesNotWaitForReadFrom", testCloseWriteDoesNotWaitForReadFrom},
+		{"ReadFromReturnsNilAtEOFAfterPeerClosed", testReadFromReturnsNilAtEOFAfterPeerClosed},
 	} {
 		t.Run(tt.name, func(t *testing.T) { tt.test(t, e) })
 	}
@@ -771,5 +776,176 @@ func testDeadlineLetsTheDestinationFinish(t *testing.T, e engineUnderTest) {
 	}
 	if n != 4 || !isOpError(err, "writeto", os.ErrDeadlineExceeded) {
 		t.Fatalf("WriteTo() = %d, %v; want 4 and a writeto timeout", n, err)
+	}
+}
+
+type copied struct {
+	n   int64
+	err error
+}
+
+// async runs a copy in the background.
+func async(f func() (int64, error)) <-chan copied {
+	ch := make(chan copied, 1)
+	go func() {
+		n, err := f()
+		ch <- copied{n, err}
+	}()
+	return ch
+}
+
+// await returns the result of a copy, failing t unless it comes within 5
+// seconds.
+func await(t *testing.T, what string, ch <-chan copied) copied {
+	t.Helper()
+	select {
+	case r := <-ch:
+		return r
+	case <-time.After(5 * time.Second):
+		t.Fatalf("%s did not return", what)
+		return copied{}
+	}
+}
+
+// testCloseWakesWaitingCopies checks that Close ends a ReadFrom waiting for
+// room and a WriteTo waiting for data with net.ErrClosed.
+func testCloseWakesWaitingCopies(t *testing.T, e engineUnderTest) {
+	client, _ := e.pair(t, Config{})
+	readFrom := async(func() (int64, error) { return client.ReadFrom(zeros) })
+	writeTo := async(func() (int64, error) { return client.WriteTo(io.Discard) })
+	time.Sleep(50 * time.Millisecond)
+	if err := client.Close(); err != nil {
+		t.Fatalf("Close error: %v", err)
+	}
+	if r := await(t, "ReadFrom", readFrom); !isOpError(r.err, "readfrom", net.ErrClosed) {
+		t.Errorf("ReadFrom() after Close = %d, %v; want a readfrom *net.OpError with net.ErrClosed", r.n, r.err)
+	}
+	if r := await(t, "WriteTo", writeTo); !isOpError(r.err, "writeto", net.ErrClosed) {
+		t.Errorf("WriteTo() after Close = %d, %v; want a writeto *net.OpError with net.ErrClosed", r.n, r.err)
+	}
+}
+
+// testCloseLeavesTheSourceItsBuffer closes the connection while the source
+// blocks in Read: Close returns at once, the source then fills its buffer,
+// and ReadFrom ends with net.ErrClosed.
+func testCloseLeavesTheSourceItsBuffer(t *testing.T, e engineUnderTest) {
+	client, _ := e.pair(t, Config{})
+	entered, closed := make(chan struct{}), make(chan struct{})
+	readFrom := async(func() (int64, error) {
+		return client.ReadFrom(readerFunc(func(p []byte) (int, error) {
+			close(entered)
+			<-closed
+			return copy(p, "after close"), nil
+		}))
+	})
+	<-entered
+	var err error
+	within5s(t, "Close", func() { err = client.Close() })
+	if err != nil {
+		t.Errorf("Close error: %v", err)
+	}
+	close(closed)
+	if r := await(t, "ReadFrom", readFrom); r.n != 0 || !isOpError(r.err, "readfrom", net.ErrClosed) {
+		t.Errorf("ReadFrom() = %d, %v; want 0 and a readfrom *net.OpError with net.ErrClosed", r.n, r.err)
+	}
+}
+
+// testCloseLeavesTheDestinationItsBuffer closes the connection while the
+// destination blocks in Write: Close returns at once, the bytes the
+// destination holds stay intact, and WriteTo then ends with net.ErrClosed,
+// counting them.
+func testCloseLeavesTheDestinationItsBuffer(t *testing.T, e engineUnderTest) {
+	client, server := e.pair(t, Config{})
+	if _, err := server.Write([]byte("hello")); err != nil {
+		t.Fatalf("Write error: %v", err)
+	}
+	entered, closed := make(chan struct{}), make(chan struct{})
+	var held string
+	writeTo := async(func() (int64, error) {
+		return client.WriteTo(writerFunc(func(p []byte) (int, error) {
+			close(entered)
+			<-closed
+			held = string(p)
+			return len(p), nil
+		}))
+	})
+	<-entered
+	var err error
+	within5s(t, "Close", func() { err = client.Close() })
+	if err != nil {
+		t.Errorf("Close error: %v", err)
+	}
+	close(closed)
+	if r := await(t, "WriteTo", writeTo); r.n != 5 || !isOpError(r.err, "writeto", net.ErrClosed) {
+		t.Errorf("WriteTo() = %d, %v; want 5 and a writeto *net.OpError with net.ErrClosed", r.n, r.err)
+	}
+	if held != "hello" {
+		t.Errorf("destination held %q after Close, want %q", held, "hello")
+	}
+}
+
+// testCloseWriteDoesNotWaitForReadFrom calls CloseWrite while ReadFrom waits
+// for room and while its source blocks in Read: CloseWrite returns at once
+// and ReadFrom then fails with EPIPE.
+func testCloseWriteDoesNotWaitForReadFrom(t *testing.T, e engineUnderTest) {
+	t.Run("waiting for room", func(t *testing.T) {
+		client, _ := e.pair(t, Config{})
+		sent := make(chan struct{}, 1)
+		readFrom := async(func() (int64, error) {
+			return client.ReadFrom(readerFunc(func(p []byte) (int, error) {
+				select {
+				case sent <- struct{}{}:
+				default:
+				}
+				return len(p), nil
+			}))
+		})
+		<-sent
+		time.Sleep(50 * time.Millisecond)
+		var err error
+		within5s(t, "CloseWrite", func() { err = client.CloseWrite() })
+		if err != nil {
+			t.Errorf("CloseWrite error: %v", err)
+		}
+		if r := await(t, "ReadFrom", readFrom); !isOpError(r.err, "readfrom", errPipe) {
+			t.Errorf("ReadFrom() after CloseWrite = %d, %v; want a readfrom *net.OpError with EPIPE", r.n, r.err)
+		}
+	})
+	t.Run("in the source", func(t *testing.T) {
+		client, _ := e.pair(t, Config{})
+		entered, shut := make(chan struct{}), make(chan struct{})
+		readFrom := async(func() (int64, error) {
+			return client.ReadFrom(readerFunc(func(p []byte) (int, error) {
+				close(entered)
+				<-shut
+				return copy(p, "too late"), nil
+			}))
+		})
+		<-entered
+		var err error
+		within5s(t, "CloseWrite", func() { err = client.CloseWrite() })
+		if err != nil {
+			t.Errorf("CloseWrite error: %v", err)
+		}
+		close(shut)
+		if r := await(t, "ReadFrom", readFrom); r.n != 0 || !isOpError(r.err, "readfrom", errPipe) {
+			t.Errorf("ReadFrom() after CloseWrite = %d, %v; want 0 and a readfrom *net.OpError with EPIPE", r.n, r.err)
+		}
+	})
+}
+
+// testReadFromReturnsNilAtEOFAfterPeerClosed checks that ReadFrom from an
+// empty source returns nil although the peer has closed, as io.Copy to a TCP
+// connection does.
+func testReadFromReturnsNilAtEOFAfterPeerClosed(t *testing.T, e engineUnderTest) {
+	client, server := e.pair(t, Config{})
+	if err := server.Close(); err != nil {
+		t.Fatalf("peer Close error: %v", err)
+	}
+	if _, err := client.Read(make([]byte, 1)); err != io.EOF {
+		t.Fatalf("Read after the peer closed error = %v, want io.EOF", err)
+	}
+	if n, err := client.ReadFrom(readsThen("", io.EOF)); n != 0 || err != nil {
+		t.Errorf("ReadFrom(an empty source) = %d, %v; want 0, nil", n, err)
 	}
 }
