@@ -19,8 +19,9 @@ func NewMemLink() (a, b *MemEnd) {
 }
 
 type memLink struct {
-	mu   sync.Mutex
-	ends [2]MemEnd
+	mu     sync.Mutex
+	ends   [2]MemEnd
+	broken error // why the link carries nothing any more
 }
 
 // MemEnd is one end of a link NewMemLink makes: the Link of the stream on
@@ -31,9 +32,10 @@ type MemEnd struct {
 	mem   []Region  // registered
 	sends []memSend // posted and not yet carried to the peer
 	recvs int       // receives posted and not yet used up
-	done  []uint64  // the ids of sends carried and not yet taken by Completion
+	done  []memDone // completions of sends not yet taken
 
 	postErr error // what the next post fails with
+	sendErr error // what the next send the peer would take fails with
 }
 
 // memSend is a send posted and not yet carried.
@@ -44,6 +46,12 @@ type memSend struct {
 	msg  Msg
 	addr uint64
 	key  uint32
+}
+
+// memDone is the completion of a send.
+type memDone struct {
+	id  uint64
+	err error
 }
 
 // Register makes the memory of r what the posts of this end read from and
@@ -72,6 +80,10 @@ func (e *MemEnd) post(p memSend) error {
 	defer e.link.mu.Unlock()
 	if err := e.refusal(); err != nil {
 		return err
+	}
+	if err := e.link.broken; err != nil {
+		e.done = append(e.done, memDone{p.id, err})
+		return nil
 	}
 	e.sends = append(e.sends, p)
 	return nil
@@ -105,6 +117,30 @@ func (e *MemEnd) refusal() error {
 	return err
 }
 
+// FailSend makes the next send of this end fail with err when the peer would
+// take it, as a send the transport gives up on, IBV_WC_RETRY_EXC_ERR among
+// them, leaves the queue pair in the error state: the link carries nothing
+// after it, and the sends in flight both ways, and those posted later,
+// complete with err as well.
+func (e *MemEnd) FailSend(err error) {
+	e.link.mu.Lock()
+	defer e.link.mu.Unlock()
+	e.sendErr = err
+}
+
+// fail makes the link carry nothing more, every send in flight completing
+// with err.
+func (l *memLink) fail(err error) {
+	l.broken = err
+	for i := range l.ends {
+		e := &l.ends[i]
+		for _, p := range e.sends {
+			e.done = append(e.done, memDone{p.id, err})
+		}
+		e.sends = e.sends[:0]
+	}
+}
+
 // Deliver carries the oldest message the peer posted and this end has not
 // taken into the oldest receive posted here: its bytes into the memory
 // registered here and its word, returned for Stream.Received. It reports
@@ -116,7 +152,15 @@ func (e *MemEnd) Deliver() (Msg, bool) {
 	e.link.mu.Lock()
 	defer e.link.mu.Unlock()
 	from := e.peer
-	if len(from.sends) == 0 || e.recvs == 0 {
+	if len(from.sends) == 0 {
+		return 0, false
+	}
+	if err := from.sendErr; err != nil {
+		from.sendErr = nil
+		e.link.fail(err)
+		return 0, false
+	}
+	if e.recvs == 0 {
 		return 0, false
 	}
 	e.recvs--
@@ -130,7 +174,7 @@ func (e *MemEnd) Deliver() (Msg, bool) {
 	for _, s := range p.sgl[:p.nsge] {
 		dst = dst[copy(dst, from.bytes(s.Addr, uint64(s.Length), s.Key)):]
 	}
-	from.done = append(from.done, p.id)
+	from.done = append(from.done, memDone{id: p.id})
 	return p.msg, true
 }
 
@@ -144,9 +188,9 @@ func (e *MemEnd) Completion() (id uint64, err error, ok bool) {
 	if len(e.done) == 0 {
 		return 0, nil, false
 	}
-	id = e.done[0]
+	d := e.done[0]
 	e.done = slices.Delete(e.done, 0, 1)
-	return id, nil, true
+	return d.id, d.err, true
 }
 
 // bytes returns the n bytes at addr of the memory registered under key.

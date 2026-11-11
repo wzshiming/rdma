@@ -166,3 +166,46 @@ func TestMemLinkRefusesTheInjectedPost(t *testing.T) {
 		})
 	}
 }
+
+// A send the link is told to fail completes with the error given when the
+// peer would take it, instead of arriving, and the link carries nothing
+// after it, as a queue pair in the error state: the sends in flight both
+// ways, and those posted later, complete with the same error.
+func TestMemLinkFailsTheInjectedSend(t *testing.T) {
+	failed := errors.New("IBV_WC_RETRY_EXC_ERR")
+	msg := rsproto.MakeMsg(rsproto.OpSGL, 1)
+	a, b := rsproto.NewMemLink()
+	for _, e := range []*rsproto.MemEnd{a, b} {
+		for range 2 {
+			if err := e.PostRecv(1 << 63); err != nil {
+				t.Fatalf("PostRecv = %v", err)
+			}
+		}
+	}
+	a.FailSend(failed)
+	for _, p := range []struct {
+		e  *rsproto.MemEnd
+		id uint64
+	}{{a, 1}, {a, 2}, {b, 3}} {
+		if err := p.e.PostMsg(p.id, msg); err != nil {
+			t.Fatalf("PostMsg = %v", err)
+		}
+	}
+
+	for _, e := range []*rsproto.MemEnd{b, a} {
+		if got, ok := e.Deliver(); ok {
+			t.Fatalf("Deliver() once the send failed = %#x, want nothing", got)
+		}
+	}
+	if err := a.PostMsg(4, msg); err != nil {
+		t.Fatalf("PostMsg after the failure = %v", err)
+	}
+	for _, want := range []struct {
+		e  *rsproto.MemEnd
+		id uint64
+	}{{a, 1}, {a, 2}, {a, 4}, {b, 3}} {
+		if id, err, ok := want.e.Completion(); !ok || id != want.id || !errors.Is(err, failed) {
+			t.Errorf("Completion() = %d, %v, %v, want %d, %v, true", id, err, ok, want.id, failed)
+		}
+	}
+}

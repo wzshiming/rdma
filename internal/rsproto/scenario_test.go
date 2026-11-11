@@ -361,6 +361,14 @@ func TestFailedWriteIsNoOrderlyEnd(t *testing.T) {
 				t.Fatalf("Commit(1) with the post refused = %v, want %v", err, failed)
 			}
 		}},
+		{"completion failed", func(t *testing.T, a, b *side) {
+			a.l.FailSend(failed)
+			send(t, a, "lost")
+			pump(a, b)
+			if got := recv(b); got != "" {
+				t.Fatalf("b read %q of the write that failed", got)
+			}
+		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
