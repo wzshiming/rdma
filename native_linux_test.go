@@ -430,3 +430,63 @@ func closeWithAViewOut(t *testing.T, c *Conn, released func(*Conn) bool) {
 		t.Error("Close released the memory of the view out")
 	}
 }
+
+// With its peer reading nothing, a native connection that filled the room
+// the peer granted it closes within closeTimeout, and the peer, of either
+// engine and on either end of the connection, then reads everything written
+// and io.EOF.
+func TestRXENativeCloseWithThePeerNotReading(t *testing.T) {
+	rdmatest.Device(t)
+	forEachEngine(t, func(t *testing.T, peer Engine) {
+		t.Run("native end dialed", func(t *testing.T) {
+			closer, other := rxeEnginePair(t, Config{}, EngineNative, peer)
+			testCloseWithThePeerNotReading(t, closer, other)
+		})
+		t.Run("native end accepted", func(t *testing.T) {
+			other, closer := rxeEnginePair(t, Config{}, peer, EngineNative)
+			testCloseWithThePeerNotReading(t, closer, other)
+		})
+	})
+}
+
+// testCloseWithThePeerNotReading has closer write until it waits for room
+// its peer, which reads nothing, does not grant, and close: Close returns
+// within closeTimeout, and the peer then reads all that was written and
+// io.EOF.
+func testCloseWithThePeerNotReading(t *testing.T, closer, peer *Conn) {
+	in := newStream(17)
+	chunk := make([]byte, 16<<10)
+	closer.SetWriteDeadline(time.Now().Add(200 * time.Millisecond))
+	for {
+		in.rng.Read(chunk)
+		n, err := closer.Write(chunk)
+		in.hash.Write(chunk[:n])
+		in.n += int64(n)
+		if isTimeout(err) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("Write error: %v", err)
+		}
+	}
+	if in.n == 0 {
+		t.Fatal("nothing was written before the write deadline")
+	}
+	start := time.Now()
+	if err := closer.Close(); err != nil {
+		t.Fatalf("Close error: %v", err)
+	}
+	elapsed := time.Since(start)
+	t.Logf("Close with %d bytes the peer had not read took %v", in.n, elapsed.Round(time.Millisecond))
+	if elapsed >= closeTimeout {
+		t.Errorf("Close took %v with the peer not reading, want less than %v", elapsed, closeTimeout)
+	}
+	peer.SetReadDeadline(time.Now().Add(rxeTimeout))
+	out := newStream(0)
+	if err := out.readFrom(peer, 64<<10); err != nil {
+		t.Errorf("peer Read after %d bytes error: %v", out.n, err)
+	}
+	if in.sum() != out.sum() {
+		t.Errorf("wrote %s before Close, the peer read %s", in.sum(), out.sum())
+	}
+}
