@@ -77,3 +77,12 @@ func TestStubUnsupported(t *testing.T) {
 		t.Error("stub handles are not zero")
 	}
 }
+
+func TestStubTransportTypeIsUnknown(t *testing.T) {
+	if got := new(verbs.Device).TransportType(); got != verbs.TransportUnknown {
+		t.Errorf("Device.TransportType() = %v, want %v", got, verbs.TransportUnknown)
+	}
+	if got := verbs.ContextFromPointer(nil).TransportType(); got != verbs.TransportUnknown {
+		t.Errorf("Context.TransportType() = %v, want %v", got, verbs.TransportUnknown)
+	}
+}

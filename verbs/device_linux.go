@@ -53,6 +53,18 @@ func (d *Device) Name() string { return d.name }
 // GUID returns the node GUID of the device.
 func (d *Device) GUID() uint64 { return d.guid }
 
+// TransportType returns the transport of the device.
+func (d *Device) TransportType() TransportType {
+	t := transportType(d.dev)
+	runtime.KeepAlive(d)
+	return t
+}
+
+// transportType reads the transport_type of the struct ibv_device at addr.
+func transportType(addr uintptr) TransportType {
+	return TransportType(dynlib.Pointer[rdmaabi.IbvDevice](addr).Transport_type)
+}
+
 // Open opens the device.
 func (d *Device) Open() (*Context, error) {
 	f, err := load("ibv_open_device")
@@ -95,6 +107,9 @@ func ContextFromPointer(p unsafe.Pointer) *Context {
 
 // Pointer returns the underlying struct ibv_context pointer.
 func (c *Context) Pointer() unsafe.Pointer { return unsafe.Pointer(c.ctx) }
+
+// TransportType returns the transport of the device.
+func (c *Context) TransportType() TransportType { return transportType(uintptr(c.ctx.Device)) }
 
 // Close closes the device and wakes a pending WaitAsyncEvent with an error.
 // A second Close is a no-op.

@@ -22,6 +22,9 @@ func (d *Device) Name() string { return "" }
 // GUID returns the node GUID of the device.
 func (d *Device) GUID() uint64 { return 0 }
 
+// TransportType returns the transport of the device.
+func (d *Device) TransportType() TransportType { return TransportUnknown }
+
 // Open opens the device.
 func (d *Device) Open() (*Context, error) { return nil, unsupported("ibv_open_device") }
 
@@ -36,6 +39,9 @@ func ContextFromPointer(p unsafe.Pointer) *Context { return &Context{} }
 
 // Pointer returns the underlying struct ibv_context pointer.
 func (c *Context) Pointer() unsafe.Pointer { return nil }
+
+// TransportType returns the transport of the device.
+func (c *Context) TransportType() TransportType { return TransportUnknown }
 
 // Close closes the device.
 func (c *Context) Close() error { return nil }

@@ -4,7 +4,10 @@ package verbs
 
 import (
 	"encoding/binary"
+	"os"
+	"syscall"
 	"testing"
+	"unsafe"
 
 	"github.com/wzshiming/rdma/internal/rdmaabi"
 )
@@ -73,5 +76,48 @@ func TestAHAttrRoundTripsThroughC(t *testing.T) {
 	}
 	if got := ahFromC(&ca); got != a {
 		t.Errorf("ahFromC(ahToC(a)) = %+v, want %+v", got, a)
+	}
+}
+
+// cMemory returns size zeroed bytes outside the Go heap, where the library's
+// own structures live, unmapped when the test ends.
+func cMemory(t *testing.T, size int) unsafe.Pointer {
+	t.Helper()
+	b, err := syscall.Mmap(-1, 0, size, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_ANON|syscall.MAP_PRIVATE)
+	if err != nil {
+		t.Fatalf("mmap: %v", err)
+	}
+	t.Cleanup(func() { syscall.Munmap(b) })
+	return unsafe.Pointer(unsafe.SliceData(b))
+}
+
+// The transport type is the enum ibv_transport_type libibverbs stores in
+// struct ibv_device next to the node type it derives it from; a context
+// reaches that struct through its device member.
+func TestTransportTypeReadsStructIbvDevice(t *testing.T) {
+	cdev := (*rdmaabi.IbvDevice)(cMemory(t, os.Getpagesize()))
+	cctx := (*rdmaabi.IbvContext)(cMemory(t, os.Getpagesize()))
+	cctx.Device = uint64(uintptr(unsafe.Pointer(cdev)))
+	dev := &Device{dev: uintptr(unsafe.Pointer(cdev))}
+	ctx := ContextFromPointer(unsafe.Pointer(cctx))
+	tests := []struct {
+		node, transport int32 // enum ibv_node_type, enum ibv_transport_type
+		want            TransportType
+	}{
+		{1, 0, TransportIB},          // IBV_NODE_CA, IBV_TRANSPORT_IB: InfiniBand and RoCE
+		{4, 1, TransportIWARP},       // IBV_NODE_RNIC, IBV_TRANSPORT_IWARP
+		{5, 2, TransportUSNIC},       // IBV_NODE_USNIC, IBV_TRANSPORT_USNIC
+		{6, 3, TransportUSNICUDP},    // IBV_NODE_USNIC_UDP, IBV_TRANSPORT_USNIC_UDP
+		{7, 4, TransportUnspecified}, // IBV_NODE_UNSPECIFIED, IBV_TRANSPORT_UNSPECIFIED
+		{-1, -1, TransportUnknown},   // IBV_NODE_UNKNOWN, IBV_TRANSPORT_UNKNOWN
+	}
+	for _, tt := range tests {
+		cdev.Node_type, cdev.Transport_type = tt.node, tt.transport
+		if got := dev.TransportType(); got != tt.want {
+			t.Errorf("Device.TransportType() with transport_type %d = %v, want %v", tt.transport, got, tt.want)
+		}
+		if got := ctx.TransportType(); got != tt.want {
+			t.Errorf("Context.TransportType() with transport_type %d = %v, want %v", tt.transport, got, tt.want)
+		}
 	}
 }

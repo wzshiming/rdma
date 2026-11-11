@@ -142,6 +142,37 @@ func TestDevice(t *testing.T) {
 	}
 }
 
+// RoCE devices such as rxe report the InfiniBand transport; rdmatest marks
+// an iWARP device (siw) with GID index -1.
+func TestDeviceReportsItsTransportType(t *testing.T) {
+	dev, ctx := openDevice(t)
+	want := verbs.TransportIB
+	if dev.GIDIndex < 0 {
+		want = verbs.TransportIWARP
+	}
+	devs, err := verbs.Devices()
+	if err != nil {
+		t.Fatalf("Devices() error: %v", err)
+	}
+	for _, d := range devs {
+		if d.Name() != dev.Name {
+			continue
+		}
+		if got := d.TransportType(); got != want {
+			t.Errorf("Device(%s).TransportType() = %v, want %v", dev.Name, got, want)
+		}
+	}
+	got := ctx.TransportType()
+	if got != want {
+		t.Errorf("Context.TransportType() = %v, want %v", got, want)
+	}
+	// The context of an rdma_cm id is wrapped this way.
+	if got := verbs.ContextFromPointer(ctx.Pointer()).TransportType(); got != want {
+		t.Errorf("ContextFromPointer(...).TransportType() = %v, want %v", got, want)
+	}
+	t.Logf("%s reports transport %v (%d)", dev.Name, got, got)
+}
+
 func allocPD(t *testing.T, ctx *verbs.Context) *verbs.PD {
 	t.Helper()
 	pd, err := ctx.AllocPD()
