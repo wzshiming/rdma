@@ -1294,6 +1294,35 @@ func TestLinkLossWhileConnectedIsAnError(t *testing.T) {
 	}
 }
 
+// rs_handle_cm_event takes RDMA_CM_EVENT_DISCONNECTED only while the rsocket
+// is rs_connected: after an orderly end or a failure, state and cause stay.
+func TestLinkLossAfterTheEndChangesNothing(t *testing.T) {
+	tests := []struct {
+		c   string // the C function and case that ended the connection
+		end func(s *rsproto.Stream, l *recorder)
+	}{
+		{"rs_poll_cq of the peer's RS_CTRL_DISCONNECT", func(s *rsproto.Stream, l *recorder) {
+			s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlDisconnect))
+		}},
+		{"rs_poll_cq of a failed send", func(s *rsproto.Stream, l *recorder) { s.Sent(l.data()[0].id, errors.New("IBV_WC_RETRY_EXC_ERR")) }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.c, func(t *testing.T) {
+			l := &recorder{}
+			s := rsproto.NewStream(l, testConfig())
+			s.Connect(testPeer)
+			sendWhileCan(t, s, 1)
+			tt.end(s, l)
+			state, err := s.State(), s.Err()
+			s.LinkDown(errors.New("RDMA_CM_EVENT_DISCONNECTED"))
+
+			if s.State() != state || s.Err() != err {
+				t.Errorf("the link lost after the end changed the state %#x and Err() = %v to %#x and %v", state, err, s.State(), s.Err())
+			}
+		})
+	}
+}
+
 func TestStreamConnData(t *testing.T) {
 	c := testConfig()
 	little := rsproto.ConnData{
