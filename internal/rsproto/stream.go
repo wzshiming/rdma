@@ -243,14 +243,18 @@ func (s *Stream) Sent(id uint64, err error) {
 	s.updateCredits()
 }
 
-// Received takes a message word the peer sent, as rs_poll_cq does, and posts
-// a receive in place of the one it used up.
+// Received takes a message word the peer sent, as rs_poll_cq does, and while
+// connected posts a receive in place of the one it used up.
 func (s *Stream) Received(msg Msg) {
 	switch msg.Op() {
 	case OpSGL:
 		s.sseqComp = uint16(msg.Data())
 	case OpCtrl:
-		if msg.Data() == CtrlShutdown {
+		switch msg.Data() {
+		case CtrlDisconnect:
+			s.state = StateDisconnected
+			s.err = io.EOF
+		case CtrlShutdown:
 			s.state &^= StateReadable
 		}
 	case OpWrite, OpIOMapSGL: // no data
@@ -261,7 +265,9 @@ func (s *Stream) Received(msg Msg) {
 		}
 		s.rbufArrived += int(msg.Data())
 	}
-	s.checkPost(s.link.PostRecv(recvID))
+	if s.state&StateConnected != 0 {
+		s.checkPost(s.link.PostRecv(recvID))
+	}
 }
 
 // Peek lends the bytes that have arrived and lie contiguous in the receive

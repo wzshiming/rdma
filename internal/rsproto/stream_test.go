@@ -1105,6 +1105,9 @@ func TestCompletionFlushedAfterAnOrderlyEndIsNoError(t *testing.T) {
 			s.Disconnect()
 			s.Sent(l.posts[len(l.posts)-1].id, flushed)
 		}},
+		{"rs_poll_cq of the peer's RS_CTRL_DISCONNECT", func(s *rsproto.Stream, l *recorder) {
+			s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlDisconnect))
+		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.c, func(t *testing.T) {
@@ -1120,6 +1123,30 @@ func TestCompletionFlushedAfterAnOrderlyEndIsNoError(t *testing.T) {
 				t.Errorf("a send flushed after the end left the state %#x and Err() = %v, want %#x and io.EOF", s.State(), err, rsproto.StateDisconnected)
 			}
 		})
+	}
+}
+
+// rs_poll_cq takes the peer's RS_CTRL_DISCONNECT by making the rsocket
+// rs_disconnected, returning before it posts a receive in place of the one
+// used up; rrecv still returns what arrived before, then 0, and rsend fails.
+func TestPeerDisconnectEndsTheStream(t *testing.T) {
+	c := testConfig()
+	l := &recorder{}
+	s := rsproto.NewStream(l, c)
+	s.Connect(testPeer)
+	peerWrites(s, c, 0, []byte("before"))
+	l.recvs = nil
+	s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlDisconnect))
+
+	if err := s.Err(); s.State() != rsproto.StateDisconnected || !errors.Is(err, io.EOF) || len(l.recvs) != 0 {
+		t.Fatalf("the peer's disconnect left the state %#x and Err() = %v, and posted %d receives; want %#x, io.EOF and none", s.State(), err, len(l.recvs), rsproto.StateDisconnected)
+	}
+	if s.EOF() || string(s.Peek()) != "before" {
+		t.Fatalf("EOF() = %v with %q lent after the peer's disconnect, want false and %q", s.EOF(), s.Peek(), "before")
+	}
+	s.Consume(len("before"))
+	if !s.EOF() || s.Reserve() != nil {
+		t.Errorf("EOF() = %v and Reserve() lent %d bytes once the data before the peer's disconnect is read, want true and nothing", s.EOF(), len(s.Reserve()))
 	}
 }
 
