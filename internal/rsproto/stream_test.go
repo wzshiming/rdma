@@ -127,6 +127,40 @@ func TestMessageStaysWithinTheGrant(t *testing.T) {
 	}
 }
 
+// sendWhileCan commits one-byte messages while s can send, at most limit of
+// them, and returns how many it sent.
+func sendWhileCan(t *testing.T, s *rsproto.Stream, limit int) int {
+	t.Helper()
+	n := 0
+	for ; n < limit && s.CanSend(); n++ {
+		if v := s.Reserve(); len(v) == 0 {
+			t.Fatal("CanSend() but Reserve() lends nothing")
+		}
+		if err := s.Commit(1); err != nil {
+			t.Fatalf("Commit(1) = %v", err)
+		}
+	}
+	return n
+}
+
+// rs_save_conn_data takes the peer's credits as sseq_comp, rs_can_send stops
+// at sseq_no == sseq_comp, and rs_poll_cq takes the data of an RS_OP_SGL
+// message, the peer's rseq_no + rq_size, as the new sseq_comp.
+func TestCreditsRunOutAndReturn(t *testing.T) {
+	peer := testPeer
+	peer.Credits = 3
+	s := rsproto.NewStream(&recorder{}, testConfig())
+	s.Connect(peer)
+
+	if n := sendWhileCan(t, s, 10); n != 3 {
+		t.Fatalf("sent %d messages on 3 credits, want 3", n)
+	}
+	s.Received(rsproto.MakeMsg(rsproto.OpSGL, 5))
+	if n := sendWhileCan(t, s, 10); n != 2 {
+		t.Fatalf("sent %d more messages when the peer raised its credits to 5, want 2", n)
+	}
+}
+
 func TestStreamConnData(t *testing.T) {
 	c := testConfig()
 	little := rsproto.ConnData{

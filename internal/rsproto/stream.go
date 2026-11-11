@@ -28,9 +28,11 @@ type Stream struct {
 	link Link
 	c    Config
 
-	target  SGE // the peer's grant data goes to: target_sgl[target_sge]
-	sbufPos int // where the free bytes of the send buffer start: ssgl[0].addr
-	sgl     [2]Segment
+	target   SGE // the peer's grant data goes to: target_sgl[target_sge]
+	sbufPos  int // where the free bytes of the send buffer start: ssgl[0].addr
+	sseqNo   int // data messages sent
+	sseqComp int // the sseqNo the peer's credits stop sending at
+	sgl      [2]Segment
 }
 
 // NewStream returns a stream on memory the caller registered, as
@@ -53,11 +55,12 @@ func (s *Stream) ConnData() ConnData {
 // its peer.
 func (s *Stream) Connect(peer ConnData) {
 	s.target = peer.FirstGrant
+	s.sseqComp = int(peer.Credits)
 }
 
 // CanSend mirrors rs_can_send: whether Reserve would lend room now.
 func (s *Stream) CanSend() bool {
-	return s.target.Length != 0
+	return s.sseqNo != s.sseqComp && s.target.Length != 0
 }
 
 // Reserve lends the room of the send buffer that one message can carry now,
@@ -73,6 +76,7 @@ func (s *Stream) Reserve() []byte {
 // Commit ends the reservation, sending the first n bytes of the view as one
 // data message, as rs_write_data does.
 func (s *Stream) Commit(n int) error {
+	s.sseqNo++
 	addr, key := s.target.Addr, s.target.Key
 	s.target.Addr += uint64(n)
 	s.target.Length -= uint32(n)
@@ -82,4 +86,11 @@ func (s *Stream) Commit(n int) error {
 	msg := MakeMsg(OpData, uint32(n))
 	s.link.PostWriteMsg(0, s.sgl[:1], msg, addr, key)
 	return nil
+}
+
+// Received takes a message word the peer sent, as rs_poll_cq does.
+func (s *Stream) Received(msg Msg) {
+	if msg.Op() == OpSGL {
+		s.sseqComp = int(msg.Data())
+	}
 }
