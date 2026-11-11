@@ -253,7 +253,11 @@ func (s *Stream) Received(msg Msg) {
 		case CtrlDisconnect:
 			s.disconnect()
 		case CtrlShutdown:
-			s.state &^= StateReadable
+			if s.state&StateWritable != 0 {
+				s.state &^= StateReadable
+			} else {
+				s.disconnect()
+			}
 		}
 	case OpWrite, OpIOMapSGL: // no data
 	default:

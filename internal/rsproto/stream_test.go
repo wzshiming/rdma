@@ -1108,6 +1108,10 @@ func TestCompletionFlushedAfterAnOrderlyEndIsNoError(t *testing.T) {
 		{"rs_poll_cq of the peer's RS_CTRL_DISCONNECT", func(s *rsproto.Stream, l *recorder) {
 			s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlDisconnect))
 		}},
+		{"rs_poll_cq of the peer's RS_CTRL_SHUTDOWN after rshutdown(SHUT_WR)", func(s *rsproto.Stream, l *recorder) {
+			s.CloseWrite()
+			s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlShutdown))
+		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.c, func(t *testing.T) {
@@ -1147,6 +1151,22 @@ func TestPeerDisconnectEndsTheStream(t *testing.T) {
 	s.Consume(len("before"))
 	if !s.EOF() || s.Reserve() != nil {
 		t.Errorf("EOF() = %v and Reserve() lent %d bytes once the data before the peer's disconnect is read, want true and nothing", s.EOF(), len(s.Reserve()))
+	}
+}
+
+// rs_poll_cq takes the peer's RS_CTRL_SHUTDOWN once rs_writable is clear as
+// the end of both sides: the rsocket is rs_disconnected and posts no receive
+// in place of the one used up.
+func TestPeerShutdownAfterCloseWriteEndsTheStream(t *testing.T) {
+	l := &recorder{}
+	s := rsproto.NewStream(l, testConfig())
+	s.Connect(testPeer)
+	s.CloseWrite()
+	l.recvs = nil
+	s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlShutdown))
+
+	if err := s.Err(); s.State() != rsproto.StateDisconnected || !errors.Is(err, io.EOF) || len(l.recvs) != 0 {
+		t.Errorf("the peer's shutdown after CloseWrite left the state %#x and Err() = %v, and posted %d receives; want %#x, io.EOF and none", s.State(), err, len(l.recvs), rsproto.StateDisconnected)
 	}
 }
 
