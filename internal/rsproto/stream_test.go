@@ -1070,6 +1070,23 @@ func TestDisconnectSendsDisconnect(t *testing.T) {
 	}
 }
 
+// rclose after rshutdown(SHUT_WR) posts RS_CTRL_DISCONNECT after the
+// RS_CTRL_SHUTDOWN, each once rs_ctrl_avail: the stream holds both and posts
+// them in that order as completions give slots back.
+func TestHeldShutdownAndDisconnectGoOutInOrder(t *testing.T) {
+	s, l := fourCreditsDue(t)
+	s.CloseWrite()
+	s.Disconnect()
+	if len(l.posts) != rsproto.QPCtrlSize {
+		t.Fatalf("CloseWrite and Disconnect with %d grants and credits in flight posted %+v, want nothing", rsproto.QPCtrlSize, l.posts[rsproto.QPCtrlSize:])
+	}
+	s.Sent(l.posts[0].id, nil)
+	s.Sent(l.posts[1].id, nil)
+	if got := l.posts[rsproto.QPCtrlSize:]; len(got) != 2 || !isCtrl(got[0], rsproto.CtrlShutdown) || !isCtrl(got[1], rsproto.CtrlDisconnect) {
+		t.Errorf("two completions posted %+v, want RS_CTRL_SHUTDOWN and RS_CTRL_DISCONNECT", got)
+	}
+}
+
 func TestStreamConnData(t *testing.T) {
 	c := testConfig()
 	little := rsproto.ConnData{

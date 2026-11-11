@@ -54,21 +54,22 @@ type Stream struct {
 	sseqComp  uint16     // the sseqNo the peer's credits stop sending at
 	sgl       [1]Segment // of a post, here so that passing it allocates nothing
 
-	rbufOffset   int              // where the arrived bytes start in the receive buffer: rbuf_offset
-	rbufArrived  int              // bytes arrived and not yet consumed
-	rmsg         []uint32         // a ring of what is left of the data messages not read whole
-	rmsgHead     int              // the oldest of them
-	rmsgTail     int              // where the next goes
-	rbufAvail    int              // bytes of the receive buffer free and not granted: rbuf_bytes_avail
-	rbufFree     int              // where the next grant starts: rbuf_free_offset
-	remote       SGE              // the peer's grant table, Length counting entries: remote_sgl
-	remoteSGE    int              // the entry of it the next grant goes to
-	remoteOrder  binary.ByteOrder // of the peer's host, which its grant table is in
-	ctrlSeqNo    uint32           // credit and control messages posted: ctrl_seqno
-	ctrlMaxSeqNo uint32           // the ctrlSeqNo the slots for them run out at
-	shutdownHeld bool             // RS_CTRL_SHUTDOWN waits for a slot
-	rseqNo       uint16           // data messages read, wrapping
-	rseqComp     uint16           // the rseqNo to give credits at
+	rbufOffset     int              // where the arrived bytes start in the receive buffer: rbuf_offset
+	rbufArrived    int              // bytes arrived and not yet consumed
+	rmsg           []uint32         // a ring of what is left of the data messages not read whole
+	rmsgHead       int              // the oldest of them
+	rmsgTail       int              // where the next goes
+	rbufAvail      int              // bytes of the receive buffer free and not granted: rbuf_bytes_avail
+	rbufFree       int              // where the next grant starts: rbuf_free_offset
+	remote         SGE              // the peer's grant table, Length counting entries: remote_sgl
+	remoteSGE      int              // the entry of it the next grant goes to
+	remoteOrder    binary.ByteOrder // of the peer's host, which its grant table is in
+	ctrlSeqNo      uint32           // credit and control messages posted: ctrl_seqno
+	ctrlMaxSeqNo   uint32           // the ctrlSeqNo the slots for them run out at
+	shutdownHeld   bool             // RS_CTRL_SHUTDOWN waits for a slot
+	disconnectHeld bool             // RS_CTRL_DISCONNECT waits for a slot
+	rseqNo         uint16           // data messages read, wrapping
+	rseqComp       uint16           // the rseqNo to give credits at
 
 	state State
 	err   error
@@ -297,21 +298,37 @@ func (s *Stream) CloseWrite() {
 }
 
 // Disconnect mirrors rshutdown(SHUT_RDWR), which rclose makes: both sides
-// end, which the peer learns by RS_CTRL_DISCONNECT.
+// end, which the peer learns by RS_CTRL_DISCONNECT, held until a control slot
+// is free.
 func (s *Stream) Disconnect() {
 	s.state &^= StateReadable | StateWritable
-	msg := MakeMsg(OpCtrl, CtrlDisconnect)
-	s.link.PostMsg(uint64(msg), msg)
+	s.disconnectHeld = true
+	s.postHeld()
 }
 
-// postHeld posts the control message held for a control slot if one is free.
+// postHeld posts the control messages held for control slots while slots are
+// free, RS_CTRL_SHUTDOWN before RS_CTRL_DISCONNECT.
 func (s *Stream) postHeld() {
-	if s.shutdownHeld && s.ctrlSeqNo != s.ctrlMaxSeqNo {
-		s.shutdownHeld = false
-		s.ctrlSeqNo++
-		msg := MakeMsg(OpCtrl, CtrlShutdown)
-		s.link.PostMsg(uint64(msg), msg)
+	for s.ctrlSeqNo != s.ctrlMaxSeqNo {
+		switch {
+		case s.shutdownHeld:
+			s.shutdownHeld = false
+			s.postCtrl(CtrlShutdown)
+		case s.disconnectHeld:
+			s.disconnectHeld = false
+			s.postCtrl(CtrlDisconnect)
+		default:
+			return
+		}
 	}
+}
+
+// postCtrl mirrors the rs_post_msg of rshutdown: the control message ctrl in
+// a control slot.
+func (s *Stream) postCtrl(ctrl uint32) {
+	s.ctrlSeqNo++
+	msg := MakeMsg(OpCtrl, ctrl)
+	s.link.PostMsg(uint64(msg), msg)
 }
 
 // checkPost breaks the stream on err, the refusal of a post it made on its
