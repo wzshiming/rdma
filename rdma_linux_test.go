@@ -29,6 +29,16 @@ const rxeTimeout = 20 * time.Second
 // so that back-pressure and credit returns happen all the time.
 var smallConfig = Config{SendBufferSize: 16 << 10, ReceiveBufferSize: 16 << 10, SendQueueSize: 8, ReceiveQueueSize: 8}
 
+// engines are the engines Config.Engine selects, which the rxe tests run on.
+var engines = []Engine{EngineNative, EngineLibrdmacm}
+
+// forEachEngine runs test on each engine, as a subtest named after it.
+func forEachEngine(t *testing.T, test func(t *testing.T, e Engine)) {
+	for _, e := range engines {
+		t.Run(string(e), func(t *testing.T) { test(t, e) })
+	}
+}
+
 // manyConnections gates a test that keeps more than three connections alive
 // in this process by the rdma-core release in use, as manyConnectionsVerdict
 // decides: a skip before 53, a failure under RDMA_TEST_REQUIRE=1, and a run
@@ -125,12 +135,14 @@ func rxePair(t testing.TB, cfg Config) (client, server *Conn) {
 
 func TestRXEConn(t *testing.T) {
 	rdmatest.Device(t)
-	nettest.TestConn(t, func() (c1, c2 net.Conn, stop func(), err error) {
-		client, server := rxePair(t, Config{})
-		return client, server, func() {
-			client.Close()
-			server.Close()
-		}, nil
+	forEachEngine(t, func(t *testing.T, e Engine) {
+		nettest.TestConn(t, func() (c1, c2 net.Conn, stop func(), err error) {
+			client, server := rxePair(t, Config{Engine: e})
+			return client, server, func() {
+				client.Close()
+				server.Close()
+			}, nil
+		})
 	})
 }
 
@@ -166,80 +178,86 @@ func testRXEEcho(t *testing.T, client, server *Conn) {
 
 func TestRXETransfer(t *testing.T) {
 	rdmatest.Device(t)
-	for name, cfg := range map[string]Config{"defaults": {}, "small": smallConfig} {
-		t.Run(name, func(t *testing.T) {
-			client, server := rxePair(t, cfg)
-			const total = 1 << 30
-			start := time.Now()
-			transfer(t, client, server, total, 64<<10, client.CloseWrite)
-			elapsed := time.Since(start)
-			t.Logf("%d MiB in %v (%.0f MiB/s)", total>>20, elapsed.Round(time.Millisecond), float64(total>>20)/elapsed.Seconds())
-		})
-	}
+	forEachEngine(t, func(t *testing.T, e Engine) {
+		for name, cfg := range map[string]Config{"defaults": {}, "small": smallConfig} {
+			cfg.Engine = e
+			t.Run(name, func(t *testing.T) {
+				client, server := rxePair(t, cfg)
+				const total = 1 << 30
+				start := time.Now()
+				transfer(t, client, server, total, 64<<10, client.CloseWrite)
+				elapsed := time.Since(start)
+				t.Logf("%d MiB in %v (%.0f MiB/s)", total>>20, elapsed.Round(time.Millisecond), float64(total>>20)/elapsed.Seconds())
+			})
+		}
+	})
 }
 
 func TestRXEConcurrentConnections(t *testing.T) {
-	manyConnections(t)
-	ln := rxeListen(t, Config{})
-	const conns = 32
-	const total = 4 << 20
-	var wg sync.WaitGroup
-	for range conns {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			server, err := ln.AcceptRDMA()
-			if err != nil {
-				if !errors.Is(err, net.ErrClosed) {
-					t.Errorf("AcceptRDMA() error: %v", err)
-				}
-				return
-			}
-			defer server.Close()
-			if _, err := io.Copy(server, server); err != nil {
-				t.Errorf("echo error: %v", err)
-			}
-			server.CloseWrite()
-		}()
-	}
-	for i := range conns {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			d := Dialer{Timeout: rxeTimeout}
-			client, err := d.Dial("rdma", ln.Addr().String())
-			if err != nil {
-				t.Errorf("Dial() #%d error: %v", i, err)
-				ln.Close() // frees the acceptor waiting for this dial
-				return
-			}
-			defer client.Close()
-			in, out := newStream(byte(i)), newStream(byte(i))
-			var rwg sync.WaitGroup
-			rwg.Add(1)
+	forEachEngine(t, func(t *testing.T, e Engine) {
+		manyConnections(t)
+		cfg := Config{Engine: e}
+		ln := rxeListen(t, cfg)
+		const conns = 32
+		const total = 4 << 20
+		var wg sync.WaitGroup
+		for range conns {
+			wg.Add(1)
 			go func() {
-				defer rwg.Done()
-				if err := out.readFrom(client, 32<<10); err != nil {
-					t.Errorf("Read #%d error: %v", i, err)
+				defer wg.Done()
+				server, err := ln.AcceptRDMA()
+				if err != nil {
+					if !errors.Is(err, net.ErrClosed) {
+						t.Errorf("AcceptRDMA() error: %v", err)
+					}
+					return
+				}
+				defer server.Close()
+				if _, err := io.Copy(server, server); err != nil {
+					t.Errorf("echo error: %v", err)
+				}
+				server.CloseWrite()
+			}()
+		}
+		for i := range conns {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				d := Dialer{Config: cfg, Timeout: rxeTimeout}
+				client, err := d.Dial("rdma", ln.Addr().String())
+				if err != nil {
+					t.Errorf("Dial() #%d error: %v", i, err)
+					ln.Close() // frees the acceptor waiting for this dial
+					return
+				}
+				defer client.Close()
+				in, out := newStream(byte(i)), newStream(byte(i))
+				var rwg sync.WaitGroup
+				rwg.Add(1)
+				go func() {
+					defer rwg.Done()
+					if err := out.readFrom(client, 32<<10); err != nil {
+						t.Errorf("Read #%d error: %v", i, err)
+					}
+				}()
+				if err := in.writeTo(client, total, 32<<10); err != nil {
+					t.Errorf("Write #%d error: %v", i, err)
+				}
+				if err := client.CloseWrite(); err != nil {
+					t.Errorf("CloseWrite #%d error: %v", i, err)
+				}
+				rwg.Wait()
+				if in.sum() != out.sum() {
+					t.Errorf("connection #%d: sent %s, received %s", i, in.sum(), out.sum())
 				}
 			}()
-			if err := in.writeTo(client, total, 32<<10); err != nil {
-				t.Errorf("Write #%d error: %v", i, err)
-			}
-			if err := client.CloseWrite(); err != nil {
-				t.Errorf("CloseWrite #%d error: %v", i, err)
-			}
-			rwg.Wait()
-			if in.sum() != out.sum() {
-				t.Errorf("connection #%d: sent %s, received %s", i, in.sum(), out.sum())
-			}
-		}()
-	}
-	wg.Wait()
+		}
+		wg.Wait()
+	})
 }
 
 func TestRXEListenerCloseUnblocksAccept(t *testing.T) {
-	testRXEListenerCloseUnblocksAccept(t, EngineNative)
+	forEachEngine(t, testRXEListenerCloseUnblocksAccept)
 }
 
 // testRXEListenerCloseUnblocksAccept closes a Listener of the engine e while
@@ -294,85 +312,94 @@ func testRXEDialRefusedWithoutListener(t *testing.T, dial, listen Engine) {
 }
 
 func TestRXEDialContextCancel(t *testing.T) {
-	// A listener would not do: librdmacm completes the handshake before
+	// A listener would not do: the engines complete the handshake before
 	// Accept is ever called. The next address of the device's subnet has no
 	// host behind it, so the address resolution retries until cancelled.
 	dev := rdmatest.Device(t)
 	nowhere := net.JoinHostPort(dev.IP.Next().String(), "4791")
-	goroutines := runtime.NumGoroutine()
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		time.Sleep(200 * time.Millisecond)
-		cancel()
-	}()
-	start := time.Now()
-	c, err := DialContext(ctx, "rdma", nowhere)
-	if err == nil {
-		c.Close()
-		t.Fatalf("DialContext(%s) succeeded without a host", nowhere)
-	}
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("DialContext(%s) error = %v, want context.Canceled", nowhere, err)
-	}
-	if elapsed := time.Since(start); elapsed > 3*time.Second {
-		t.Errorf("DialContext() took %v to notice the cancel", elapsed)
-	}
-	deadline := time.Now().Add(5 * time.Second)
-	for runtime.NumGoroutine() > goroutines && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
-	if after := runtime.NumGoroutine(); after > goroutines {
-		t.Errorf("goroutines: %d before the dial, %d after its cancel", goroutines, after)
-	}
+	forEachEngine(t, func(t *testing.T, e Engine) {
+		goroutines := runtime.NumGoroutine()
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() {
+			time.Sleep(200 * time.Millisecond)
+			cancel()
+		}()
+		start := time.Now()
+		d := Dialer{Config: Config{Engine: e}}
+		c, err := d.DialContext(ctx, "rdma", nowhere)
+		if err == nil {
+			c.Close()
+			t.Fatalf("DialContext(%s) succeeded without a host", nowhere)
+		}
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("DialContext(%s) error = %v, want context.Canceled", nowhere, err)
+		}
+		if elapsed := time.Since(start); elapsed > 3*time.Second {
+			t.Errorf("DialContext() took %v to notice the cancel", elapsed)
+		}
+		deadline := time.Now().Add(5 * time.Second)
+		for runtime.NumGoroutine() > goroutines && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		if after := runtime.NumGoroutine(); after > goroutines {
+			t.Errorf("goroutines: %d before the dial, %d after its cancel", goroutines, after)
+		}
+	})
 }
 
 func TestRXEIdleReadDeadline(t *testing.T) {
-	client, _ := rxePair(t, Config{})
-	const d = 50 * time.Millisecond
-	client.SetReadDeadline(time.Now().Add(d))
-	start := time.Now()
-	n, err := client.Read(make([]byte, 1))
-	elapsed := time.Since(start)
-	if n != 0 || !isTimeout(err) || !errors.Is(err, os.ErrDeadlineExceeded) {
-		t.Fatalf("Read() = %d, %v; want 0 and a deadline error", n, err)
-	}
-	if elapsed < d || elapsed > d+200*time.Millisecond {
-		t.Errorf("Read() timed out after %v, want about %v", elapsed, d)
-	}
+	forEachEngine(t, func(t *testing.T, e Engine) {
+		client, _ := rxePair(t, Config{Engine: e})
+		const d = 50 * time.Millisecond
+		client.SetReadDeadline(time.Now().Add(d))
+		start := time.Now()
+		n, err := client.Read(make([]byte, 1))
+		elapsed := time.Since(start)
+		if n != 0 || !isTimeout(err) || !errors.Is(err, os.ErrDeadlineExceeded) {
+			t.Fatalf("Read() = %d, %v; want 0 and a deadline error", n, err)
+		}
+		if elapsed < d || elapsed > d+200*time.Millisecond {
+			t.Errorf("Read() timed out after %v, want about %v", elapsed, d)
+		}
+	})
 }
 
 func TestRXECloseWakesBlockedReadAndWrite(t *testing.T) {
-	client, _ := rxePair(t, smallConfig)
-	readErr := make(chan error, 1)
-	go func() {
-		_, err := client.Read(make([]byte, 1))
-		readErr <- err
-	}()
-	writeErr := make(chan error, 1)
-	go func() {
-		// The peer never reads, so the buffers of both sides fill up.
-		var err error
-		for err == nil {
-			_, err = client.Write(make([]byte, 64<<10))
-		}
-		writeErr <- err
-	}()
-	time.Sleep(500 * time.Millisecond)
-	start := time.Now()
-	if err := client.Close(); err != nil {
-		t.Fatalf("Close() error: %v", err)
-	}
-	t.Logf("Close() with a healthy peer took %v", time.Since(start).Round(time.Millisecond))
-	for name, ch := range map[string]chan error{"Read": readErr, "Write": writeErr} {
-		select {
-		case err := <-ch:
-			if !errors.Is(err, net.ErrClosed) {
-				t.Errorf("%s after Close() error = %v, want net.ErrClosed", name, err)
+	forEachEngine(t, func(t *testing.T, e Engine) {
+		cfg := smallConfig
+		cfg.Engine = e
+		client, _ := rxePair(t, cfg)
+		readErr := make(chan error, 1)
+		go func() {
+			_, err := client.Read(make([]byte, 1))
+			readErr <- err
+		}()
+		writeErr := make(chan error, 1)
+		go func() {
+			// The peer never reads, so the buffers of both sides fill up.
+			var err error
+			for err == nil {
+				_, err = client.Write(make([]byte, 64<<10))
 			}
-		case <-time.After(5 * time.Second):
-			t.Errorf("%s did not return after Close()", name)
+			writeErr <- err
+		}()
+		time.Sleep(500 * time.Millisecond)
+		start := time.Now()
+		if err := client.Close(); err != nil {
+			t.Fatalf("Close() error: %v", err)
 		}
-	}
+		t.Logf("Close() with a healthy peer took %v", time.Since(start).Round(time.Millisecond))
+		for name, ch := range map[string]chan error{"Read": readErr, "Write": writeErr} {
+			select {
+			case err := <-ch:
+				if !errors.Is(err, net.ErrClosed) {
+					t.Errorf("%s after Close() error = %v, want net.ErrClosed", name, err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Errorf("%s did not return after Close()", name)
+			}
+		}
+	})
 }
 
 func TestRXECloseWriteLetsThePeerWriteBack(t *testing.T) {
@@ -410,26 +437,28 @@ func testRXECloseWriteLetsThePeerWriteBack(t *testing.T, client, server *Conn) {
 
 func TestRXEDialerLocalAddrPinsTheSource(t *testing.T) {
 	dev := rdmatest.Device(t)
-	ln := rxeListen(t, Config{})
-	acc := acceptAsync(ln)
-	d := Dialer{LocalAddr: &Addr{IP: dev.IP.AsSlice()}, Timeout: rxeTimeout}
-	client, err := d.Dial("rdma", ln.Addr().String())
-	if err != nil {
-		t.Fatalf("Dial() from %v error: %v", d.LocalAddr, err)
-	}
-	defer client.Close()
-	r := <-acc
-	if r.err != nil {
-		t.Fatalf("AcceptRDMA() error: %v", r.err)
-	}
-	defer r.c.Close()
-	local, ok := client.LocalAddr().(*Addr)
-	if !ok || !local.IP.Equal(dev.IP.AsSlice()) || local.Port == 0 {
-		t.Fatalf("client LocalAddr() = %v, want %v with a real port", client.LocalAddr(), dev.IP)
-	}
-	if r.c.RemoteAddr().String() != local.String() {
-		t.Errorf("server RemoteAddr() = %v, want the client's LocalAddr() %v", r.c.RemoteAddr(), local)
-	}
+	forEachEngine(t, func(t *testing.T, e Engine) {
+		ln := rxeListen(t, Config{Engine: e})
+		acc := acceptAsync(ln)
+		d := Dialer{Config: Config{Engine: e}, LocalAddr: &Addr{IP: dev.IP.AsSlice()}, Timeout: rxeTimeout}
+		client, err := d.Dial("rdma", ln.Addr().String())
+		if err != nil {
+			t.Fatalf("Dial() from %v error: %v", d.LocalAddr, err)
+		}
+		defer client.Close()
+		r := <-acc
+		if r.err != nil {
+			t.Fatalf("AcceptRDMA() error: %v", r.err)
+		}
+		defer r.c.Close()
+		local, ok := client.LocalAddr().(*Addr)
+		if !ok || !local.IP.Equal(dev.IP.AsSlice()) || local.Port == 0 {
+			t.Fatalf("client LocalAddr() = %v, want %v with a real port", client.LocalAddr(), dev.IP)
+		}
+		if r.c.RemoteAddr().String() != local.String() {
+			t.Errorf("server RemoteAddr() = %v, want the client's LocalAddr() %v", r.c.RemoteAddr(), local)
+		}
+	})
 }
 
 func threadCount(t *testing.T) int {
@@ -462,97 +491,105 @@ func cpuTime(t *testing.T) time.Duration {
 
 func TestRXEResourcesReturnToBaseline(t *testing.T) {
 	rdmatest.Device(t)
-	goroutines := runtime.NumGoroutine()
-	ln := rxeListen(t, Config{})
-	const n = 8
-	for range n {
-		acc := acceptAsync(ln)
-		d := Dialer{Timeout: rxeTimeout}
-		client, err := d.Dial("rdma", ln.Addr().String())
-		if err != nil {
-			t.Fatalf("Dial() error: %v", err)
+	forEachEngine(t, func(t *testing.T, e Engine) {
+		goroutines := runtime.NumGoroutine()
+		ln := rxeListen(t, Config{Engine: e})
+		const n = 8
+		for range n {
+			acc := acceptAsync(ln)
+			d := Dialer{Config: Config{Engine: e}, Timeout: rxeTimeout}
+			client, err := d.Dial("rdma", ln.Addr().String())
+			if err != nil {
+				t.Fatalf("Dial() error: %v", err)
+			}
+			r := <-acc
+			if r.err != nil {
+				t.Fatalf("AcceptRDMA() error: %v", r.err)
+			}
+			if _, err := client.Write([]byte("x")); err != nil {
+				t.Fatalf("Write error: %v", err)
+			}
+			if _, err := r.c.Read(make([]byte, 1)); err != nil {
+				t.Fatalf("Read error: %v", err)
+			}
+			if err := client.Close(); err != nil {
+				t.Errorf("client Close() error: %v", err)
+			}
+			if err := r.c.Close(); err != nil {
+				t.Errorf("server Close() error: %v", err)
+			}
 		}
-		r := <-acc
-		if r.err != nil {
-			t.Fatalf("AcceptRDMA() error: %v", r.err)
+		if err := ln.Close(); err != nil {
+			t.Errorf("Listener Close() error: %v", err)
 		}
-		if _, err := client.Write([]byte("x")); err != nil {
-			t.Fatalf("Write error: %v", err)
+		// With the last connection gone the goroutines of the engine, the
+		// poller of the librdmacm engine among them, exit too.
+		deadline := time.Now().Add(5 * time.Second)
+		for runtime.NumGoroutine() > goroutines && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
 		}
-		if _, err := r.c.Read(make([]byte, 1)); err != nil {
-			t.Fatalf("Read error: %v", err)
+		if after := runtime.NumGoroutine(); after > goroutines {
+			t.Errorf("goroutines: %d before, %d after closing %d connections and the listener", goroutines, after, n)
 		}
-		if err := client.Close(); err != nil {
-			t.Errorf("client Close() error: %v", err)
-		}
-		if err := r.c.Close(); err != nil {
-			t.Errorf("server Close() error: %v", err)
-		}
-	}
-	if err := ln.Close(); err != nil {
-		t.Errorf("Listener Close() error: %v", err)
-	}
-	// With the last socket gone the poller exits too.
-	deadline := time.Now().Add(5 * time.Second)
-	for runtime.NumGoroutine() > goroutines && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
-	if after := runtime.NumGoroutine(); after > goroutines {
-		t.Errorf("goroutines: %d before, %d after closing %d connections and the listener", goroutines, after, n)
-	}
+	})
 }
 
 func TestRXEIdleConnectionsAreCheap(t *testing.T) {
-	manyConnections(t)
-	ln := rxeListen(t, smallConfig)
-	const conns = 100
-	var servers []*Conn
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for range conns {
-			c, err := ln.AcceptRDMA()
-			if err != nil {
-				t.Errorf("AcceptRDMA() error: %v", err)
-				return
+	forEachEngine(t, func(t *testing.T, e Engine) {
+		manyConnections(t)
+		cfg := smallConfig
+		cfg.Engine = e
+		ln := rxeListen(t, cfg)
+		const conns = 100
+		var servers []*Conn
+		var mu sync.Mutex
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range conns {
+				c, err := ln.AcceptRDMA()
+				if err != nil {
+					t.Errorf("AcceptRDMA() error: %v", err)
+					return
+				}
+				mu.Lock()
+				servers = append(servers, c)
+				mu.Unlock()
 			}
-			mu.Lock()
-			servers = append(servers, c)
-			mu.Unlock()
+		}()
+		d := Dialer{Timeout: rxeTimeout, Config: cfg}
+		for i := range conns {
+			c, err := d.Dial("rdma", ln.Addr().String())
+			if err != nil {
+				t.Fatalf("Dial() #%d error: %v", i, err)
+			}
+			defer c.Close()
 		}
-	}()
-	d := Dialer{Timeout: rxeTimeout, Config: smallConfig}
-	for i := range conns {
-		c, err := d.Dial("rdma", ln.Addr().String())
-		if err != nil {
-			t.Fatalf("Dial() #%d error: %v", i, err)
+		wg.Wait()
+		defer func() {
+			for _, c := range servers {
+				c.Close()
+			}
+		}()
+		// Half of the servers wait in Read, as a server would, so that waiting
+		// connections count too: the librdmacm engine's poller then has
+		// descriptors to watch.
+		for _, c := range servers[:conns/2] {
+			go c.Read(make([]byte, 1))
 		}
-		defer c.Close()
-	}
-	wg.Wait()
-	defer func() {
-		for _, c := range servers {
-			c.Close()
+		time.Sleep(100 * time.Millisecond)
+		threads, cpu := threadCount(t), cpuTime(t)
+		time.Sleep(time.Second)
+		threadsAfter, cpuAfter := threadCount(t), cpuTime(t)
+		t.Logf("%d idle connections for 1s: CPU time +%v, threads %d -> %d", conns, cpuAfter-cpu, threads, threadsAfter)
+		if cpuAfter-cpu >= 50*time.Millisecond {
+			t.Errorf("CPU time grew by %v with %d idle connections, want < 50ms", cpuAfter-cpu, conns)
 		}
-	}()
-	// Half of the servers wait in Read, as a server would, so that the poller
-	// has descriptors to watch.
-	for _, c := range servers[:conns/2] {
-		go c.Read(make([]byte, 1))
-	}
-	time.Sleep(100 * time.Millisecond)
-	threads, cpu := threadCount(t), cpuTime(t)
-	time.Sleep(time.Second)
-	threadsAfter, cpuAfter := threadCount(t), cpuTime(t)
-	t.Logf("%d idle connections for 1s: CPU time +%v, threads %d -> %d", conns, cpuAfter-cpu, threads, threadsAfter)
-	if cpuAfter-cpu >= 50*time.Millisecond {
-		t.Errorf("CPU time grew by %v with %d idle connections, want < 50ms", cpuAfter-cpu, conns)
-	}
-	if threadsAfter-threads >= 10 {
-		t.Errorf("threads grew from %d to %d with %d idle connections, want growth < 10", threads, threadsAfter, conns)
-	}
+		if threadsAfter-threads >= 10 {
+			t.Errorf("threads grew from %d to %d with %d idle connections, want growth < 10", threads, threadsAfter, conns)
+		}
+	})
 }
 
 // TestRXEBufferedDataPrecedesEOF checks that what a peer wrote before closing

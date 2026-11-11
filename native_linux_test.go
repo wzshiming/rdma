@@ -224,12 +224,6 @@ func TestRXENativeListenerCopy(t *testing.T) {
 	}
 }
 
-// Closing a native listener wakes an Accept waiting on it with
-// net.ErrClosed.
-func TestRXENativeListenerCloseUnblocksAccept(t *testing.T) {
-	testRXEListenerCloseUnblocksAccept(t, EngineNative)
-}
-
 // Once a native listener is closed, a Dialer of either engine dialing its port
 // is refused with ECONNREFUSED.
 func TestRXENativeListenerClosedRefusesDials(t *testing.T) {
