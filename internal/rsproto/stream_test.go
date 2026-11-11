@@ -783,6 +783,31 @@ func TestCreditLimitIsNotCutTo16Bits(t *testing.T) {
 	}
 }
 
+// rs_give_credits compares rseq_no with rseq_comp as signed 16-bit numbers,
+// so credits keep coming every rq_size/2 messages as both wrap.
+func TestCreditsKeepComingAsTheSequenceWraps(t *testing.T) {
+	c := testConfig()
+	c.ReceiveQueueSize = rsproto.QPMinSize
+	l := &recorder{}
+	s := rsproto.NewStream(l, c)
+	s.Connect(testPeer)
+	s.Sent(l.posts[0].id, nil)
+	l.posts = nil
+
+	for read := 1; read <= 1<<16+4*rsproto.QPMinSize; read++ {
+		readMessages(s, c, read%len(c.ReceiveBuffer.Buf), 1)
+		due := read%(rsproto.QPMinSize/2) == 0
+		msg := rsproto.MakeMsg(rsproto.OpSGL, uint32(uint16(read))+rsproto.QPMinSize)
+		if len(l.posts) != 0 != due || due && (len(l.posts) != 1 || l.posts[0].msg != msg) {
+			t.Fatalf("reading message %d posted %+v, want credits %v (%#x)", read, l.posts, due, msg)
+		}
+		for _, p := range l.posts {
+			s.Sent(p.id, nil)
+		}
+		l.posts = l.posts[:0]
+	}
+}
+
 func TestStreamConnData(t *testing.T) {
 	c := testConfig()
 	little := rsproto.ConnData{

@@ -109,7 +109,7 @@ func (s *Stream) Connect(peer ConnData) {
 
 // updateCredits mirrors rs_update_credits, which rs_give_credits decides.
 func (s *Stream) updateCredits() {
-	if s.rbufAvail >= len(s.c.ReceiveBuffer.Buf)/2 || s.rseqNo >= s.rseqComp {
+	if s.rbufAvail >= len(s.c.ReceiveBuffer.Buf)/2 || int16(s.rseqNo-s.rseqComp) >= 0 {
 		s.sendCredits()
 	}
 }
