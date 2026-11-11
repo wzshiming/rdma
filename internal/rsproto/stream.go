@@ -45,6 +45,7 @@ type Stream struct {
 
 	rbufOffset  int              // where the arrived bytes start in the receive buffer: rbuf_offset
 	rbufArrived int              // bytes arrived and not yet consumed
+	rbufAvail   int              // bytes of the receive buffer free and not granted: rbuf_bytes_avail
 	remote      SGE              // the peer's grant table, Length counting entries: remote_sgl
 	remoteOrder binary.ByteOrder // of the peer's host, which its grant table is in
 
@@ -65,6 +66,7 @@ func NewStream(l Link, c Config) *Stream {
 		order:     ConnData{BigEndian: c.BigEndian}.ByteOrder(),
 		sqeAvail:  c.SendQueueSize - QPCtrlSize,
 		sbufAvail: len(c.SendBuffer.Buf),
+		rbufAvail: len(c.ReceiveBuffer.Buf) / 2,
 	}
 	for range c.ReceiveQueueSize {
 		l.PostRecv(recvID)
@@ -90,7 +92,14 @@ func (s *Stream) Connect(peer ConnData) {
 	s.sseqComp = peer.Credits
 	s.remote = peer.GrantTable
 	s.remoteOrder = peer.ByteOrder()
-	s.sendCredits()
+	s.updateCredits()
+}
+
+// updateCredits mirrors rs_update_credits, which rs_give_credits decides.
+func (s *Stream) updateCredits() {
+	if s.rbufAvail >= len(s.c.ReceiveBuffer.Buf)/2 {
+		s.sendCredits()
+	}
 }
 
 // sendCredits mirrors rs_send_credits.
@@ -101,6 +110,7 @@ func (s *Stream) sendCredits() {
 	s.sgl[0] = Segment{Addr: ctrl.Addr, Length: SGESize, Key: ctrl.Key}
 	msg := MakeMsg(OpSGL, uint32(s.c.ReceiveQueueSize))
 	s.link.PostWriteMsg(uint64(msg), s.sgl[:], msg, s.remote.Addr+SGESize, s.remote.Key)
+	s.rbufAvail -= half
 }
 
 // grant returns entry i of the grant table, target_sgl[i] in C, which the
@@ -186,12 +196,14 @@ func (s *Stream) Peek() []byte {
 }
 
 // Consume ends the loan of Peek with the first n bytes of the view read, as
-// rrecv takes them.
+// rrecv takes them, and gives the peer credits as rs_update_credits does.
 func (s *Stream) Consume(n int) {
 	s.rbufArrived -= n
+	s.rbufAvail += n
 	if s.rbufOffset += n; s.rbufOffset == len(s.c.ReceiveBuffer.Buf) {
 		s.rbufOffset = 0
 	}
+	s.updateCredits()
 }
 
 // Err returns why the stream broke, nil while it has not.

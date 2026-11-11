@@ -604,6 +604,29 @@ func TestGrantInThePeerByteOrder(t *testing.T) {
 	}
 }
 
+// rrecv adds the bytes it takes to rbuf_bytes_avail, and rs_give_credits
+// grants room again once half the receive buffer is free.
+func TestReadingHalfTheBufferEarnsAGrant(t *testing.T) {
+	c := testConfig()
+	l := &recorder{}
+	s := rsproto.NewStream(l, c)
+	s.Connect(testPeer)
+	half := len(c.ReceiveBuffer.Buf) / 2
+	peerWrites(s, c, 0, make([]byte, half))
+
+	s.Peek()
+	s.Consume(half - 1)
+	if len(l.posts) != 1 {
+		t.Fatalf("reading %d bytes posted %+v after the grant of Connect, want nothing", half-1, l.posts[1:])
+	}
+	s.Peek()
+	s.Consume(1)
+	if len(l.posts) != 2 {
+		t.Fatalf("reading half the receive buffer, %d bytes, posted %+v after the grant of Connect, want a grant", half, l.posts[1:])
+	}
+	grantPosted(t, c, l.posts[1])
+}
+
 func TestStreamConnData(t *testing.T) {
 	c := testConfig()
 	little := rsproto.ConnData{
