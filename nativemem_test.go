@@ -211,6 +211,8 @@ type memTransport struct {
 	ev   linkEvents // set by start, for the pump
 	lost bool       // the pump has fed the loss of the link
 
+	silence sync.Mutex // held, it keeps the pump from taking anything, as a peer gone silent
+
 	mu       sync.Mutex
 	started  bool
 	released bool
@@ -272,8 +274,10 @@ func (t *memTransport) pump() {
 		case <-t.stop:
 			return
 		}
+		t.silence.Lock()
 		for t.step() {
 		}
+		t.silence.Unlock()
 	}
 }
 
@@ -327,6 +331,10 @@ func (t *memTransport) isReleased() bool {
 	defer t.mu.Unlock()
 	return t.released
 }
+
+// memTransportOf returns the transport under c, a connection of a
+// memEngine.
+func memTransportOf(c *Conn) *memTransport { return c.s.(*nativeStream).t.(*memTransport) }
 
 // memOwns reports whether p lies in the send or the receive buffer of s, a
 // native stream on a memTransport.

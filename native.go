@@ -5,9 +5,14 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"time"
 
 	"github.com/wzshiming/rdma/internal/rsproto"
 )
+
+// closeTimeout bounds how long close waits for the data posted and the end
+// of the connection to reach the peer.
+const closeTimeout = time.Second
 
 // transport carries a native stream: the queue pair of a connection, or a
 // link held in memory in tests. The stream posts through its rsproto.Link,
@@ -285,7 +290,8 @@ func (s *nativeStream) closeWrite() error {
 }
 
 // close ends the connection behind the data written, waits until the sends
-// have completed, takes the link down and releases the memory.
+// have completed, at most closeTimeout, takes the link down and releases the
+// memory.
 func (s *nativeStream) close() error {
 	s.mu.Lock()
 	if s.closed {
@@ -302,7 +308,10 @@ func (s *nativeStream) close() error {
 		s.settled = settled
 	}
 	s.mu.Unlock()
-	<-settled
+	select {
+	case <-settled:
+	case <-time.After(closeTimeout):
+	}
 	s.t.down()
 	s.t.release()
 	return nil

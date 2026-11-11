@@ -1,6 +1,7 @@
 package rdma
 
 import (
+	"bytes"
 	"errors"
 	"go/ast"
 	"go/parser"
@@ -11,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wzshiming/rdma/internal/rsproto"
 )
@@ -18,6 +20,54 @@ import (
 func TestNativeConnOnMemLink(t *testing.T) { testConn(t, nativeOnMemLink) }
 
 func TestNativeCopyPathsOnMemLink(t *testing.T) { testCopyPaths(t, nativeOnMemLink) }
+
+// Close waits for the data posted and the end of the connection to reach the
+// peer, which takes them though its application does not read and then
+// reads all of it and EOF; when nothing reaches the peer, Close gives up
+// within a second.
+func TestNativeCloseWaitsAtMostASecond(t *testing.T) {
+	t.Run("peer not reading", func(t *testing.T) {
+		client, server := nativeOnMemLink.pair(t, Config{})
+		want := make([]byte, 64<<10)
+		newStream(1).rng.Read(want)
+		if _, err := client.Write(want); err != nil {
+			t.Fatalf("Write error: %v", err)
+		}
+		start := time.Now()
+		if err := client.Close(); err != nil {
+			t.Fatalf("Close error: %v", err)
+		}
+		if elapsed := time.Since(start); elapsed >= time.Second {
+			t.Errorf("Close took %v with the peer taking what arrives, want less than a second", elapsed)
+		}
+		got, err := io.ReadAll(server)
+		if err != nil || !bytes.Equal(got, want) {
+			t.Errorf("peer ReadAll after Close = %d bytes, %v; want the %d written and nil", len(got), err, len(want))
+		}
+	})
+	t.Run("peer silent", func(t *testing.T) {
+		client, server := nativeOnMemLink.pair(t, Config{})
+		peer := memTransportOf(server)
+		peer.silence.Lock()
+		closed := make(chan struct{})
+		start := time.Now()
+		go func() {
+			client.Close()
+			close(closed)
+		}()
+		select {
+		case <-closed:
+		case <-time.After(5 * time.Second):
+			peer.silence.Unlock()
+			t.Fatal("Close did not return within 5 seconds with the peer silent")
+		}
+		elapsed := time.Since(start)
+		peer.silence.Unlock()
+		if elapsed > time.Second+500*time.Millisecond {
+			t.Errorf("Close took %v with the peer silent, want about a second at most", elapsed)
+		}
+	})
+}
 
 // In steady state a Write and the Read of what it wrote allocate nothing,
 // the waits for room and data included: twice the rounds cost as many
