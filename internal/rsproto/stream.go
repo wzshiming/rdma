@@ -35,7 +35,7 @@ type Config struct {
 type State uint16
 
 const (
-	StateConnected State = 0x0100 // rs_connected
+	StateConnected State = 0x0100 // rs_connected: the connection is up
 	StateWritable  State = 0x0200 // rs_writable: the write side is open
 	StateReadable  State = 0x0400 // rs_readable: the peer has not ended its writing
 
@@ -230,9 +230,9 @@ func (s *Stream) Commit(n int) error {
 	return s.link.PostWriteMsg(uint64(msg), s.sgl[:], msg, addr, key)
 }
 
-// Sent takes the completion of the post with the given id, as rs_poll_cq
-// does, and posts the control message or gives the peer the credits held for
-// a control slot.
+// Sent takes the completion of the post with the given id, err telling why it
+// failed, as rs_poll_cq does: a failure breaks the stream only while it is
+// connected. What was held for a control slot is posted then.
 func (s *Stream) Sent(id uint64, err error) {
 	switch msg := Msg(id); msg.Op() {
 	case OpSGL:
