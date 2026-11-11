@@ -1,6 +1,8 @@
 package rsproto_test
 
 import (
+	"errors"
+	"io"
 	"slices"
 	"testing"
 
@@ -314,6 +316,41 @@ func TestSequenceWrapsPast65536Messages(t *testing.T) {
 		}
 		l.posts = l.posts[:0]
 		s.Received(rsproto.MakeMsg(rsproto.OpSGL, uint32(uint16(sent))+rsproto.QPMinSize))
+	}
+}
+
+// rs_poll_cq turns a failed send of a connected rsocket into rs_error with
+// err EIO, where an orderly end of the peer leaves err 0.
+func TestFailedSendIsAnError(t *testing.T) {
+	l := &recorder{}
+	s := rsproto.NewStream(l, testConfig())
+	s.Connect(testPeer)
+	sendWhileCan(t, s, 2)
+
+	s.Sent(l.posts[0].id, nil)
+	if err := s.Err(); err != nil {
+		t.Fatalf("Err() after a completed send = %v, want nil", err)
+	}
+	failed := errors.New("IBV_WC_RETRY_EXC_ERR")
+	s.Sent(l.posts[1].id, failed)
+	if err := s.Err(); !errors.Is(err, failed) || errors.Is(err, io.EOF) {
+		t.Errorf("Err() after a failed send = %v, want an error wrapping %q, not the io.EOF of an orderly end", err, failed)
+	}
+}
+
+// rs_poll_cq leaves rs_connected at the first failed send, so the sends
+// flushed after it change neither the state nor err.
+func TestFirstFailedSendStaysTheError(t *testing.T) {
+	l := &recorder{}
+	s := rsproto.NewStream(l, testConfig())
+	s.Connect(testPeer)
+	sendWhileCan(t, s, 2)
+
+	failed, flushed := errors.New("IBV_WC_RETRY_EXC_ERR"), errors.New("IBV_WC_WR_FLUSH_ERR")
+	s.Sent(l.posts[0].id, failed)
+	s.Sent(l.posts[1].id, flushed)
+	if err := s.Err(); !errors.Is(err, failed) || errors.Is(err, flushed) {
+		t.Errorf("Err() after a failed send and a flushed one = %v, want the failure %q", err, failed)
 	}
 }
 

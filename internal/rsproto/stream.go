@@ -1,6 +1,9 @@
 package rsproto
 
-import "encoding/binary"
+import (
+	"encoding/binary"
+	"fmt"
+)
 
 // Region is a block of local memory registered for RDMA: its bytes, and the
 // address and key the link and the peer know it by.
@@ -38,6 +41,7 @@ type Stream struct {
 	sseqNo    uint16 // data messages sent, wrapping
 	sseqComp  uint16 // the sseqNo the peer's credits stop sending at
 	sgl       [2]Segment
+	err       error
 }
 
 // NewStream returns a stream on memory the caller registered, as
@@ -123,6 +127,9 @@ func (s *Stream) Commit(n int) error {
 func (s *Stream) Sent(id uint64, err error) {
 	s.sqeAvail++
 	s.sbufAvail += int(Msg(id).Data())
+	if err != nil && s.err == nil {
+		s.err = fmt.Errorf("rsproto: send failed: %w", err)
+	}
 }
 
 // Received takes a message word the peer sent, as rs_poll_cq does.
@@ -131,3 +138,6 @@ func (s *Stream) Received(msg Msg) {
 		s.sseqComp = uint16(msg.Data())
 	}
 }
+
+// Err returns why the stream broke, nil while it has not.
+func (s *Stream) Err() error { return s.err }
