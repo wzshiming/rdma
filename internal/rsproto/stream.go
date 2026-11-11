@@ -118,7 +118,7 @@ func (s *Stream) updateCredits() {
 func (s *Stream) sendCredits() {
 	s.ctrlSeqNo++
 	s.rseqComp = s.rseqNo + uint16(s.c.ReceiveQueueSize/2)
-	msg := MakeMsg(OpSGL, uint32(s.rseqNo+uint16(s.c.ReceiveQueueSize)))
+	msg := MakeMsg(OpSGL, uint32(s.rseqNo)+uint32(s.c.ReceiveQueueSize))
 	half := len(s.c.ReceiveBuffer.Buf) / 2
 	if s.rbufAvail < half {
 		s.link.PostMsg(uint64(msg), msg)

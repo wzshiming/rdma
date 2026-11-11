@@ -753,6 +753,36 @@ func TestPartlyReadMessageEarnsNoCredit(t *testing.T) {
 	}
 }
 
+// readCompleting reads n messages of one byte as readMessages does, each
+// post the stream makes meanwhile completing at once, and returns the last.
+func readCompleting(s *rsproto.Stream, c rsproto.Config, l *recorder, n int) post {
+	var last post
+	for i := range n {
+		readMessages(s, c, i%len(c.ReceiveBuffer.Buf), 1)
+		for _, p := range l.posts {
+			s.Sent(p.id, nil)
+			last = p
+		}
+		l.posts = l.posts[:0]
+	}
+	return last
+}
+
+// rs_send_credits sends rseq_no + rq_size as the int it sums to, past 16
+// bits, and the peer's rs_poll_cq cuts it to its uint16_t sseq_comp.
+func TestCreditLimitIsNotCutTo16Bits(t *testing.T) {
+	c := testConfig()
+	c.ReceiveQueueSize = rsproto.QPMinSize
+	l := &recorder{}
+	s := rsproto.NewStream(l, c)
+	s.Connect(testPeer)
+
+	read := 1<<16 - rsproto.QPMinSize
+	if last, want := readCompleting(s, c, l, read), uint32(1<<16); !isCredit(last, want) {
+		t.Errorf("the credits given after reading %d messages are %+v, want %#x", read, last, want)
+	}
+}
+
 func TestStreamConnData(t *testing.T) {
 	c := testConfig()
 	little := rsproto.ConnData{
