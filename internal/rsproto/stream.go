@@ -153,7 +153,8 @@ func (s *Stream) Received(msg Msg) {
 	switch msg.Op() {
 	case OpSGL:
 		s.sseqComp = uint16(msg.Data())
-	case OpData:
+	case OpWrite, OpIOMapSGL, OpCtrl: // no data
+	default:
 		s.rbufArrived += int(msg.Data())
 	}
 	s.link.PostRecv(recvID)

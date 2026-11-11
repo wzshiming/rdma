@@ -501,6 +501,25 @@ func TestViewsComeInArrivalOrderAcrossTheWrap(t *testing.T) {
 	}
 }
 
+// rs_poll_cq queues as data the message of every op but RS_OP_SGL,
+// RS_OP_IOMAP_SGL, RS_OP_CTRL and RS_OP_WRITE: the reserved ops 1, 3 and 5
+// too.
+func TestWhichOpsArriveAsData(t *testing.T) {
+	for op := range rsproto.Op(8) {
+		s := rsproto.NewStream(&recorder{}, testConfig())
+		s.Connect(testPeer)
+		s.Received(rsproto.MakeMsg(op, 100))
+
+		want := 0
+		if op == rsproto.OpData || op == 1 || op == 3 || op == 5 {
+			want = 100
+		}
+		if got := len(s.Peek()); got != want {
+			t.Errorf("a message of op %d and data 100 lent a view of %d bytes, want %d", op, got, want)
+		}
+	}
+}
+
 func TestStreamConnData(t *testing.T) {
 	c := testConfig()
 	little := rsproto.ConnData{
