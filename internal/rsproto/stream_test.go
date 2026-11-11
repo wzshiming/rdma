@@ -1367,6 +1367,30 @@ func TestWritableWithRoomOrTheEnd(t *testing.T) {
 	}
 }
 
+// rs_conn_all_sends_done, which rshutdown waits for, holds once every send
+// queue entry and control slot is back, or the rsocket is no longer
+// rs_connected.
+func TestSendsDoneOnceAllCompleteOrTheEnd(t *testing.T) {
+	l := &recorder{}
+	s := rsproto.NewStream(l, testConfig())
+	s.Connect(testPeer)
+	sendWhileCan(t, s, 1)
+	for i, p := range l.posts {
+		if s.SendsDone() {
+			t.Fatalf("SendsDone() with %d of the grant and the data message completed", i)
+		}
+		s.Sent(p.id, nil)
+	}
+	if !s.SendsDone() {
+		t.Fatal("SendsDone() = false with the grant and the data message completed")
+	}
+	sendWhileCan(t, s, 1)
+	s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlDisconnect))
+	if !s.SendsDone() {
+		t.Error("SendsDone() = false with a data message in flight after the peer's disconnect")
+	}
+}
+
 func TestStreamConnData(t *testing.T) {
 	c := testConfig()
 	little := rsproto.ConnData{

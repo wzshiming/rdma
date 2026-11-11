@@ -184,6 +184,12 @@ func (s *Stream) CanSend() bool {
 // would lend room or the write side has ended.
 func (s *Stream) Writable() bool { return s.CanSend() || s.state&StateWritable == 0 }
 
+// SendsDone mirrors rs_conn_all_sends_done, which rshutdown waits for:
+// whether every post has completed or the connection has ended.
+func (s *Stream) SendsDone() bool {
+	return int(s.ctrlMaxSeqNo-s.ctrlSeqNo)+s.sqeAvail == s.c.SendQueueSize || s.state&StateConnected == 0
+}
+
 // Reserve lends the room of the send buffer that one message can carry now,
 // nil when there is none.
 func (s *Stream) Reserve() []byte {
