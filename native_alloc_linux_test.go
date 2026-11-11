@@ -4,9 +4,13 @@ package rdma
 
 import (
 	"errors"
+	"fmt"
 	"io"
+	"path"
 	"reflect"
 	"runtime"
+	"slices"
+	"strings"
 	"testing"
 )
 
@@ -29,8 +33,8 @@ func TestRXENativeRoundsDoNotAllocate(t *testing.T) {
 // them: twice the rounds cost it as many allocations. The allocations of the
 // rest of the process are logged. server's receive buffer must hold 128 KiB.
 func testRoundsDoNotAllocate(t *testing.T, client, server *Conn, registered func(*Conn) (send, recv []byte)) {
-	if caller, _ := callerAllocs(func() { allocSink = new([64]byte) }); caller != 1 {
-		t.Fatalf("the heap profile shows %d allocations under a caller that made one", caller)
+	if caller, sites, _ := callerAllocs(func() { allocSink = new([64]byte) }); caller != 1 {
+		t.Fatalf("the heap profile shows %d allocations (%s) under a caller that made one", caller, sites)
 	}
 	const chunk = 1 << 10
 	buf := make([]byte, 128*chunk)
@@ -84,11 +88,11 @@ func testRoundsDoNotAllocate(t *testing.T, client, server *Conn, registered func
 			}
 		}},
 	} {
-		few, fewAll := callerAllocs(func() { tt.rounds(64) })
-		many, manyAll := callerAllocs(func() { tt.rounds(128) })
+		few, fewSites, fewAll := callerAllocs(func() { tt.rounds(64) })
+		many, manySites, manyAll := callerAllocs(func() { tt.rounds(128) })
 		t.Logf("%s: %d and %d allocations on the caller's goroutine for 64 and 128 rounds, %d and %d in the process", tt.name, few, many, fewAll, manyAll)
 		if many != few {
-			t.Errorf("%s: %d and %d allocations on the caller's goroutine for 64 and 128 rounds; want as many", tt.name, few, many)
+			t.Errorf("%s: %d allocations on the caller's goroutine for 64 rounds (%s) and %d for 128 (%s); want as many", tt.name, few, fewSites, many, manySites)
 		}
 	}
 }
@@ -119,8 +123,9 @@ var allocSink *[64]byte
 // callerAllocs runs f twice with a single P and every heap allocation
 // profiled, the first time to warm up, and returns how many allocations the
 // second run made on f's own goroutine, which the profile tells by their
-// stacks through allocating, and how many the process made meanwhile.
-func callerAllocs(f func()) (caller, all uint64) {
+// stacks through allocating, the sites they were made at, and how many the
+// process made meanwhile.
+func callerAllocs(f func()) (caller uint64, sites string, all uint64) {
 	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
 	defer func(rate int) { runtime.MemProfileRate = rate }(runtime.MemProfileRate)
 	runtime.MemProfileRate = 1
@@ -130,7 +135,15 @@ func callerAllocs(f func()) (caller, all uint64) {
 	runtime.ReadMemStats(&m0)
 	allocating(f)
 	runtime.ReadMemStats(&m1)
-	return profiledAllocs() - before, m1.Mallocs - m0.Mallocs
+	var made []string
+	for site, n := range profiledAllocs() {
+		if n > before[site] {
+			caller += n - before[site]
+			made = append(made, fmt.Sprintf("%d at %s", n-before[site], site))
+		}
+	}
+	slices.Sort(made)
+	return caller, strings.Join(made, ", "), m1.Mallocs - m0.Mallocs
 }
 
 // allocating runs f, under which the heap profile then shows f's
@@ -140,10 +153,11 @@ func callerAllocs(f func()) (caller, all uint64) {
 func allocating(f func()) { f() }
 
 // profiledAllocs returns how many allocations the heap profile shows under
-// allocating. It leaves out the caches of type assertions and type switches,
-// which the runtime rebuilds at random on a miss until they hold every type
-// seen, not per call.
-func profiledAllocs() uint64 {
+// allocating, by site: the first two functions outside the runtime that
+// their stacks pass through. It leaves out the caches of type assertions and
+// type switches, which the runtime rebuilds at random on a miss until they
+// hold every type seen, not per call.
+func profiledAllocs() map[string]uint64 {
 	// The profile takes in an allocation once a collection has followed it.
 	runtime.GC()
 	runtime.GC()
@@ -158,8 +172,9 @@ func profiledAllocs() uint64 {
 		}
 	}
 	marker := runtime.FuncForPC(reflect.ValueOf(allocating).Pointer()).Name()
-	var total uint64
+	sites := make(map[string]uint64)
 	for _, r := range records {
+		var site []string
 		frames := runtime.CallersFrames(r.Stack())
 		for {
 			f, more := frames.Next()
@@ -167,13 +182,16 @@ func profiledAllocs() uint64 {
 				break
 			}
 			if f.Function == marker {
-				total += uint64(r.AllocObjects)
+				sites[strings.Join(site, " < ")] += uint64(r.AllocObjects)
 				break
+			}
+			if len(site) < 2 && !strings.HasPrefix(f.Function, "runtime.") {
+				site = append(site, path.Base(f.Function))
 			}
 			if !more {
 				break
 			}
 		}
 	}
-	return total
+	return sites
 }
