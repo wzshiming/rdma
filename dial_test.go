@@ -51,7 +51,7 @@ func TestConfigReachesTheSockets(t *testing.T) {
 	full := Config{SendBufferSize: 1 << 16, ReceiveBufferSize: 1 << 17, SendQueueSize: 128, ReceiveQueueSize: 256, MaxInline: 128}
 	want := fakeOptions{sndbuf: 1 << 16, rcvbuf: 1 << 17, sqsize: 128, rqsize: 256, inline: 128}
 	ln := listenFake(t, nw, full)
-	if got := nw.options(ln.s); got != want {
+	if got := nw.options(ln.a); got != want {
 		t.Errorf("listening socket options = %+v, want %+v", got, want)
 	}
 	acc := acceptAsync(ln)

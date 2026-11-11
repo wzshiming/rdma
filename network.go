@@ -1,7 +1,12 @@
 package rdma
 
 import (
+	"context"
+	"errors"
+	"net"
 	"net/netip"
+	"sync"
+	"time"
 
 	"github.com/wzshiming/rdma/rsocket"
 )
@@ -92,4 +97,264 @@ func domain(a *Addr) rsocket.Domain {
 		return rsocket.IPv4
 	}
 	return rsocket.IPv6
+}
+
+// librdmacmEngine carries the connections as rsockets of librdmacm, each in
+// non-blocking mode and attached to the poller of nw.
+type librdmacmEngine struct{ nw network }
+
+// dial connects from laddr, nil letting rdma_cm pick, to raddr.
+func (e librdmacmEngine) dial(ctx context.Context, laddr, raddr *Addr, c Config) (*rstream, error) {
+	s, err := e.nw.socket(domain(raddr))
+	if err != nil {
+		return nil, err
+	}
+	if err := c.apply(s); err != nil {
+		s.Close()
+		return nil, err
+	}
+	if laddr != nil {
+		if err := s.Bind(laddr.addrPort()); err != nil {
+			s.Close()
+			return nil, err
+		}
+	}
+	if err := s.SetNonblock(true); err != nil {
+		s.Close()
+		return nil, err
+	}
+	if err := e.nw.attach(s); err != nil {
+		s.Close()
+		return nil, err
+	}
+	if err := connect(ctx, e.nw, s, raddr); err != nil {
+		e.nw.detach(s)
+		s.Close()
+		return nil, err
+	}
+	return newRstream(e.nw, s), nil
+}
+
+// connect starts a non-blocking connect to raddr and waits for its end, or
+// for ctx, through the poller; s is attached.
+func connect(ctx context.Context, nw network, s socket, raddr *Addr) error {
+	var err error
+	if !nw.run(s, func() { err = s.Connect(raddr.addrPort()) }) {
+		return net.ErrClosed
+	}
+	if !errors.Is(err, errInProgress) {
+		return err
+	}
+	ready, cancel := nw.wait(s, rsocket.PollOut)
+	select {
+	case <-ready:
+		if !nw.run(s, func() { err = s.SocketError() }) {
+			return net.ErrClosed
+		}
+		return err
+	case <-ctx.Done():
+		cancel()
+		return ctx.Err()
+	}
+}
+
+// listen announces on laddr.
+func (e librdmacmEngine) listen(laddr *Addr, backlog int, c Config) (*rlistener, error) {
+	s, err := e.nw.socket(domain(laddr))
+	if err != nil {
+		return nil, err
+	}
+	for _, step := range []func() error{
+		func() error { return c.apply(s) },
+		func() error { return s.Bind(laddr.addrPort()) },
+		func() error { return s.Listen(backlog) },
+		func() error { return s.SetNonblock(true) },
+		func() error { return e.nw.attach(s) },
+	} {
+		if err := step(); err != nil {
+			s.Close()
+			return nil, err
+		}
+	}
+	return &rlistener{nw: e.nw, s: s, closing: make(chan struct{})}, nil
+}
+
+// rlistener is a listening rsocket attached to the poller.
+type rlistener struct {
+	nw network
+	s  socket
+
+	mu      sync.Mutex
+	closed  bool
+	closing chan struct{} // closed by close, waking every accept
+}
+
+// addr returns the address the socket is bound to, the zero AddrPort when
+// unknown.
+func (l *rlistener) addr() netip.AddrPort {
+	a, err := l.s.LocalAddr()
+	if err != nil {
+		return netip.AddrPort{}
+	}
+	return a
+}
+
+func (l *rlistener) isClosed() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.closed
+}
+
+// accept waits for the next connection; after close it returns
+// net.ErrClosed.
+func (l *rlistener) accept() (*rstream, error) {
+	// rpoll sleeps on a listener's event channel, which a new request
+	// stirs, but the librdmacm thread then completes the handshake and
+	// queues the connection without waking pollers, so one interest stays
+	// armed while the queue is asked again now and then.
+	var ready <-chan rsocket.Events
+	cancel := func() {}
+	defer func() { cancel() }()
+	retry := time.NewTimer(acceptRetry)
+	defer retry.Stop()
+	for {
+		if l.isClosed() {
+			return nil, net.ErrClosed
+		}
+		var s socket
+		var err error
+		if !l.nw.run(l.s, func() { s, _, err = l.s.Accept() }) {
+			return nil, net.ErrClosed
+		}
+		if err == nil {
+			// rsockets hand out blocking sockets whatever the listener is.
+			if err := s.SetNonblock(true); err != nil {
+				s.Close()
+				return nil, err
+			}
+			if err := l.nw.attach(s); err != nil {
+				s.Close()
+				return nil, err
+			}
+			return newRstream(l.nw, s), nil
+		}
+		if !errors.Is(err, errAgain) {
+			return nil, err
+		}
+		if ready == nil {
+			ready, cancel = l.nw.wait(l.s, rsocket.PollIn)
+		}
+		retry.Reset(acceptRetry)
+		select {
+		case <-ready:
+			ready = nil
+		case <-retry.C:
+		case <-l.closing:
+			return nil, net.ErrClosed
+		}
+	}
+}
+
+// acceptRetry is how long accept lets the poller wait before it asks the
+// listening socket again.
+const acceptRetry = 10 * time.Millisecond
+
+// close stops listening: a waiting accept returns net.ErrClosed.
+func (l *rlistener) close() error {
+	l.mu.Lock()
+	if l.closed {
+		l.mu.Unlock()
+		return nil
+	}
+	l.closed = true
+	close(l.closing)
+	l.mu.Unlock()
+	l.nw.detach(l.s)
+	return l.s.Close()
+}
+
+// rstream is a connected rsocket attached to the poller, through which every
+// call on it goes.
+type rstream struct {
+	nw network
+	s  socket
+
+	mu      sync.Mutex
+	closed  bool
+	closing chan struct{} // closed by close, waking every wait
+}
+
+func newRstream(nw network, s socket) *rstream {
+	return &rstream{nw: nw, s: s, closing: make(chan struct{})}
+}
+
+// addrs returns the local and the peer's address, the zero AddrPort for one
+// unknown.
+func (s *rstream) addrs() (local, remote netip.AddrPort) {
+	s.nw.run(s.s, func() {
+		if a, err := s.s.LocalAddr(); err == nil {
+			local = a
+		}
+		if a, err := s.s.RemoteAddr(); err == nil {
+			remote = a
+		}
+	})
+	return local, remote
+}
+
+func (s *rstream) read(p []byte) (n int, err error) {
+	if !s.nw.run(s.s, func() { n, err = s.s.Read(p) }) {
+		return 0, net.ErrClosed
+	}
+	return n, err
+}
+
+func (s *rstream) write(p []byte) (n int, err error) {
+	if !s.nw.run(s.s, func() { n, err = s.s.Write(p) }) {
+		return 0, net.ErrClosed
+	}
+	return n, err
+}
+
+// wait blocks until the socket is readable, or writable with dir writable,
+// cancel is closed or the stream is, reporting only the last.
+func (s *rstream) wait(dir direction, cancel <-chan struct{}) error {
+	events := rsocket.PollIn
+	if dir == writable {
+		events = rsocket.PollOut
+	}
+	ready, stop := s.nw.wait(s.s, events)
+	select {
+	case <-ready:
+		return nil
+	case <-s.closing:
+		stop()
+		return net.ErrClosed
+	case <-cancel:
+		stop()
+		return nil
+	}
+}
+
+func (s *rstream) closeWrite() error {
+	// Shutdown may block, so it runs here rather than on the poller, which
+	// leaves the socket alone meanwhile.
+	s.nw.exclude(s.s)
+	err := s.s.Shutdown(rsocket.ShutWrite)
+	s.nw.include(s.s)
+	return err
+}
+
+func (s *rstream) close() error {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil
+	}
+	s.closed = true
+	close(s.closing)
+	s.mu.Unlock()
+	// The poller must have let go of the descriptor before rclose frees it.
+	s.nw.detach(s.s)
+	return s.s.Close()
 }

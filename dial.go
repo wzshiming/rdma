@@ -2,11 +2,8 @@ package rdma
 
 import (
 	"context"
-	"errors"
 	"net"
 	"time"
-
-	"github.com/wzshiming/rdma/rsocket"
 )
 
 // Dialer contains options for connecting to an address, like net.Dialer. The
@@ -81,58 +78,11 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (*Con
 	if err := d.Config.validate(); err != nil {
 		return fail(err)
 	}
-	nw := d.network()
-	s, err := nw.socket(domain(raddr))
+	s, err := librdmacmEngine{d.network()}.dial(ctx, laddr, raddr, d.Config)
 	if err != nil {
 		return fail(err)
 	}
-	if err := d.Config.apply(s); err != nil {
-		s.Close()
-		return fail(err)
-	}
-	if laddr != nil {
-		if err := s.Bind(laddr.addrPort()); err != nil {
-			s.Close()
-			return fail(err)
-		}
-	}
-	if err := s.SetNonblock(true); err != nil {
-		s.Close()
-		return fail(err)
-	}
-	if err := nw.attach(s); err != nil {
-		s.Close()
-		return fail(err)
-	}
-	if err := connect(ctx, nw, s, raddr); err != nil {
-		nw.detach(s)
-		s.Close()
-		return fail(err)
-	}
-	return newConn(nw, s), nil
-}
-
-// connect starts a non-blocking connect to raddr and waits for its end, or
-// for ctx, through the poller; s is attached.
-func connect(ctx context.Context, nw network, s socket, raddr *Addr) error {
-	var err error
-	if !nw.run(s, func() { err = s.Connect(raddr.addrPort()) }) {
-		return net.ErrClosed
-	}
-	if !errors.Is(err, errInProgress) {
-		return err
-	}
-	ready, cancel := nw.wait(s, rsocket.PollOut)
-	select {
-	case <-ready:
-		if !nw.run(s, func() { err = s.SocketError() }) {
-			return net.ErrClosed
-		}
-		return err
-	case <-ctx.Done():
-		cancel()
-		return ctx.Err()
-	}
+	return newConn(s), nil
 }
 
 // withDeadline bounds ctx by the Dialer's Timeout and Deadline; the error of

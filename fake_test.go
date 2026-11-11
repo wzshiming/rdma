@@ -545,8 +545,16 @@ func (s *fakeSocket) SetInline(bytes int) error {
 	return s.setOption("SetInline", &s.opts.inline, bytes)
 }
 
-// options returns the options recorded on a socket of the fake network.
-func (n *fakeNet) options(s socket) fakeOptions {
+// options returns the options recorded on the socket of a listener or a
+// stream of the librdmacm engine on the fake network.
+func (n *fakeNet) options(x any) fakeOptions {
+	var s socket
+	switch x := x.(type) {
+	case *rlistener:
+		s = x.s
+	case *rstream:
+		s = x.s
+	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	return s.(*fakeSocket).opts

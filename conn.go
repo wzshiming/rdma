@@ -7,8 +7,6 @@ import (
 	"os"
 	"sync"
 	"time"
-
-	"github.com/wzshiming/rdma/rsocket"
 )
 
 // Conn is an RDMA stream connection, an rsocket driven in non-blocking mode.
@@ -16,8 +14,7 @@ import (
 // other, calls in the same direction are serialised, and Close wakes them
 // all.
 type Conn struct {
-	nw            network
-	s             socket
+	s             *rstream
 	local, remote net.Addr
 
 	rmu sync.Mutex // serialises Read calls
@@ -26,25 +23,19 @@ type Conn struct {
 	mu          sync.Mutex
 	closed      bool
 	writeClosed bool
-	closing     chan struct{} // closed by Close, waking every wait
 	rd, wd      deadline
 }
 
-// newConn wraps a connected socket attached to the network's poller.
-func newConn(nw network, s socket) *Conn {
-	c := &Conn{nw: nw, s: s, closing: make(chan struct{})}
-	nw.run(s, func() {
-		if a, err := s.LocalAddr(); err == nil {
-			if addr := addrFromAddrPort(a); addr != nil {
-				c.local = addr
-			}
-		}
-		if a, err := s.RemoteAddr(); err == nil {
-			if addr := addrFromAddrPort(a); addr != nil {
-				c.remote = addr
-			}
-		}
-	})
+// newConn wraps a connected stream.
+func newConn(s *rstream) *Conn {
+	c := &Conn{s: s}
+	local, remote := s.addrs()
+	if addr := addrFromAddrPort(local); addr != nil {
+		c.local = addr
+	}
+	if addr := addrFromAddrPort(remote); addr != nil {
+		c.remote = addr
+	}
 	return c
 }
 
@@ -63,27 +54,6 @@ func (c *Conn) isClosed() bool {
 	return c.closed
 }
 
-// await blocks until events hold on the socket, Close is called or the
-// deadline passes, reporting the last two.
-func (c *Conn) await(events rsocket.Events, d *deadline) error {
-	for {
-		expired, changed := d.state()
-		if expired {
-			return os.ErrDeadlineExceeded
-		}
-		ready, cancel := c.nw.wait(c.s, events)
-		select {
-		case <-ready:
-			return nil
-		case <-c.closing:
-			cancel()
-			return net.ErrClosed
-		case <-changed:
-			cancel()
-		}
-	}
-}
-
 // Read reads data from the connection. It returns io.EOF once the peer has
 // closed its sending side and every byte before that has been read.
 func (c *Conn) Read(p []byte) (int, error) {
@@ -93,21 +63,18 @@ func (c *Conn) Read(p []byte) (int, error) {
 		if c.isClosed() {
 			return 0, c.opError("read", net.ErrClosed)
 		}
-		if expired, _ := c.rd.state(); expired {
+		expired, changed := c.rd.state()
+		if expired {
 			return 0, c.opError("read", os.ErrDeadlineExceeded)
 		}
-		var n int
-		var err error
-		if !c.nw.run(c.s, func() { n, err = c.s.Read(p) }) {
-			return 0, c.opError("read", net.ErrClosed)
-		}
+		n, err := c.s.read(p)
 		switch {
 		case err == nil || err == io.EOF:
 			return n, err
 		case !errors.Is(err, errAgain):
 			return n, c.opError("read", err)
 		}
-		if err := c.await(rsocket.PollIn, &c.rd); err != nil {
+		if err := c.s.wait(readable, changed); err != nil {
 			return 0, c.opError("read", err)
 		}
 	}
@@ -129,17 +96,14 @@ func (c *Conn) Write(p []byte) (int, error) {
 		case writeClosed:
 			return total, c.opError("write", errPipe)
 		}
-		if expired, _ := c.wd.state(); expired {
+		expired, changed := c.wd.state()
+		if expired {
 			return total, c.opError("write", os.ErrDeadlineExceeded)
 		}
 		if len(p) == 0 {
 			return total, nil
 		}
-		var n int
-		var err error
-		if !c.nw.run(c.s, func() { n, err = c.s.Write(p) }) {
-			return total, c.opError("write", net.ErrClosed)
-		}
+		n, err := c.s.write(p)
 		total += n
 		p = p[n:]
 		if err != nil && !errors.Is(err, errAgain) {
@@ -148,7 +112,7 @@ func (c *Conn) Write(p []byte) (int, error) {
 		if err == nil && n > 0 {
 			continue
 		}
-		if err := c.await(rsocket.PollOut, &c.wd); err != nil {
+		if err := c.s.wait(writable, changed); err != nil {
 			return total, c.opError("write", err)
 		}
 	}
@@ -172,12 +136,7 @@ func (c *Conn) CloseWrite() error {
 	}
 	c.writeClosed = true
 	c.mu.Unlock()
-	// Shutdown may block, so it runs here rather than on the poller, which
-	// leaves the socket alone meanwhile.
-	c.nw.exclude(c.s)
-	err := c.s.Shutdown(rsocket.ShutWrite)
-	c.nw.include(c.s)
-	if err != nil {
+	if err := c.s.closeWrite(); err != nil {
 		return c.opError("close", err)
 	}
 	return nil
@@ -193,13 +152,10 @@ func (c *Conn) Close() error {
 		return c.opError("close", net.ErrClosed)
 	}
 	c.closed = true
-	close(c.closing)
 	c.rd.stop()
 	c.wd.stop()
 	c.mu.Unlock()
-	// The poller must have let go of the descriptor before rclose frees it.
-	c.nw.detach(c.s)
-	if err := c.s.Close(); err != nil {
+	if err := c.s.close(); err != nil {
 		return c.opError("close", err)
 	}
 	return nil
