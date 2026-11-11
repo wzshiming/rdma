@@ -209,6 +209,34 @@ func TestGrantsRotateOverTheTable(t *testing.T) {
 	}
 }
 
+// The peer's rs_send_credits writes a grant in the byte order of this host,
+// RS_CONN_FLAG_NET telling it, and rs_write_data reads target_sgl natively.
+func TestGrantTableInHostByteOrder(t *testing.T) {
+	c := testConfig()
+	c.BigEndian = true
+	peer := testPeer
+	peer.FirstGrant.Length = 100
+	l := &recorder{}
+	s := rsproto.NewStream(l, c)
+	s.Connect(peer)
+	if err := s.Commit(len(s.Reserve())); err != nil {
+		t.Fatalf("Commit of the first grant = %v", err)
+	}
+
+	second := rsproto.SGE{Addr: 0x00007f1000010000, Key: 0x7b23, Length: 200}
+	grant(s, c, 1, second, rsproto.DefaultReceiveQueueSize)
+	v := s.Reserve()
+	if len(v) != int(second.Length) {
+		t.Fatalf("Reserve() on a big-endian host with %+v in entry 1 = %d bytes, want %d", second, len(v), second.Length)
+	}
+	if err := s.Commit(len(v)); err != nil {
+		t.Fatalf("Commit(%d) = %v", len(v), err)
+	}
+	if got := l.posts[len(l.posts)-1]; got.addr != second.Addr || got.key != second.Key {
+		t.Errorf("Commit on a big-endian host wrote to %#x under %#x, want %#x under %#x", got.addr, got.key, second.Addr, second.Key)
+	}
+}
+
 func TestStreamConnData(t *testing.T) {
 	c := testConfig()
 	little := rsproto.ConnData{

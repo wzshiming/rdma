@@ -27,8 +27,9 @@ type Config struct {
 // Stream is the state machine of one rsockets stream connection. It does no
 // I/O but through its Link, and its caller drives it one call at a time.
 type Stream struct {
-	link Link
-	c    Config
+	link  Link
+	c     Config
+	order binary.ByteOrder // of the host, which the grant table is in
 
 	targetSGE int // the entry of the grant table data goes to
 	sbufPos   int // where the free bytes of the send buffer start: ssgl[0].addr
@@ -40,7 +41,7 @@ type Stream struct {
 // NewStream returns a stream on memory the caller registered, as
 // rs_create_ep leaves it for a connection to be set up.
 func NewStream(l Link, c Config) *Stream {
-	return &Stream{link: l, c: c}
+	return &Stream{link: l, c: c, order: ConnData{BigEndian: c.BigEndian}.ByteOrder()}
 }
 
 // ConnData mirrors rs_format_conn_data: the connection data to send the peer.
@@ -63,11 +64,11 @@ func (s *Stream) Connect(peer ConnData) {
 // grant returns entry i of the grant table, target_sgl[i] in C, which the
 // peer writes and the stream uses up.
 func (s *Stream) grant(i int) SGE {
-	return GetSGE(s.c.GrantTable.Buf[i*SGESize:], binary.LittleEndian)
+	return GetSGE(s.c.GrantTable.Buf[i*SGESize:], s.order)
 }
 
 func (s *Stream) setGrant(i int, g SGE) {
-	PutSGE(s.c.GrantTable.Buf[i*SGESize:], binary.LittleEndian, g)
+	PutSGE(s.c.GrantTable.Buf[i*SGESize:], s.order, g)
 }
 
 // CanSend mirrors rs_can_send: whether Reserve would lend room now.
