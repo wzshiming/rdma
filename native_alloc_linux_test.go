@@ -140,7 +140,9 @@ func callerAllocs(f func()) (caller, all uint64) {
 func allocating(f func()) { f() }
 
 // profiledAllocs returns how many allocations the heap profile shows under
-// allocating.
+// allocating. It leaves out the caches of type assertions and type switches,
+// which the runtime rebuilds at random on a miss until they hold every type
+// seen, not per call.
 func profiledAllocs() uint64 {
 	// The profile takes in an allocation once a collection has followed it.
 	runtime.GC()
@@ -161,6 +163,9 @@ func profiledAllocs() uint64 {
 		frames := runtime.CallersFrames(r.Stack())
 		for {
 			f, more := frames.Next()
+			if f.Function == "runtime.buildTypeAssertCache" || f.Function == "runtime.buildInterfaceSwitchCache" {
+				break
+			}
 			if f.Function == marker {
 				total += uint64(r.AllocObjects)
 				break
