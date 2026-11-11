@@ -57,17 +57,18 @@ func (e *MemEnd) Register(r Region) {
 func (e *MemEnd) PostWriteMsg(id uint64, sgl []Segment, msg Msg, addr uint64, key uint32) error {
 	p := memSend{id: id, nsge: len(sgl), msg: msg, addr: addr, key: key}
 	copy(p.sgl[:], sgl)
-	e.link.mu.Lock()
-	defer e.link.mu.Unlock()
-	e.sends = append(e.sends, p)
-	return nil
+	return e.post(p)
 }
 
 // PostMsg puts the message word alone on the link for the peer.
 func (e *MemEnd) PostMsg(id uint64, msg Msg) error {
+	return e.post(memSend{id: id, msg: msg})
+}
+
+func (e *MemEnd) post(p memSend) error {
 	e.link.mu.Lock()
 	defer e.link.mu.Unlock()
-	e.sends = append(e.sends, memSend{id: id, msg: msg})
+	e.sends = append(e.sends, p)
 	return nil
 }
 
