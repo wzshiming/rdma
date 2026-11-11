@@ -27,7 +27,8 @@ type memLink struct {
 }
 
 // MemEnd is one end of a link NewMemLink makes: the Link of the stream on
-// its side.
+// its side, and where that stream's events come from, Deliver for
+// Stream.Received, Completion for Stream.Sent and Down for Stream.LinkDown.
 type MemEnd struct {
 	link  *memLink
 	peer  *MemEnd
@@ -119,11 +120,11 @@ func (e *MemEnd) refusal() error {
 	return err
 }
 
-// FailSend makes the next send of this end fail with err when the peer would
-// take it, as a send the transport gives up on, IBV_WC_RETRY_EXC_ERR among
-// them, leaves the queue pair in the error state: the link carries nothing
-// after it, and the sends in flight both ways, and those posted later,
-// complete with err as well.
+// FailSend makes the next send of this end complete with err when the peer
+// would take it, as a send the transport gives up on completes with
+// IBV_WC_RETRY_EXC_ERR. The queue pair is then in the error state: the link
+// carries nothing more, and the sends in flight both ways, and those posted
+// later, complete with err as well.
 func (e *MemEnd) FailSend(err error) {
 	e.link.mu.Lock()
 	defer e.link.mu.Unlock()
@@ -168,10 +169,12 @@ func (e *MemEnd) Down() error {
 // Deliver carries the oldest message the peer posted and this end has not
 // taken into the oldest receive posted here: its bytes into the memory
 // registered here and its word, returned for Stream.Received. It reports
-// false when there is no message, or no receive, which leaves the message on
-// the link, with those behind it, for a later Deliver to retry as the RNR
-// retry of rnr_retry_count 7 does without end. Deliver writes the memory of
-// this end, so the goroutine that drives its stream calls it.
+// false when there is no message, when the message fails instead, as
+// FailSend and a write outside registered memory make it, or when there is
+// no receive, which leaves the message on the link, with those behind it,
+// for a later Deliver to retry as the RNR retry of rnr_retry_count 7 does
+// without end. Deliver writes the memory of this end, so the goroutine that
+// drives its stream calls it.
 func (e *MemEnd) Deliver() (Msg, bool) {
 	e.link.mu.Lock()
 	defer e.link.mu.Unlock()
