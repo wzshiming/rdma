@@ -41,7 +41,11 @@ type Stream struct {
 	sseqNo    uint16     // data messages sent, wrapping
 	sseqComp  uint16     // the sseqNo the peer's credits stop sending at
 	sgl       [1]Segment // of a post, here so that passing it allocates nothing
-	err       error
+
+	rbufOffset  int // where the arrived bytes start in the receive buffer: rbuf_offset
+	rbufArrived int // bytes arrived and not yet consumed
+
+	err error
 }
 
 // recvID is the id of every receive, rs_recv_wr_id(0).
@@ -146,10 +150,30 @@ func (s *Stream) Sent(id uint64, err error) {
 // Received takes a message word the peer sent, as rs_poll_cq does, and posts
 // a receive in place of the one it used up.
 func (s *Stream) Received(msg Msg) {
-	if msg.Op() == OpSGL {
+	switch msg.Op() {
+	case OpSGL:
 		s.sseqComp = uint16(msg.Data())
+	case OpData:
+		s.rbufArrived += int(msg.Data())
 	}
 	s.link.PostRecv(recvID)
+}
+
+// Peek lends the bytes that have arrived and lie contiguous in the receive
+// buffer, in the order they arrived: what rs_peek copies, without the copy.
+func (s *Stream) Peek() []byte {
+	rbuf := s.c.ReceiveBuffer.Buf
+	end := s.rbufOffset + min(s.rbufArrived, len(rbuf)-s.rbufOffset)
+	return rbuf[s.rbufOffset:end:end]
+}
+
+// Consume ends the loan of Peek with the first n bytes of the view read, as
+// rrecv takes them.
+func (s *Stream) Consume(n int) {
+	s.rbufArrived -= n
+	if s.rbufOffset += n; s.rbufOffset == len(s.c.ReceiveBuffer.Buf) {
+		s.rbufOffset = 0
+	}
 }
 
 // Err returns why the stream broke, nil while it has not.

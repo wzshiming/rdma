@@ -1,8 +1,10 @@
 package rsproto_test
 
 import (
+	"bytes"
 	"errors"
 	"io"
+	"math/rand/v2"
 	"slices"
 	"testing"
 
@@ -71,12 +73,12 @@ func viewOffset(t *testing.T, buf, v []byte) int {
 	for off := range buf {
 		if &buf[off] == &v[0] {
 			if off+len(v) > len(buf) || cap(v) != len(v) {
-				t.Fatalf("view [%d:%d] of capacity %d does not lie inside the send buffer of %d bytes", off, off+len(v), cap(v), len(buf))
+				t.Fatalf("view [%d:%d] of capacity %d does not lie inside the buffer of %d bytes", off, off+len(v), cap(v), len(buf))
 			}
 			return off
 		}
 	}
-	t.Fatalf("view of %d bytes is not in the send buffer", len(v))
+	t.Fatalf("view of %d bytes is not in the buffer", len(v))
 	return 0
 }
 
@@ -445,6 +447,57 @@ func TestEveryArrivalPostsAReceive(t *testing.T) {
 	s.Received(rsproto.MakeMsg(rsproto.OpSGL, rsproto.DefaultReceiveQueueSize))
 	if want := []uint64{1 << 63, 1 << 63}; !slices.Equal(l.recvs, want) {
 		t.Errorf("a data and a credit message arriving posted receives %#x, want %#x", l.recvs, want)
+	}
+}
+
+// peerWrites does what the peer's rs_write_data does with b: it writes b at
+// off into the receive buffer of c, and the message for it arrives at s.
+func peerWrites(s *rsproto.Stream, c rsproto.Config, off int, b []byte) {
+	copy(c.ReceiveBuffer.Buf[off:], b)
+	s.Received(rsproto.MakeMsg(rsproto.OpData, uint32(len(b))))
+}
+
+// readAll reads what has arrived at s through the views Peek lends, at most
+// chunk bytes of each, failing t unless every view lies inside rbuf.
+func readAll(t *testing.T, s *rsproto.Stream, rbuf []byte, chunk int) []byte {
+	t.Helper()
+	var got []byte
+	for v := s.Peek(); len(v) > 0; v = s.Peek() {
+		viewOffset(t, rbuf, v)
+		n := min(len(v), chunk)
+		got = append(got, v[:n]...)
+		s.Consume(n)
+	}
+	return got
+}
+
+// The receive half of the borrow guarantee: rrecv takes the bytes of the
+// messages rs_poll_cq queued in their order from rbuf_offset on, going on at
+// the start of the receive buffer past its end, where the peer's grants, the
+// halves of the buffer in turn, have put them.
+func TestViewsComeInArrivalOrderAcrossTheWrap(t *testing.T) {
+	c := testConfig()
+	s := rsproto.NewStream(&recorder{}, c)
+	s.Connect(testPeer)
+	rbuf := c.ReceiveBuffer.Buf
+	half := len(rbuf) / 2
+	rng := rand.NewChaCha8([32]byte{})
+
+	var sent, got []byte
+	for _, round := range [][]struct{ off, n int }{
+		{{0, 20000}, {20000, half - 20000}},
+		{{half, 30000}, {half + 30000, half - 30000}, {0, 1000}},
+	} {
+		for _, m := range round {
+			b := make([]byte, m.n)
+			rng.Read(b)
+			peerWrites(s, c, m.off, b)
+			sent = append(sent, b...)
+		}
+		got = append(got, readAll(t, s, rbuf, 25000)...)
+	}
+	if !bytes.Equal(got, sent) {
+		t.Errorf("the views lent %d bytes, not the %d bytes the peer wrote in order", len(got), len(sent))
 	}
 }
 
