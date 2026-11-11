@@ -5,7 +5,9 @@ import (
 	"errors"
 	"io"
 	"math/rand/v2"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/wzshiming/rdma/internal/rsproto"
@@ -423,4 +425,83 @@ func TestLinkLossIsNoOrderlyEnd(t *testing.T) {
 			}
 		}
 	})
+}
+
+// The ends serve two sides driven from goroutines of their own, as an engine
+// drives them: on each side a goroutine takes the events of its end and
+// another moves bytes through the views of its stream, both under the side's
+// lock but for the copy into or out of the view. The bytes cross intact, and
+// the race detector finds no access to the memory of a side that the link
+// leaves unordered.
+func TestEndsServeTheirOwnGoroutines(t *testing.T) {
+	a, b := join(smallConfig(0xa0000000), smallConfig(0xb0000000))
+	sent := make([]byte, 1<<20)
+	rand.NewChaCha8([32]byte{1}).Read(sent)
+	var mu [2]sync.Mutex
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for i, x := range []*side{a, b} {
+		wg.Go(func() {
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				mu[i].Lock()
+				for x.deliver() || x.complete() {
+				}
+				mu[i].Unlock()
+				runtime.Gosched()
+			}
+		})
+	}
+	wg.Go(func() {
+		defer func() {
+			mu[0].Lock()
+			a.s.CloseWrite()
+			mu[0].Unlock()
+		}()
+		for n := 0; n < len(sent); {
+			mu[0].Lock()
+			v := a.s.Reserve()
+			mu[0].Unlock()
+			if v == nil {
+				runtime.Gosched()
+				continue
+			}
+			m := copy(v, sent[n:])
+			mu[0].Lock()
+			err := a.s.Commit(m)
+			mu[0].Unlock()
+			if err != nil {
+				t.Errorf("Commit(%d) = %v", m, err)
+				return
+			}
+			n += m
+		}
+	})
+
+	var got []byte
+	for {
+		mu[1].Lock()
+		v, eof := b.s.Peek(), b.s.EOF()
+		mu[1].Unlock()
+		if eof {
+			break
+		}
+		if len(v) == 0 {
+			runtime.Gosched()
+			continue
+		}
+		got = append(got, v...)
+		mu[1].Lock()
+		b.s.Consume(len(v))
+		mu[1].Unlock()
+	}
+	close(stop)
+	wg.Wait()
+	if !bytes.Equal(got, sent) {
+		t.Errorf("b read %d bytes that differ from the %d a wrote", len(got), len(sent))
+	}
 }
