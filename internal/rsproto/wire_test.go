@@ -70,36 +70,42 @@ func TestMsgWireFormat(t *testing.T) {
 	}
 }
 
-// A grant entry is a struct rs_sge, an address, a key and a length, which
-// rs_send_credits writes into the peer's grant table field by field in one
-// byte order, and which rs_can_send and rs_write_data read in place.
-func TestSGEWireFormat(t *testing.T) {
+// rs_send_credits writes a grant entry, a struct rs_sge, into the peer's
+// grant table in host order, swapped by bswap_64 and bswap_32 when
+// rs_save_conn_data found the peer's RS_CONN_FLAG_NET at odds with the host
+// (RS_OPT_SWAP_SGL): either way the entry is in the peer's own order, the
+// one rs_can_send and rs_write_data read their table in.
+func TestGrantEntryWireFormat(t *testing.T) {
 	grant := rsproto.SGE{Addr: 0x00007f1122334400, Key: 0x55667788, Length: 0x00010000}
 	tests := []struct {
-		c     string // the C function and case that writes the entry
-		order binary.ByteOrder
-		wire  [rsproto.SGESize]byte
+		c    string                     // the C function and cases that write the entry
+		peer [rsproto.ConnDataSize]byte // the connection data the peer sent
+		wire [rsproto.SGESize]byte
 	}{
 		{
-			"rs_send_credits on a little-endian host for a little-endian peer, in host order",
-			binary.LittleEndian,
+			"rs_send_credits for a little-endian peer, in host order on a little-endian host and swapped on a big-endian one",
+			stockConnDataWire,
 			[rsproto.SGESize]byte{0x00, 0x44, 0x33, 0x22, 0x11, 0x7f, 0x00, 0x00, 0x88, 0x77, 0x66, 0x55, 0x00, 0x00, 0x01, 0x00},
 		},
 		{
-			"rs_send_credits on a little-endian host for a big-endian peer, swapped by bswap_64 and bswap_32",
-			binary.BigEndian,
+			"rs_send_credits for a big-endian peer, swapped on a little-endian host and in host order on a big-endian one",
+			bigEndianConnDataWire,
 			[rsproto.SGESize]byte{0x00, 0x00, 0x7f, 0x11, 0x22, 0x33, 0x44, 0x00, 0x55, 0x66, 0x77, 0x88, 0x00, 0x01, 0x00, 0x00},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.c, func(t *testing.T) {
-			var got [rsproto.SGESize]byte
-			rsproto.PutSGE(got[:], tt.order, grant)
-			if got != tt.wire {
-				t.Errorf("PutSGE(%v, %+v) = % x, want % x", tt.order, grant, got, tt.wire)
+			peer, err := rsproto.DecodeConnData(tt.peer[:])
+			if err != nil {
+				t.Fatal(err)
 			}
-			if back := rsproto.GetSGE(tt.wire[:], tt.order); back != grant {
-				t.Errorf("GetSGE(% x, %v) = %+v, want %+v", tt.wire, tt.order, back, grant)
+			var got [rsproto.SGESize]byte
+			rsproto.PutSGE(got[:], peer.ByteOrder(), grant)
+			if got != tt.wire {
+				t.Errorf("PutSGE(%v, %+v) = % x, want % x", peer.ByteOrder(), grant, got, tt.wire)
+			}
+			if back := rsproto.GetSGE(tt.wire[:], peer.ByteOrder()); back != grant {
+				t.Errorf("GetSGE(% x, %v) = %+v, want %+v", tt.wire, peer.ByteOrder(), back, grant)
 			}
 		})
 	}

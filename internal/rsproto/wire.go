@@ -104,6 +104,16 @@ const (
 	connFlagIOMap = 1 << 1 // RS_CONN_FLAG_IOMAP
 )
 
+// ByteOrder is the byte order of the sender's host, and so of the grant
+// entries written for it: rs_send_credits writes them in its own host order,
+// swapped when the hosts differ (RS_OPT_SWAP_SGL).
+func (c ConnData) ByteOrder() binary.ByteOrder {
+	if c.BigEndian {
+		return binary.BigEndian
+	}
+	return binary.LittleEndian
+}
+
 // Encode mirrors rs_format_conn_data, which sets RS_CONN_FLAG_IOMAP even for
 // an iomap of 0 entries, the only size Encode writes.
 func (c ConnData) Encode() [ConnDataSize]byte {
