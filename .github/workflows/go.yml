@@ -285,6 +285,7 @@ jobs:
         cut -d ' ' -f 1-3 /proc/loadavg > "$RUNNER_TEMP/load-after"
 
     - name: Summarize the benchmarks
+      # The log repeats the summary, which the API does not serve.
       shell: bash
       run: |
         arch=$(dpkg-architecture -qDEB_HOST_MULTIARCH)
@@ -305,7 +306,7 @@ jobs:
           echo '```'
           go tool benchstat -col /engine "$RUNNER_TEMP/bench.txt"
           echo '```'
-        } >> "$GITHUB_STEP_SUMMARY"
+        } | tee -a "$GITHUB_STEP_SUMMARY"
 
     - name: Keep the benchmark output
       uses: actions/upload-artifact@v7
