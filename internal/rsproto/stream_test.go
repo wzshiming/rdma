@@ -237,6 +237,25 @@ func TestGrantTableInHostByteOrder(t *testing.T) {
 	}
 }
 
+// rs_init_bufs leaves sq_size - RS_QP_CTRL_SIZE send queue entries for data,
+// rs_write_data takes one per message, and rs_poll_cq gives one back for each
+// completed data send.
+func TestCompletionGivesBackQueueEntry(t *testing.T) {
+	c := testConfig()
+	c.SendQueueSize = rsproto.QPMinSize
+	l := &recorder{}
+	s := rsproto.NewStream(l, c)
+	s.Connect(testPeer)
+
+	if n, want := sendWhileCan(t, s, 100), rsproto.QPMinSize-rsproto.QPCtrlSize; n != want {
+		t.Fatalf("sent %d messages on a send queue of %d entries, want %d", n, rsproto.QPMinSize, want)
+	}
+	s.Sent(l.posts[0].id, nil)
+	if n := sendWhileCan(t, s, 100); n != 1 {
+		t.Fatalf("sent %d messages after one completion, want 1", n)
+	}
+}
+
 func TestStreamConnData(t *testing.T) {
 	c := testConfig()
 	little := rsproto.ConnData{

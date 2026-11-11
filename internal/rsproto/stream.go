@@ -32,6 +32,7 @@ type Stream struct {
 	order binary.ByteOrder // of the host, which the grant table is in
 
 	targetSGE int // the entry of the grant table data goes to
+	sqeAvail  int // send queue entries free for data
 	sbufPos   int // where the free bytes of the send buffer start: ssgl[0].addr
 	sseqNo    int // data messages sent
 	sseqComp  int // the sseqNo the peer's credits stop sending at
@@ -41,7 +42,12 @@ type Stream struct {
 // NewStream returns a stream on memory the caller registered, as
 // rs_create_ep leaves it for a connection to be set up.
 func NewStream(l Link, c Config) *Stream {
-	return &Stream{link: l, c: c, order: ConnData{BigEndian: c.BigEndian}.ByteOrder()}
+	return &Stream{
+		link:     l,
+		c:        c,
+		order:    ConnData{BigEndian: c.BigEndian}.ByteOrder(),
+		sqeAvail: c.SendQueueSize - QPCtrlSize,
+	}
 }
 
 // ConnData mirrors rs_format_conn_data: the connection data to send the peer.
@@ -73,7 +79,7 @@ func (s *Stream) setGrant(i int, g SGE) {
 
 // CanSend mirrors rs_can_send: whether Reserve would lend room now.
 func (s *Stream) CanSend() bool {
-	return s.sseqNo != s.sseqComp && s.grant(s.targetSGE).Length != 0
+	return s.sqeAvail > 0 && s.sseqNo != s.sseqComp && s.grant(s.targetSGE).Length != 0
 }
 
 // Reserve lends the room of the send buffer that one message can carry now,
@@ -90,6 +96,7 @@ func (s *Stream) Reserve() []byte {
 // data message, as rs_write_data does.
 func (s *Stream) Commit(n int) error {
 	s.sseqNo++
+	s.sqeAvail--
 	g := s.grant(s.targetSGE)
 	addr, key := g.Addr, g.Key
 	g.Addr += uint64(n)
@@ -104,6 +111,12 @@ func (s *Stream) Commit(n int) error {
 	msg := MakeMsg(OpData, uint32(n))
 	s.link.PostWriteMsg(0, s.sgl[:1], msg, addr, key)
 	return nil
+}
+
+// Sent takes the completion of the post with the given id, as rs_poll_cq
+// does.
+func (s *Stream) Sent(id uint64, err error) {
+	s.sqeAvail++
 }
 
 // Received takes a message word the peer sent, as rs_poll_cq does.
