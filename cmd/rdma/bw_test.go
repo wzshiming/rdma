@@ -22,8 +22,14 @@ func TestParseBW(t *testing.T) {
 		},
 		{
 			"client with every flag",
-			[]string{"-connect", "rdma.example:4791", "-size", "1048576", "-duration", "2s", "-conns", "4", "-sndbuf", "1048576", "-rcvbuf", "1048576", "-sqsize", "512", "-rqsize", "512", "-inline", "0"},
-			bwOptions{endpoint: endpoint{connect: "rdma.example:4791", sndbuf: 1 << 20, rcvbuf: 1 << 20, sqsize: 512, rqsize: 512}, size: 1 << 20, duration: 2 * time.Second, conns: 4},
+			[]string{"-connect", "rdma.example:4791", "-engine", "native", "-size", "1048576", "-duration", "2s", "-conns", "4", "-sndbuf", "1048576", "-rcvbuf", "1048576", "-sqsize", "512", "-rqsize", "512", "-inline", "0"},
+			bwOptions{endpoint: endpoint{connect: "rdma.example:4791", engine: "native", sndbuf: 1 << 20, rcvbuf: 1 << 20, sqsize: 512, rqsize: 512}, size: 1 << 20, duration: 2 * time.Second, conns: 4},
+			"",
+		},
+		{
+			"server on the librdmacm engine",
+			[]string{"-listen", ":4791", "-engine", "librdmacm", "-conns", "2"},
+			bwOptions{endpoint: endpoint{listen: ":4791", engine: "librdmacm"}, size: 64 << 10, duration: 10 * time.Second, conns: 2},
 			"",
 		},
 		{"-h asks for help", []string{"-h"}, bwOptions{}, "help"},
@@ -33,6 +39,7 @@ func TestParseBW(t *testing.T) {
 		{"zero duration", []string{"-connect", "h:1", "-duration", "0"}, bwOptions{}, "-duration must be positive"},
 		{"malformed duration", []string{"-connect", "h:1", "-duration", "2"}, bwOptions{}, `invalid value "2" for flag -duration`},
 		{"zero connections", []string{"-connect", "h:1", "-conns", "0"}, bwOptions{}, "-conns must be at least 1"},
+		{"unknown engine", []string{"-listen", ":1", "-engine", "rsockets"}, bwOptions{}, "-engine must be native or librdmacm"},
 		{"pingpong's -n is unknown", []string{"-connect", "h:1", "-n", "10"}, bwOptions{}, "flag provided but not defined: -n"},
 		{"stray argument", []string{"-connect", "h:1", "extra"}, bwOptions{}, `unexpected argument "extra"`},
 	}
@@ -56,7 +63,7 @@ func TestBWUsage(t *testing.T) {
 		stderr string
 	}{
 		{"help lists the flags and the fields", []string{"help", "bw"}, exitOK,
-			[]string{"Usage: rdma bw", "-listen", "-connect", "-size", "-duration", "-conns", "-sndbuf", "-rcvbuf", "-sqsize", "-rqsize", "-inline", "-keep", "connections", "bytes", "duration", "MiB/s", "Gbit/s"}, ""},
+			[]string{"Usage: rdma bw", "-listen", "-connect", "-engine", "-size", "-duration", "-conns", "-sndbuf", "-rcvbuf", "-sqsize", "-rqsize", "-inline", "-keep", "connections", "bytes", "duration", "MiB/s", "Gbit/s"}, ""},
 		{"no endpoint is a usage error", []string{"bw"}, exitUsage, nil, "rdma bw: one of -listen or -connect is required"},
 		{"a bad flag is a usage error", []string{"bw", "-connect", "h:1", "-conns", "0"}, exitUsage, nil, "-conns must be at least 1"},
 	}

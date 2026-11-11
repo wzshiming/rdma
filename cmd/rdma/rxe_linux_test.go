@@ -25,7 +25,8 @@ const smokeTimeout = 30 * time.Second
 
 // TestRXECLI builds the command and runs it against itself on the rdmatest
 // device: the server side listens on port 0 and the client side connects
-// to the address the server prints.
+// to the address the server prints, both on the same engine, the stream
+// commands once on each.
 func TestRXECLI(t *testing.T) {
 	dev := rdmatest.Device(t)
 	bin := buildCLI(t)
@@ -51,62 +52,66 @@ func TestRXECLI(t *testing.T) {
 		}
 	})
 
-	t.Run("pingpong", func(t *testing.T) {
-		addr, wait := startServer(t, bin, "pingpong", "-listen", net.JoinHostPort(ip, "0"))
-		out := runBinary(t, bin, "pingpong", "-connect", addr, "-n", "1000", "-size", "64")
-		wait(t)
-		f := fields(t, out)
-		if f["iterations"] != "1000" || f["size"] != "64" {
-			t.Errorf("iterations = %q, size = %q, want 1000 and 64", f["iterations"], f["size"])
-		}
-		var prev time.Duration
-		for _, k := range []string{"min", "median", "p99", "max"} {
-			d, err := time.ParseDuration(f[k])
-			if err != nil || d <= 0 || d < prev {
-				t.Errorf("%s = %q (%v), want a positive duration of at least %v", k, f[k], err, prev)
-			}
-			prev = d
-		}
-		if rate, err := strconv.ParseFloat(f["msg/s"], 64); err != nil || rate <= 0 {
-			t.Errorf("msg/s = %q (%v), want a positive number", f["msg/s"], err)
-		}
-	})
+	for _, engine := range []string{"native", "librdmacm"} {
+		t.Run("engine="+engine, func(t *testing.T) {
+			t.Run("pingpong", func(t *testing.T) {
+				addr, wait := startServer(t, bin, "pingpong", "-listen", net.JoinHostPort(ip, "0"), "-engine", engine)
+				out := runBinary(t, bin, "pingpong", "-connect", addr, "-engine", engine, "-n", "1000", "-size", "64")
+				wait(t)
+				f := fields(t, out)
+				if f["iterations"] != "1000" || f["size"] != "64" {
+					t.Errorf("iterations = %q, size = %q, want 1000 and 64", f["iterations"], f["size"])
+				}
+				var prev time.Duration
+				for _, k := range []string{"min", "median", "p99", "max"} {
+					d, err := time.ParseDuration(f[k])
+					if err != nil || d <= 0 || d < prev {
+						t.Errorf("%s = %q (%v), want a positive duration of at least %v", k, f[k], err, prev)
+					}
+					prev = d
+				}
+				if rate, err := strconv.ParseFloat(f["msg/s"], 64); err != nil || rate <= 0 {
+					t.Errorf("msg/s = %q (%v), want a positive number", f["msg/s"], err)
+				}
+			})
 
-	t.Run("bw", func(t *testing.T) {
-		addr, wait := startServer(t, bin, "bw", "-listen", net.JoinHostPort(ip, "0"))
-		out := runBinary(t, bin, "bw", "-connect", addr, "-duration", "2s")
-		wait(t)
-		f := fields(t, out)
-		if f["connections"] != "1" || f["size"] != "65536" {
-			t.Errorf("connections = %q, size = %q, want 1 and 65536", f["connections"], f["size"])
-		}
-		if n, err := strconv.ParseInt(f["bytes"], 10, 64); err != nil || n <= 0 {
-			t.Errorf("bytes = %q (%v), want a positive count", f["bytes"], err)
-		}
-		if d, err := time.ParseDuration(f["duration"]); err != nil || d < 2*time.Second {
-			t.Errorf("duration = %q (%v), want at least 2s", f["duration"], err)
-		}
-		for _, k := range []string{"MiB/s", "Gbit/s"} {
-			if rate, err := strconv.ParseFloat(f[k], 64); err != nil || rate <= 0 {
-				t.Errorf("%s = %q (%v), want a positive number", k, f[k], err)
-			}
-		}
-	})
+			t.Run("bw", func(t *testing.T) {
+				addr, wait := startServer(t, bin, "bw", "-listen", net.JoinHostPort(ip, "0"), "-engine", engine)
+				out := runBinary(t, bin, "bw", "-connect", addr, "-engine", engine, "-duration", "2s")
+				wait(t)
+				f := fields(t, out)
+				if f["connections"] != "1" || f["size"] != "65536" {
+					t.Errorf("connections = %q, size = %q, want 1 and 65536", f["connections"], f["size"])
+				}
+				if n, err := strconv.ParseInt(f["bytes"], 10, 64); err != nil || n <= 0 {
+					t.Errorf("bytes = %q (%v), want a positive count", f["bytes"], err)
+				}
+				if d, err := time.ParseDuration(f["duration"]); err != nil || d < 2*time.Second {
+					t.Errorf("duration = %q (%v), want at least 2s", f["duration"], err)
+				}
+				for _, k := range []string{"MiB/s", "Gbit/s"} {
+					if rate, err := strconv.ParseFloat(f[k], 64); err != nil || rate <= 0 {
+						t.Errorf("%s = %q (%v), want a positive number", k, f[k], err)
+					}
+				}
+			})
 
-	t.Run("bw with two connections", func(t *testing.T) {
-		addr, wait := startServer(t, bin, "bw", "-listen", net.JoinHostPort(ip, "0"), "-conns", "2")
-		out := runBinary(t, bin, "bw", "-connect", addr, "-conns", "2", "-duration", "1s", "-size", "4096")
-		wait(t)
-		f := fields(t, out)
-		if f["connections"] != "2" || f["size"] != "4096" {
-			t.Errorf("connections = %q, size = %q, want 2 and 4096", f["connections"], f["size"])
-		}
-		for _, k := range []string{"connection 0", "connection 1"} {
-			if !strings.HasPrefix(f[k], "bytes ") {
-				t.Errorf("%s = %q, want a per-connection line", k, f[k])
-			}
-		}
-	})
+			t.Run("bw with two connections", func(t *testing.T) {
+				addr, wait := startServer(t, bin, "bw", "-listen", net.JoinHostPort(ip, "0"), "-engine", engine, "-conns", "2")
+				out := runBinary(t, bin, "bw", "-connect", addr, "-engine", engine, "-conns", "2", "-duration", "1s", "-size", "4096")
+				wait(t)
+				f := fields(t, out)
+				if f["connections"] != "2" || f["size"] != "4096" {
+					t.Errorf("connections = %q, size = %q, want 2 and 4096", f["connections"], f["size"])
+				}
+				for _, k := range []string{"connection 0", "connection 1"} {
+					if !strings.HasPrefix(f[k], "bytes ") {
+						t.Errorf("%s = %q, want a per-connection line", k, f[k])
+					}
+				}
+			})
+		})
+	}
 }
 
 // buildCLI builds the command into a temporary directory.

@@ -11,11 +11,12 @@ import (
 	"github.com/wzshiming/rdma"
 )
 
-// endpoint holds the flags the measurement commands share: the side to take
-// and the rsockets options of the connections.
+// endpoint holds the flags the measurement commands share: the side to take,
+// the engine and the rsockets options of the connections.
 type endpoint struct {
 	listen  string
 	connect string
+	engine  string
 	sndbuf  int
 	rcvbuf  int
 	sqsize  int
@@ -27,6 +28,7 @@ type endpoint struct {
 func (e *endpoint) bind(fs *flag.FlagSet) {
 	fs.StringVar(&e.listen, "listen", "", "serve at this `ip:port`; port 0 picks a free one")
 	fs.StringVar(&e.connect, "connect", "", "measure against the server at this `host:port`")
+	fs.StringVar(&e.engine, "engine", "", "the `engine` of the connections, native or librdmacm, rdma.Config.Engine (empty: the library's default, native)")
 	fs.IntVar(&e.sndbuf, "sndbuf", 0, "send buffer size in `bytes`, rdma.Config.SendBufferSize (0: the rsockets default)")
 	fs.IntVar(&e.rcvbuf, "rcvbuf", 0, "receive buffer size in `bytes`, rdma.Config.ReceiveBufferSize (0: the rsockets default)")
 	fs.IntVar(&e.sqsize, "sqsize", 0, "send queue depth in `entries`, rdma.Config.SendQueueSize (0: the rsockets default)")
@@ -44,6 +46,11 @@ func (e *endpoint) check() error {
 	case e.keep && e.listen == "":
 		return errors.New("-keep applies to -listen")
 	}
+	switch rdma.Engine(e.engine) {
+	case "", rdma.EngineNative, rdma.EngineLibrdmacm:
+	default:
+		return fmt.Errorf("-engine must be %s or %s", rdma.EngineNative, rdma.EngineLibrdmacm)
+	}
 	for _, f := range []struct {
 		name  string
 		value int
@@ -55,9 +62,9 @@ func (e *endpoint) check() error {
 	return nil
 }
 
-// config returns the rsockets options the flags ask for.
+// config returns the engine and the rsockets options the flags ask for.
 func (e *endpoint) config() rdma.Config {
-	return rdma.Config{SendBufferSize: e.sndbuf, ReceiveBufferSize: e.rcvbuf, SendQueueSize: e.sqsize, ReceiveQueueSize: e.rqsize, MaxInline: e.inline}
+	return rdma.Config{Engine: rdma.Engine(e.engine), SendBufferSize: e.sndbuf, ReceiveBufferSize: e.rcvbuf, SendQueueSize: e.sqsize, ReceiveQueueSize: e.rqsize, MaxInline: e.inline}
 }
 
 // dial connects to the server named by -connect.
