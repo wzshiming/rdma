@@ -1,5 +1,7 @@
 package rsproto
 
+import "encoding/binary"
+
 // Region is a block of local memory registered for RDMA: its bytes, and the
 // address and key the link and the peer know it by.
 type Region struct {
@@ -28,11 +30,11 @@ type Stream struct {
 	link Link
 	c    Config
 
-	target   SGE // the peer's grant data goes to: target_sgl[target_sge]
-	sbufPos  int // where the free bytes of the send buffer start: ssgl[0].addr
-	sseqNo   int // data messages sent
-	sseqComp int // the sseqNo the peer's credits stop sending at
-	sgl      [2]Segment
+	targetSGE int // the entry of the grant table data goes to
+	sbufPos   int // where the free bytes of the send buffer start: ssgl[0].addr
+	sseqNo    int // data messages sent
+	sseqComp  int // the sseqNo the peer's credits stop sending at
+	sgl       [2]Segment
 }
 
 // NewStream returns a stream on memory the caller registered, as
@@ -54,13 +56,23 @@ func (s *Stream) ConnData() ConnData {
 // Connect mirrors rs_save_conn_data: the stream takes the connection data of
 // its peer.
 func (s *Stream) Connect(peer ConnData) {
-	s.target = peer.FirstGrant
+	s.setGrant(0, peer.FirstGrant)
 	s.sseqComp = int(peer.Credits)
+}
+
+// grant returns entry i of the grant table, target_sgl[i] in C, which the
+// peer writes and the stream uses up.
+func (s *Stream) grant(i int) SGE {
+	return GetSGE(s.c.GrantTable.Buf[i*SGESize:], binary.LittleEndian)
+}
+
+func (s *Stream) setGrant(i int, g SGE) {
+	PutSGE(s.c.GrantTable.Buf[i*SGESize:], binary.LittleEndian, g)
 }
 
 // CanSend mirrors rs_can_send: whether Reserve would lend room now.
 func (s *Stream) CanSend() bool {
-	return s.sseqNo != s.sseqComp && s.target.Length != 0
+	return s.sseqNo != s.sseqComp && s.grant(s.targetSGE).Length != 0
 }
 
 // Reserve lends the room of the send buffer that one message can carry now,
@@ -69,7 +81,7 @@ func (s *Stream) Reserve() []byte {
 	if !s.CanSend() {
 		return nil
 	}
-	n := min(len(s.c.SendBuffer.Buf)-s.sbufPos, int(s.target.Length))
+	n := min(len(s.c.SendBuffer.Buf)-s.sbufPos, int(s.grant(s.targetSGE).Length))
 	return s.c.SendBuffer.Buf[s.sbufPos : s.sbufPos+n : s.sbufPos+n]
 }
 
@@ -77,9 +89,14 @@ func (s *Stream) Reserve() []byte {
 // data message, as rs_write_data does.
 func (s *Stream) Commit(n int) error {
 	s.sseqNo++
-	addr, key := s.target.Addr, s.target.Key
-	s.target.Addr += uint64(n)
-	s.target.Length -= uint32(n)
+	g := s.grant(s.targetSGE)
+	addr, key := g.Addr, g.Key
+	g.Addr += uint64(n)
+	g.Length -= uint32(n)
+	s.setGrant(s.targetSGE, g)
+	if g.Length == 0 {
+		s.targetSGE = (s.targetSGE + 1) % SGLSize
+	}
 
 	s.sgl[0] = Segment{Addr: s.c.SendBuffer.Addr + uint64(s.sbufPos), Length: uint32(n), Key: s.c.SendBuffer.Key}
 	s.sbufPos += n

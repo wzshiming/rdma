@@ -161,6 +161,54 @@ func TestCreditsRunOutAndReturn(t *testing.T) {
 	}
 }
 
+// grant does what the peer's rs_send_credits does with a grant g: it writes g
+// into entry i of the grant table of c, in the byte order of c's host, then
+// sends the RS_OP_SGL message with the credit limit.
+func grant(s *rsproto.Stream, c rsproto.Config, i int, g rsproto.SGE, credits uint32) {
+	rsproto.PutSGE(c.GrantTable.Buf[i*rsproto.SGESize:], rsproto.ConnData{BigEndian: c.BigEndian}.ByteOrder(), g)
+	s.Received(rsproto.MakeMsg(rsproto.OpSGL, credits))
+}
+
+// rs_write_data moves on to the next of the RS_SGL_SIZE entries of
+// target_sgl when a grant is used up, and the peer's rs_send_credits writes
+// its grants round-robin from entry 1 on, after the first one rs_save_conn_data
+// puts in entry 0.
+func TestGrantsRotateOverTheTable(t *testing.T) {
+	c := testConfig()
+	peer := testPeer
+	peer.FirstGrant.Length = 100
+	l := &recorder{}
+	s := rsproto.NewStream(l, c)
+	s.Connect(peer)
+
+	grants := []struct {
+		entry int
+		g     rsproto.SGE
+	}{
+		{0, peer.FirstGrant},
+		{1, rsproto.SGE{Addr: 0x00007f1000010000, Key: 0x7b23, Length: 200}},
+		{0, rsproto.SGE{Addr: 0x00007f1000000000, Key: 0x7b24, Length: 300}},
+	}
+	for i, tt := range grants {
+		if i > 0 {
+			if s.CanSend() {
+				t.Fatalf("CanSend() with grant %d used up and none in entry %d", i-1, tt.entry)
+			}
+			grant(s, c, tt.entry, tt.g, rsproto.DefaultReceiveQueueSize)
+		}
+		v := s.Reserve()
+		if len(v) != int(tt.g.Length) {
+			t.Fatalf("Reserve() with grant %d in entry %d = %d bytes, want %d", i, tt.entry, len(v), tt.g.Length)
+		}
+		if err := s.Commit(len(v)); err != nil {
+			t.Fatalf("Commit(%d) = %v", len(v), err)
+		}
+		if got := l.posts[len(l.posts)-1]; got.addr != tt.g.Addr || got.key != tt.g.Key {
+			t.Errorf("Commit into grant %d wrote to %#x under %#x, want %#x under %#x", i, got.addr, got.key, tt.g.Addr, tt.g.Key)
+		}
+	}
+}
+
 func TestStreamConnData(t *testing.T) {
 	c := testConfig()
 	little := rsproto.ConnData{
