@@ -94,7 +94,7 @@ func (s *Stream) Reserve() []byte {
 	if !s.CanSend() {
 		return nil
 	}
-	n := min(s.sbufAvail, len(s.c.SendBuffer.Buf)-s.sbufPos, int(s.grant(s.targetSGE).Length))
+	n := min(s.sbufAvail, len(s.c.SendBuffer.Buf)-s.sbufPos, int(s.grant(s.targetSGE).Length), MaxTransfer)
 	return s.c.SendBuffer.Buf[s.sbufPos : s.sbufPos+n : s.sbufPos+n]
 }
 

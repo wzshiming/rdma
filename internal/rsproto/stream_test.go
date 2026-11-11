@@ -354,6 +354,21 @@ func TestFirstFailedSendStaysTheError(t *testing.T) {
 	}
 }
 
+// rsend sends no message of more than RS_MAX_TRANSFER bytes, however much
+// room the grant and the send buffer leave.
+func TestMessageStaysWithinMaxTransfer(t *testing.T) {
+	c := testConfig()
+	c.SendBuffer.Buf = make([]byte, 4*rsproto.MaxTransfer)
+	peer := testPeer
+	peer.FirstGrant.Length = 4 * rsproto.MaxTransfer
+	s := rsproto.NewStream(&recorder{}, c)
+	s.Connect(peer)
+
+	if v := s.Reserve(); len(v) != rsproto.MaxTransfer {
+		t.Errorf("Reserve() with room for %d bytes = %d bytes, want RS_MAX_TRANSFER, %d", 4*rsproto.MaxTransfer, len(v), rsproto.MaxTransfer)
+	}
+}
+
 func TestStreamConnData(t *testing.T) {
 	c := testConfig()
 	little := rsproto.ConnData{
