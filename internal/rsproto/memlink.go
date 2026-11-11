@@ -32,6 +32,8 @@ type MemEnd struct {
 	sends []memSend // posted and not yet carried to the peer
 	recvs int       // receives posted and not yet used up
 	done  []uint64  // the ids of sends carried and not yet taken by Completion
+
+	postErr error // what the next post fails with
 }
 
 // memSend is a send posted and not yet carried.
@@ -68,6 +70,9 @@ func (e *MemEnd) PostMsg(id uint64, msg Msg) error {
 func (e *MemEnd) post(p memSend) error {
 	e.link.mu.Lock()
 	defer e.link.mu.Unlock()
+	if err := e.refusal(); err != nil {
+		return err
+	}
 	e.sends = append(e.sends, p)
 	return nil
 }
@@ -76,8 +81,28 @@ func (e *MemEnd) post(p memSend) error {
 func (e *MemEnd) PostRecv(id uint64) error {
 	e.link.mu.Lock()
 	defer e.link.mu.Unlock()
+	if err := e.refusal(); err != nil {
+		return err
+	}
 	e.recvs++
 	return nil
+}
+
+// FailPost makes the next post of this end, of whatever kind, fail with err
+// and put nothing on the link, as ibv_post_send and ibv_post_recv refuse a
+// work request.
+func (e *MemEnd) FailPost(err error) {
+	e.link.mu.Lock()
+	defer e.link.mu.Unlock()
+	e.postErr = err
+}
+
+// refusal returns the error FailPost left for this post, if any, and clears
+// it.
+func (e *MemEnd) refusal() error {
+	err := e.postErr
+	e.postErr = nil
+	return err
 }
 
 // Deliver carries the oldest message the peer posted and this end has not

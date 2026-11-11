@@ -2,6 +2,7 @@ package rsproto_test
 
 import (
 	"bytes"
+	"errors"
 	"testing"
 
 	"github.com/wzshiming/rdma/internal/rsproto"
@@ -119,5 +120,49 @@ func TestMemLinkMessageWaitsForAReceive(t *testing.T) {
 		if got, ok := b.Deliver(); ok {
 			t.Fatalf("Deliver() with the receive used up = %#x, want nothing", got)
 		}
+	}
+}
+
+// A post the link is told to refuse fails with the error given and puts
+// nothing on the link, whatever its kind; the post after it goes through.
+func TestMemLinkRefusesTheInjectedPost(t *testing.T) {
+	refused := errors.New("ibv_post_send: ENOMEM")
+	msg := rsproto.MakeMsg(rsproto.OpSGL, 1)
+	tests := []struct {
+		name string
+		post func(e *rsproto.MemEnd) error
+	}{
+		{"PostWriteMsg", func(e *rsproto.MemEnd) error { return e.PostWriteMsg(1, nil, msg, 0, 0) }},
+		{"PostMsg", func(e *rsproto.MemEnd) error { return e.PostMsg(1, msg) }},
+		{"PostRecv", func(e *rsproto.MemEnd) error { return e.PostRecv(1 << 63) }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a, b := rsproto.NewMemLink()
+			a.FailPost(refused)
+			if err := tt.post(a); !errors.Is(err, refused) {
+				t.Fatalf("the post told to fail = %v, want %v", err, refused)
+			}
+			if err := tt.post(a); err != nil {
+				t.Fatalf("the post after it = %v, want nil", err)
+			}
+
+			// Two messages each way, two receives at b: one message moves for
+			// each post of a that went through, whatever its kind.
+			for i := range 2 {
+				if b.PostRecv(1<<63) != nil || b.PostMsg(uint64(i), msg) != nil {
+					t.Fatal("the posts of b failed")
+				}
+			}
+			moved := 0
+			for _, e := range []*rsproto.MemEnd{a, b} {
+				for _, ok := e.Deliver(); ok; _, ok = e.Deliver() {
+					moved++
+				}
+			}
+			if moved != 1 {
+				t.Errorf("%d messages moved after a refused and a good post, want 1", moved)
+			}
+		})
 	}
 }
