@@ -46,13 +46,14 @@ type linkEvents interface {
 type nativeStream struct {
 	t             transport
 	local, remote netip.AddrPort
-	closing       chan struct{} // closed by close, waking every wait
+	closing       chan struct{}    // closed by close, waking every wait
+	wake          [2]chan struct{} // by direction, one slot for the token that lets a wait go on
 
 	mu        sync.Mutex
 	st        *rsproto.Stream
 	link      sendCounter
-	wake      [2]chan struct{} // by direction, closed when a wait may go on; nil unless awaited
-	writeShut bool             // closeWrite was called
+	waiting   [2]bool // by direction, a wait sleeps on wake
+	writeShut bool    // closeWrite was called
 	closed    bool
 	settled   chan struct{} // closed once the sends of a closing stream are done
 }
@@ -84,7 +85,13 @@ func (c *sendCounter) PostMsg(id uint64, msg rsproto.Msg) error {
 // t has registered, between the addresses: the receive queue is posted and
 // the stream awaits connect. It fails when t refuses a receive.
 func newNativeStream(t transport, mem rsproto.Config, local, remote netip.AddrPort) (*nativeStream, error) {
-	s := &nativeStream{t: t, local: local, remote: remote, closing: make(chan struct{})}
+	s := &nativeStream{
+		t:       t,
+		local:   local,
+		remote:  remote,
+		closing: make(chan struct{}),
+		wake:    [2]chan struct{}{make(chan struct{}, 1), make(chan struct{}, 1)},
+	}
 	s.link.Link = t
 	s.st = rsproto.NewStream(&s.link, mem)
 	if err := s.st.Err(); err != nil {
@@ -126,10 +133,13 @@ func (s *nativeStream) lost(err error) { s.st.LinkDown(err) }
 // notify wakes the waits that may go on and a close waiting for the sends.
 // The caller holds mu.
 func (s *nativeStream) notify() {
-	for dir, wake := range s.wake {
-		if wake != nil && s.ready(direction(dir)) {
-			close(wake)
-			s.wake[dir] = nil
+	for dir, waiting := range s.waiting {
+		if waiting && s.ready(direction(dir)) {
+			s.waiting[dir] = false
+			select {
+			case s.wake[dir] <- struct{}{}:
+			default:
+			}
 		}
 	}
 	if s.settled != nil && s.sendsDone() {
@@ -210,13 +220,12 @@ func (s *nativeStream) wait(dir direction, cancel <-chan struct{}) error {
 		s.mu.Unlock()
 		return nil
 	}
-	if s.wake[dir] == nil {
-		s.wake[dir] = make(chan struct{})
-	}
-	wake := s.wake[dir]
+	s.waiting[dir] = true
 	s.mu.Unlock()
+	// A token left by a wait that returned otherwise lets this one go on
+	// early, and the caller asks again.
 	select {
-	case <-wake:
+	case <-s.wake[dir]:
 		return nil
 	case <-cancel:
 		return nil

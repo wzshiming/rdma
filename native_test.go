@@ -5,6 +5,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io"
 	"net/netip"
 	"path/filepath"
 	"slices"
@@ -15,6 +16,30 @@ import (
 )
 
 func TestNativeConnOnMemLink(t *testing.T) { testConn(t, nativeOnMemLink) }
+
+// In steady state a Write and the Read of what it wrote allocate nothing,
+// the waits for room and data included: twice the rounds cost as many
+// allocations.
+func TestNativeReadWriteRoundsDoNotAllocate(t *testing.T) {
+	client, server := nativeOnMemLink.pair(t, Config{})
+	const chunk = 1 << 10
+	wbuf, rbuf := make([]byte, chunk), make([]byte, chunk)
+	readWrite := func(rounds int) float64 {
+		return testing.AllocsPerRun(20, func() {
+			for range rounds {
+				if _, err := client.Write(wbuf); err != nil {
+					t.Fatalf("Write error: %v", err)
+				}
+				if _, err := io.ReadFull(server, rbuf); err != nil {
+					t.Fatalf("ReadFull error: %v", err)
+				}
+			}
+		})
+	}
+	if few, many := readWrite(64), readWrite(128); many != few {
+		t.Errorf("Write and Read of 64 and 128 rounds: %v and %v allocations; want as many", few, many)
+	}
+}
 
 // A receive the transport refuses fails the building of the stream, before
 // any connection data goes out.
