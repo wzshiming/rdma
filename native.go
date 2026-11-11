@@ -210,6 +210,55 @@ func (s *nativeStream) writeError() error {
 	return nil
 }
 
+func (s *nativeStream) lendRead() ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, net.ErrClosed
+	}
+	v := s.st.Peek()
+	if len(v) == 0 {
+		if s.st.EOF() {
+			return nil, io.EOF
+		}
+		return nil, errAgain
+	}
+	return v, nil
+}
+
+func (s *nativeStream) returnRead(n int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return net.ErrClosed
+	}
+	s.st.Consume(n)
+	return nil
+}
+
+func (s *nativeStream) lendWrite() ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.writeError(); err != nil {
+		return nil, err
+	}
+	v := s.st.Reserve()
+	if v == nil {
+		return nil, errAgain
+	}
+	return v, nil
+}
+
+func (s *nativeStream) commitWrite(n int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.writeError(); err != nil {
+		return err
+	}
+	s.st.Commit(n)
+	return nil
+}
+
 func (s *nativeStream) wait(dir direction, cancel <-chan struct{}) error {
 	s.mu.Lock()
 	if s.closed {

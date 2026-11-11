@@ -17,6 +17,8 @@ import (
 
 func TestNativeConnOnMemLink(t *testing.T) { testConn(t, nativeOnMemLink) }
 
+func TestNativeCopyPathsOnMemLink(t *testing.T) { testCopyPaths(t, nativeOnMemLink) }
+
 // In steady state a Write and the Read of what it wrote allocate nothing,
 // the waits for room and data included: twice the rounds cost as many
 // allocations.
