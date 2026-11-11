@@ -571,6 +571,39 @@ func TestConnectGrantsTheSecondHalf(t *testing.T) {
 	}
 }
 
+// rs_send_credits writes the grant entry in host order, swapped when
+// rs_save_conn_data found the peer's RS_CONN_FLAG_NET at odds with the host
+// (RS_OPT_SWAP_SGL): in the peer's order either way.
+func TestGrantInThePeerByteOrder(t *testing.T) {
+	// The second half of testConfig's receive buffer, {0x00007e1000010000, 0x4ecf, 0x10000}.
+	big := [rsproto.SGESize]byte{0x00, 0x00, 0x7e, 0x10, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x4e, 0xcf, 0x00, 0x01, 0x00, 0x00}
+	little := [rsproto.SGESize]byte{0x00, 0x00, 0x01, 0x00, 0x10, 0x7e, 0x00, 0x00, 0xcf, 0x4e, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00}
+	tests := []struct {
+		c               string // the C function and case that writes the entry
+		host, peerIsBig bool
+		wire            [rsproto.SGESize]byte
+	}{
+		{"rs_send_credits on a little-endian host for a big-endian peer, swapped", false, true, big},
+		{"rs_send_credits on a big-endian host for a little-endian peer, swapped", true, false, little},
+		{"rs_send_credits on a big-endian host for a big-endian peer", true, true, big},
+	}
+	for _, tt := range tests {
+		t.Run(tt.c, func(t *testing.T) {
+			c := testConfig()
+			c.BigEndian = tt.host
+			peer := testPeer
+			peer.BigEndian = tt.peerIsBig
+			l := &recorder{}
+			s := rsproto.NewStream(l, c)
+			s.Connect(peer)
+
+			if got := grantPosted(t, c, l.posts[0]); got != tt.wire {
+				t.Errorf("Connect granted % x, want % x", got, tt.wire)
+			}
+		})
+	}
+}
+
 func TestStreamConnData(t *testing.T) {
 	c := testConfig()
 	little := rsproto.ConnData{

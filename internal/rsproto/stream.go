@@ -43,9 +43,10 @@ type Stream struct {
 	sseqComp  uint16     // the sseqNo the peer's credits stop sending at
 	sgl       [1]Segment // of a post, here so that passing it allocates nothing
 
-	rbufOffset  int // where the arrived bytes start in the receive buffer: rbuf_offset
-	rbufArrived int // bytes arrived and not yet consumed
-	remote      SGE // the peer's grant table, Length counting entries: remote_sgl
+	rbufOffset  int              // where the arrived bytes start in the receive buffer: rbuf_offset
+	rbufArrived int              // bytes arrived and not yet consumed
+	remote      SGE              // the peer's grant table, Length counting entries: remote_sgl
+	remoteOrder binary.ByteOrder // of the peer's host, which its grant table is in
 
 	err error
 }
@@ -88,6 +89,7 @@ func (s *Stream) Connect(peer ConnData) {
 	s.setGrant(0, peer.FirstGrant)
 	s.sseqComp = peer.Credits
 	s.remote = peer.GrantTable
+	s.remoteOrder = peer.ByteOrder()
 	s.sendCredits()
 }
 
@@ -95,7 +97,7 @@ func (s *Stream) Connect(peer ConnData) {
 func (s *Stream) sendCredits() {
 	half := len(s.c.ReceiveBuffer.Buf) / 2
 	ctrl := s.c.ControlBuffer
-	PutSGE(ctrl.Buf, s.order, SGE{Addr: s.c.ReceiveBuffer.Addr + uint64(half), Key: s.c.ReceiveBuffer.Key, Length: uint32(half)})
+	PutSGE(ctrl.Buf, s.remoteOrder, SGE{Addr: s.c.ReceiveBuffer.Addr + uint64(half), Key: s.c.ReceiveBuffer.Key, Length: uint32(half)})
 	s.sgl[0] = Segment{Addr: ctrl.Addr, Length: SGESize, Key: ctrl.Key}
 	msg := MakeMsg(OpSGL, uint32(s.c.ReceiveQueueSize))
 	s.link.PostWriteMsg(uint64(msg), s.sgl[:], msg, s.remote.Addr+SGESize, s.remote.Key)
