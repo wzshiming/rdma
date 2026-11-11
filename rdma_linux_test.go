@@ -77,8 +77,8 @@ func rxeListen(t testing.TB, cfg Config) *Listener {
 	return rxeListenOn(t, cfg, nil)
 }
 
-// rxeListenOn starts a Listener of the engine eng, nil for the platform's,
-// on port 0 of the rdmatest device's IP.
+// rxeListenOn starts a Listener of the engine eng, nil for the one cfg
+// selects, on port 0 of the rdmatest device's IP.
 func rxeListenOn(t testing.TB, cfg Config, eng engine) *Listener {
 	t.Helper()
 	dev := rdmatest.Device(t)
@@ -239,13 +239,13 @@ func TestRXEConcurrentConnections(t *testing.T) {
 }
 
 func TestRXEListenerCloseUnblocksAccept(t *testing.T) {
-	testRXEListenerCloseUnblocksAccept(t, nil)
+	testRXEListenerCloseUnblocksAccept(t, EngineNative)
 }
 
-// testRXEListenerCloseUnblocksAccept closes a Listener of the engine eng, nil
-// for the platform's, while an Accept waits on it.
-func testRXEListenerCloseUnblocksAccept(t *testing.T, eng engine) {
-	ln := rxeListenOn(t, Config{}, eng)
+// testRXEListenerCloseUnblocksAccept closes a Listener of the engine e while
+// an Accept waits on it.
+func testRXEListenerCloseUnblocksAccept(t *testing.T, e Engine) {
+	ln := rxeListen(t, Config{Engine: e})
 	errc := make(chan error, 1)
 	go func() {
 		_, err := ln.Accept()
@@ -266,14 +266,13 @@ func testRXEListenerCloseUnblocksAccept(t *testing.T, eng engine) {
 }
 
 func TestRXEDialRefusedWithoutListener(t *testing.T) {
-	testRXEDialRefusedWithoutListener(t, nil, nil)
+	testRXEDialRefusedWithoutListener(t, EngineNative, EngineNative)
 }
 
 // testRXEDialRefusedWithoutListener has a Dialer of the engine dial dial the
-// port of a Listener of the engine listen once it is closed, nil for the
-// platform's engine.
-func testRXEDialRefusedWithoutListener(t *testing.T, dial, listen engine) {
-	ln := rxeListenOn(t, Config{}, listen)
+// port of a Listener of the engine listen once it is closed.
+func testRXEDialRefusedWithoutListener(t *testing.T, dial, listen Engine) {
+	ln := rxeListen(t, Config{Engine: listen})
 	addr := ln.Addr().String()
 	if err := ln.Close(); err != nil {
 		t.Fatalf("Close() error: %v", err)
@@ -281,7 +280,7 @@ func testRXEDialRefusedWithoutListener(t *testing.T, dial, listen engine) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	start := time.Now()
-	d := Dialer{eng: dial}
+	d := Dialer{Config: Config{Engine: dial}}
 	c, err := d.DialContext(ctx, "rdma", addr)
 	if err == nil {
 		c.Close()

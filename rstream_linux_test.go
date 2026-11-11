@@ -150,14 +150,14 @@ func rstreamArgs(side string, ip net.IP, port int) []string {
 // TestRXERstreamClientAgainstListener has rstream's client run the exchange
 // against a Listener of this package.
 func TestRXERstreamClientAgainstListener(t *testing.T) {
-	testRXERstreamClientAgainstListener(t, nil)
+	testRXERstreamClientAgainstListener(t, EngineNative)
 }
 
 // testRXERstreamClientAgainstListener has rstream's client run the exchange
-// against a Listener of the engine eng, nil for the platform's.
-func testRXERstreamClientAgainstListener(t *testing.T, eng engine) {
+// against a Listener of the engine e.
+func testRXERstreamClientAgainstListener(t *testing.T, e Engine) {
 	rstream := rstreamPath(t)
-	ln := rxeListenOn(t, Config{}, eng)
+	ln := rxeListen(t, Config{Engine: e})
 	addr := ln.Addr().(*Addr)
 	wait := startRstream(t, rstream, rstreamArgs("-s", addr.IP, addr.Port)...)
 	acc := acceptAsync(ln)
@@ -176,12 +176,12 @@ func testRXERstreamClientAgainstListener(t *testing.T, eng engine) {
 // TestRXEDialerAgainstRstreamServer has a Dialer of this package run the
 // exchange against rstream's server.
 func TestRXEDialerAgainstRstreamServer(t *testing.T) {
-	testRXEDialerAgainstRstreamServer(t, nil)
+	testRXEDialerAgainstRstreamServer(t, EngineNative)
 }
 
-// testRXEDialerAgainstRstreamServer has a Dialer of the engine eng, nil for
-// the platform's, run the exchange against rstream's server.
-func testRXEDialerAgainstRstreamServer(t *testing.T, eng engine) {
+// testRXEDialerAgainstRstreamServer has a Dialer of the engine e run the
+// exchange against rstream's server.
+func testRXEDialerAgainstRstreamServer(t *testing.T, e Engine) {
 	rstream := rstreamPath(t)
 	// rstream binds the port it is given, so a free one is found first.
 	probe := rxeListen(t, Config{})
@@ -192,7 +192,7 @@ func testRXEDialerAgainstRstreamServer(t *testing.T, eng engine) {
 	// until the server listens.
 	ctx, cancel := context.WithTimeout(context.Background(), rstreamTimeout)
 	defer cancel()
-	d := Dialer{eng: eng}
+	d := Dialer{Config: Config{Engine: e}}
 	var conn *Conn
 	for conn == nil {
 		c, err := d.DialContext(ctx, "rdma", addr.String())

@@ -16,8 +16,7 @@ import (
 // streams lend nothing, so that ReadFrom and WriteTo copy through their own
 // buffers.
 func TestRXECopy(t *testing.T) {
-	lib := librdmacmEngine{&rsocketNet}
-	testRXECopy(t, lib, lib, 1<<30)
+	testRXECopy(t, Config{}, EngineLibrdmacm, EngineLibrdmacm, 1<<30)
 }
 
 // fullSource reads left bytes of the stream s, filling every buffer.
@@ -39,18 +38,21 @@ func (r *fullSource) Read(p []byte) (int, error) {
 }
 
 // testRXECopy moves total bytes each way at once between a connection dialed
-// with the engine dial and one a listener of the engine listen accepts, on the
-// rdmatest device, with io.Copy, which enters ReadFrom on the sending ends
-// and WriteTo on the receiving ones, and checks the hashes.
-func testRXECopy(t *testing.T, dial, listen engine, total int) {
+// with the engine dial and one a listener of the engine listen accepts, both
+// with cfg otherwise, on the rdmatest device, with io.Copy, which enters
+// ReadFrom on the sending ends and WriteTo on the receiving ones, and checks
+// the hashes.
+func testRXECopy(t *testing.T, cfg Config, dial, listen Engine, total int) {
 	dev := rdmatest.Device(t)
-	lc := ListenConfig{eng: listen}
+	lc := ListenConfig{Config: cfg}
+	lc.Config.Engine = listen
 	ln, err := lc.Listen(t.Context(), "rdma", net.JoinHostPort(dev.IP.String(), "0"))
 	if err != nil {
 		t.Fatalf("Listen(%v:0) error: %v", dev.IP, err)
 	}
 	acc := acceptAsync(ln)
-	d := Dialer{eng: dial, Timeout: rxeTimeout}
+	d := Dialer{Config: cfg, Timeout: rxeTimeout}
+	d.Config.Engine = dial
 	client, err := d.Dial("rdma", ln.Addr().String())
 	if err != nil {
 		ln.Close()
