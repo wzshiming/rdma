@@ -734,8 +734,8 @@ func testWriteToTimesOutWaitingForData(t *testing.T, e engineUnderTest) {
 // the source blocks in Read ends ReadFrom only after what it read is sent.
 func testDeadlineLetsTheSourceFinish(t *testing.T, e engineUnderTest) {
 	client, server := e.pair(t, Config{})
-	client.SetWriteDeadline(time.Now().Add(50 * time.Millisecond))
 	start := time.Now()
+	client.SetWriteDeadline(start.Add(50 * time.Millisecond))
 	late := true
 	n, err := client.ReadFrom(readerFunc(func(p []byte) (int, error) {
 		if !late {
@@ -766,8 +766,8 @@ func testDeadlineLetsTheDestinationFinish(t *testing.T, e engineUnderTest) {
 	if _, err := server.Write([]byte("late")); err != nil {
 		t.Fatalf("Write error: %v", err)
 	}
-	client.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
 	start := time.Now()
+	client.SetReadDeadline(start.Add(50 * time.Millisecond))
 	n, err := client.WriteTo(writerFunc(func(p []byte) (int, error) {
 		time.Sleep(150 * time.Millisecond)
 		return len(p), nil

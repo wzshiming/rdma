@@ -308,8 +308,8 @@ func isTimeout(err error) bool {
 func TestIdleReadDeadlineTimesOutWithinTolerance(t *testing.T) {
 	a, _ := fakePipe(t, newFakeNet(t), Config{})
 	const d = 50 * time.Millisecond
-	a.SetReadDeadline(time.Now().Add(d))
 	start := time.Now()
+	a.SetReadDeadline(start.Add(d))
 	n, err := a.Read(make([]byte, 1))
 	elapsed := time.Since(start)
 	if n != 0 || !isTimeout(err) || !errors.Is(err, os.ErrDeadlineExceeded) {

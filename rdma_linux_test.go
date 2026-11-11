@@ -379,8 +379,8 @@ func TestRXEIdleReadDeadline(t *testing.T) {
 	forEachEngine(t, func(t *testing.T, e Engine) {
 		client, _ := rxePair(t, Config{Engine: e})
 		const d = 50 * time.Millisecond
-		client.SetReadDeadline(time.Now().Add(d))
 		start := time.Now()
+		client.SetReadDeadline(start.Add(d))
 		n, err := client.Read(make([]byte, 1))
 		elapsed := time.Since(start)
 		if n != 0 || !isTimeout(err) || !errors.Is(err, os.ErrDeadlineExceeded) {
