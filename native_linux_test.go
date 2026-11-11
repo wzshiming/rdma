@@ -3,6 +3,7 @@
 package rdma
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -332,5 +333,100 @@ func testCopyLendsRegisteredMemory(t *testing.T, client, server *Conn, total int
 		if ins[i].sum() != outs[i].sum() {
 			t.Errorf("direction #%d: sent %s, received %s", i, ins[i].sum(), outs[i].sum())
 		}
+	}
+}
+
+// memoryReleased reports whether c, a connection of the native engine, has
+// released the memory it registered.
+func memoryReleased(c *Conn) bool {
+	t := qpTransportOf(c)
+	return t.smr.Bytes() == nil && t.rmr.Bytes() == nil
+}
+
+// Closed while its ReadFrom's source sits in Read, or its WriteTo's
+// destination in Write, a native connection keeps the memory of their view
+// for them to go on using, and releases it once the view is back.
+func TestRXENativeViewsOutliveClose(t *testing.T) {
+	rdmatest.Device(t)
+	testViewsOutliveClose(t, func(t *testing.T) (client, server *Conn) {
+		return rxeEnginePair(t, Config{}, EngineNative, EngineNative)
+	}, memoryReleased)
+}
+
+// testViewsOutliveClose closes a connection of pair while its ReadFrom's
+// source sits in Read with a view of the send buffer, and one while its
+// WriteTo's destination sits in Write with a view of the receive buffer.
+// Close returns with the view out and leaves its memory alone; the source
+// then fills every byte of its view, the destination reads every byte of its
+// own, which still holds what the peer wrote, the copy ends with
+// net.ErrClosed, and released reports the memory gone.
+func testViewsOutliveClose(t *testing.T, pair func(*testing.T) (client, server *Conn), released func(*Conn) bool) {
+	t.Run("source in Read", func(t *testing.T) {
+		client, _ := pair(t)
+		entered, resume := make(chan struct{}), make(chan struct{})
+		readFrom := async(func() (int64, error) {
+			return client.ReadFrom(readerFunc(func(p []byte) (int, error) {
+				close(entered)
+				<-resume
+				for i := range p {
+					p[i] = byte(i)
+				}
+				return len(p), nil
+			}))
+		})
+		<-entered
+		closeWithAViewOut(t, client, released)
+		close(resume)
+		if r := await(t, "ReadFrom", readFrom); r.n != 0 || !isOpError(r.err, "readfrom", net.ErrClosed) {
+			t.Errorf("ReadFrom() = %d, %v; want 0 and a readfrom *net.OpError with net.ErrClosed", r.n, r.err)
+		}
+		if !released(client) {
+			t.Error("the memory was kept once the source's view was back")
+		}
+	})
+	t.Run("destination in Write", func(t *testing.T) {
+		client, server := pair(t)
+		want := make([]byte, 32<<10)
+		newStream(19).rng.Read(want)
+		if _, err := server.Write(want); err != nil {
+			t.Fatalf("Write error: %v", err)
+		}
+		entered, resume := make(chan struct{}), make(chan struct{})
+		var held int
+		intact := false
+		writeTo := async(func() (int64, error) {
+			return client.WriteTo(writerFunc(func(p []byte) (int, error) {
+				close(entered)
+				<-resume
+				held, intact = len(p), bytes.Equal(p, want[:len(p)])
+				return len(p), nil
+			}))
+		})
+		<-entered
+		closeWithAViewOut(t, client, released)
+		close(resume)
+		if r := await(t, "WriteTo", writeTo); r.n != int64(held) || !isOpError(r.err, "writeto", net.ErrClosed) {
+			t.Errorf("WriteTo() = %d, %v; want the %d bytes of the view and a writeto *net.OpError with net.ErrClosed", r.n, r.err, held)
+		}
+		if !intact {
+			t.Error("after Close the destination's view no longer held what the peer wrote")
+		}
+		if !released(client) {
+			t.Error("the memory was kept once the destination's view was back")
+		}
+	})
+}
+
+// closeWithAViewOut closes c, which has a view out, and checks that Close
+// returns and leaves the memory of the view alone.
+func closeWithAViewOut(t *testing.T, c *Conn, released func(*Conn) bool) {
+	t.Helper()
+	var err error
+	within5s(t, "Close", func() { err = c.Close() })
+	if err != nil {
+		t.Errorf("Close error: %v", err)
+	}
+	if released(c) {
+		t.Error("Close released the memory of the view out")
 	}
 }
