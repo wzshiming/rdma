@@ -433,6 +433,21 @@ func TestNewStreamPostsTheReceiveQueue(t *testing.T) {
 	}
 }
 
+// rs_poll_cq posts a receive for every message that arrived, whatever it
+// carries, in place of the one the message used up.
+func TestEveryArrivalPostsAReceive(t *testing.T) {
+	l := &recorder{}
+	s := rsproto.NewStream(l, testConfig())
+	s.Connect(testPeer)
+	l.recvs = nil
+
+	s.Received(rsproto.MakeMsg(rsproto.OpData, 100))
+	s.Received(rsproto.MakeMsg(rsproto.OpSGL, rsproto.DefaultReceiveQueueSize))
+	if want := []uint64{1 << 63, 1 << 63}; !slices.Equal(l.recvs, want) {
+		t.Errorf("a data and a credit message arriving posted receives %#x, want %#x", l.recvs, want)
+	}
+}
+
 func TestStreamConnData(t *testing.T) {
 	c := testConfig()
 	little := rsproto.ConnData{

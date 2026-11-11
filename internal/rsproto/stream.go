@@ -143,11 +143,13 @@ func (s *Stream) Sent(id uint64, err error) {
 	}
 }
 
-// Received takes a message word the peer sent, as rs_poll_cq does.
+// Received takes a message word the peer sent, as rs_poll_cq does, and posts
+// a receive in place of the one it used up.
 func (s *Stream) Received(msg Msg) {
 	if msg.Op() == OpSGL {
 		s.sseqComp = uint16(msg.Data())
 	}
+	s.link.PostRecv(recvID)
 }
 
 // Err returns why the stream broke, nil while it has not.
