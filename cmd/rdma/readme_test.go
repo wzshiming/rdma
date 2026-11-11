@@ -106,9 +106,58 @@ func TestREADMEDescribesTheRsocketsStream(t *testing.T) {
 	}
 }
 
+// TestREADMEDescribesTheEngines checks that the introduction presents the
+// native engine as the default and the librdmacm engine as the choice, both
+// on the rsockets protocol, that the command line names the flag of the
+// choice, and that no sentence still makes the connections librdmacm's
+// rsockets.
+func TestREADMEDescribesTheEngines(t *testing.T) {
+	readme := readREADME(t)
+	intro, _, _ := strings.Cut(readme, "\n## ")
+	for _, want := range []string{"rsockets protocol", "native engine, the default", "librdmacm engine", "`Config.Engine`"} {
+		if !strings.Contains(intro, want) {
+			t.Errorf("the introduction lacks %q", want)
+		}
+	}
+	for _, stale := range []string{"backed by rsockets", "the stream sockets of librdmacm", "the stream above is built on"} {
+		if strings.Contains(readme, stale) {
+			t.Errorf("README still makes the connections librdmacm's rsockets: %q", stale)
+		}
+	}
+	for _, s := range sentencesWith(readme, "/etc/rdma/rsocket") {
+		if !strings.Contains(s, "librdmacm engine") {
+			t.Errorf("README applies /etc/rdma/rsocket to every engine: %q", s)
+		}
+	}
+	commandLine := section(readme, "## Command line")
+	for _, want := range []string{"`-engine`", "`native`", "`librdmacm`", "`Config.Engine`"} {
+		if !strings.Contains(commandLine, want) {
+			t.Errorf("the Command line section lacks %q", want)
+		}
+	}
+}
+
+// TestREADMEExplainsTheCopy checks that Usage tells what io.Copy saves in
+// each direction and when it does: on the native engine, for a connection
+// io.Copy sees as such.
+func TestREADMEExplainsTheCopy(t *testing.T) {
+	usage := section(readREADME(t), "## Usage")
+	for _, want := range []string{
+		"`io.ReaderFrom`", "`io.WriterTo`",
+		"`io.Copy(conn, src)`", "registered send buffer",
+		"`io.Copy(dst, conn)`", "registered receive buffer",
+		"native engine", "librdmacm engine", "wrapper",
+	} {
+		if !strings.Contains(usage, want) {
+			t.Errorf("the Usage section lacks %q", want)
+		}
+	}
+}
+
 // TestREADMERequirements checks that Requirements asks for the rdma-core
-// libraries at run time, keeps the release caveat, and no longer for the
-// development packages and C compiler a cgo build needed.
+// libraries at run time, no longer for the development packages and C
+// compiler a cgo build needed, and confines the caveats of librdmacm's
+// rsockets, the release and the configuration file, to the librdmacm engine.
 func TestREADMERequirements(t *testing.T) {
 	requirements := section(readREADME(t), "## Requirements")
 	if requirements == "" {
@@ -122,18 +171,29 @@ func TestREADMERequirements(t *testing.T) {
 	for _, want := range []string{
 		"`libibverbs1`", "`librdmacm1t64`", "`ibverbs-providers`", "`librdmacm1`",
 		"neither the headers nor a C compiler",
-		"Release 53 or later",
+		"native engine",
 	} {
 		if !strings.Contains(requirements, want) {
 			t.Errorf("the Requirements section lacks %q", want)
+		}
+	}
+	for _, caveat := range []string{"rdma-core 53 or later", "`/etc/rdma/rsocket`"} {
+		said := sentencesWith(requirements, caveat)
+		if len(said) == 0 {
+			t.Errorf("the Requirements section lacks %q", caveat)
+		}
+		for _, s := range said {
+			if !strings.Contains(s, "librdmacm engine") {
+				t.Errorf("the Requirements section does not confine %q to the librdmacm engine: %q", caveat, s)
+			}
 		}
 	}
 }
 
 // TestREADMEPlatforms checks that Platforms names the six supported Linux
 // architectures and how each is verified, the independence from cgo, the
-// error a host without the libraries gets, and the libc the no-cgo build
-// targets.
+// error a host without the libraries gets, the libc the no-cgo build
+// targets, and the engine iWARP devices take.
 func TestREADMEPlatforms(t *testing.T) {
 	platforms := section(readREADME(t), "## Platforms")
 	if platforms == "" {
@@ -150,6 +210,15 @@ func TestREADMEPlatforms(t *testing.T) {
 	} {
 		if !strings.Contains(platforms, want) {
 			t.Errorf("the Platforms section lacks %q", want)
+		}
+	}
+	iwarp := sentencesWith(platforms, "iWARP")
+	if len(iwarp) == 0 {
+		t.Error("the Platforms section does not mention iWARP")
+	}
+	for _, s := range iwarp {
+		if !strings.Contains(s, "librdmacm engine") {
+			t.Errorf("the Platforms section mentions iWARP without the librdmacm engine: %q", s)
 		}
 	}
 }
@@ -181,6 +250,19 @@ func section(doc, heading string) string {
 		rest = rest[:i]
 	}
 	return rest
+}
+
+// sentencesWith returns the sentences of doc that contain s.
+func sentencesWith(doc, s string) []string {
+	var found []string
+	for _, line := range strings.Split(doc, "\n") {
+		for _, sentence := range strings.SplitAfter(line, ". ") {
+			if strings.Contains(sentence, s) {
+				found = append(found, sentence)
+			}
+		}
+	}
+	return found
 }
 
 // codeBlocks returns the contents of the fenced code blocks of a language,
