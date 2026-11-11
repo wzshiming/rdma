@@ -129,8 +129,11 @@ func callerAllocs(f func()) (caller uint64, sites string, all uint64) {
 	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
 	defer func(rate int) { runtime.MemProfileRate = rate }(runtime.MemProfileRate)
 	runtime.MemProfileRate = 1
-	f()
+	// Only the run under allocating counts, so the profile is read before
+	// the warm-up: its collections empty the sync.Pools of every call into C,
+	// which the warm-up then fills again.
 	before := profiledAllocs()
+	f()
 	var m0, m1 runtime.MemStats
 	runtime.ReadMemStats(&m0)
 	allocating(f)
