@@ -118,6 +118,7 @@ func testCopyPaths(t *testing.T, e engineUnderTest) {
 		{"CloseLeavesTheDestinationItsBuffer", testCloseLeavesTheDestinationItsBuffer},
 		{"CloseWriteDoesNotWaitForReadFrom", testCloseWriteDoesNotWaitForReadFrom},
 		{"ReadFromReturnsNilAtEOFAfterPeerClosed", testReadFromReturnsNilAtEOFAfterPeerClosed},
+		{"CopyRejectsImpossibleCounts", testCopyRejectsImpossibleCounts},
 	} {
 		t.Run(tt.name, func(t *testing.T) { tt.test(t, e) })
 	}
@@ -947,5 +948,32 @@ func testReadFromReturnsNilAtEOFAfterPeerClosed(t *testing.T, e engineUnderTest)
 	}
 	if n, err := client.ReadFrom(readsThen("", io.EOF)); n != 0 || err != nil {
 		t.Errorf("ReadFrom(an empty source) = %d, %v; want 0, nil", n, err)
+	}
+}
+
+// testCopyRejectsImpossibleCounts checks that a source or a destination
+// that reports more bytes than it was given, or fewer than none, ends the
+// copy with an error, the bytes of that call not counted.
+func testCopyRejectsImpossibleCounts(t *testing.T, e engineUnderTest) {
+	client, server := e.pair(t, Config{})
+	for _, bad := range []struct {
+		name  string
+		count func(int) int
+	}{
+		{"more than given", func(n int) int { return n + 1 }},
+		{"negative", func(int) int { return -1 }},
+	} {
+		client.SetDeadline(time.Now().Add(time.Second))
+		n, err := client.ReadFrom(readerFunc(func(p []byte) (int, error) { return bad.count(len(p)), nil }))
+		if n != 0 || !isOpError(err, "readfrom", errInvalidRead) {
+			t.Errorf("ReadFrom(a source reporting %s) = %d, %v; want 0 and a readfrom *net.OpError with %v", bad.name, n, err, errInvalidRead)
+		}
+		if _, err := server.Write([]byte("hello")); err != nil {
+			t.Fatalf("Write error: %v", err)
+		}
+		n, err = client.WriteTo(writerFunc(func(p []byte) (int, error) { return bad.count(len(p)), nil }))
+		if n != 0 || !isOpError(err, "writeto", errInvalidWrite) {
+			t.Errorf("WriteTo(a destination reporting %s) = %d, %v; want 0 and a writeto *net.OpError with %v", bad.name, n, err, errInvalidWrite)
+		}
 	}
 }

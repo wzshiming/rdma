@@ -9,6 +9,20 @@ import (
 // when the stream does not lend its own.
 const copyBufferSize = 32 << 10
 
+// The errors of a source or destination that reports an impossible count.
+var (
+	errInvalidRead  = errors.New("invalid read result")
+	errInvalidWrite = errors.New("invalid write result")
+)
+
+// checkCount replaces a count outside [0, size] by none and invalid.
+func checkCount(n, size int, err, invalid error) (int, error) {
+	if n < 0 || n > size {
+		return 0, invalid
+	}
+	return n, err
+}
+
 // ReadFrom implements io.ReaderFrom, which io.Copy to the connection uses: it
 // sends what r reads, each read as soon as it returns, until r reports
 // io.EOF, and then returns the number of bytes sent and nil. Errors are
@@ -45,6 +59,7 @@ func (c *Conn) readFromLent(l lender, r io.Reader) (int64, error) {
 			return total + n, err
 		}
 		n, rerr := r.Read(view)
+		n, rerr = checkCount(n, len(view), rerr, errInvalidRead)
 		if err := l.commitWrite(n); err != nil {
 			return total, err
 		}
@@ -85,6 +100,7 @@ func (c *Conn) readFrom(r io.Reader) (int64, error) {
 			return total, err
 		}
 		n, rerr := r.Read(buf)
+		n, rerr = checkCount(n, len(buf), rerr, errInvalidRead)
 		if n > 0 {
 			m, err := c.send(buf[:n])
 			total += int64(m)
@@ -154,6 +170,7 @@ func (c *Conn) writeToLent(l lender, w io.Writer) (int64, error) {
 			return total, err
 		}
 		n, werr := w.Write(view)
+		n, werr = checkCount(n, len(view), werr, errInvalidWrite)
 		total += int64(n)
 		if err := l.returnRead(n); err != nil {
 			return total, err
@@ -193,6 +210,7 @@ func (c *Conn) writeTo(w io.Writer) (int64, error) {
 		n, err := c.read(buf)
 		if n > 0 {
 			m, werr := w.Write(buf[:n])
+			m, werr = checkCount(m, n, werr, errInvalidWrite)
 			total += int64(m)
 			if werr != nil {
 				return total, werr
