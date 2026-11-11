@@ -673,6 +673,25 @@ func TestGrantsRotateOverHalvesAndEntries(t *testing.T) {
 	}
 }
 
+// rs_send_credits copies each grant entry into its own slot of the control
+// buffer, rs_get_ctrl_buf of ctrl_seqno, so that a grant in flight keeps its
+// bytes while the next ones are posted.
+func TestGrantsInFlightKeepTheirBytes(t *testing.T) {
+	c := testConfig()
+	l := &recorder{}
+	s := rsproto.NewStream(l, c)
+	s.Connect(testPeer)
+	first := grantPosted(t, c, l.posts[0])
+	half := len(c.ReceiveBuffer.Buf) / 2
+	peerWrites(s, c, 0, make([]byte, half))
+	s.Peek()
+	s.Consume(half)
+
+	if got := grantPosted(t, c, l.posts[0]); got != first {
+		t.Errorf("the grant of Connect, in flight, changed from % x to % x when the next was posted", first, got)
+	}
+}
+
 func TestStreamConnData(t *testing.T) {
 	c := testConfig()
 	little := rsproto.ConnData{

@@ -50,6 +50,7 @@ type Stream struct {
 	remote      SGE              // the peer's grant table, Length counting entries: remote_sgl
 	remoteSGE   int              // the entry of it the next grant goes to
 	remoteOrder binary.ByteOrder // of the peer's host, which its grant table is in
+	ctrlSeqNo   uint32           // credit messages posted: ctrl_seqno
 
 	err error
 }
@@ -108,10 +109,12 @@ func (s *Stream) updateCredits() {
 
 // sendCredits mirrors rs_send_credits.
 func (s *Stream) sendCredits() {
+	s.ctrlSeqNo++
 	half := len(s.c.ReceiveBuffer.Buf) / 2
 	ctrl := s.c.ControlBuffer
-	PutSGE(ctrl.Buf, s.remoteOrder, SGE{Addr: s.c.ReceiveBuffer.Addr + uint64(s.rbufFree), Key: s.c.ReceiveBuffer.Key, Length: uint32(half)})
-	s.sgl[0] = Segment{Addr: ctrl.Addr, Length: SGESize, Key: ctrl.Key}
+	slot := int(s.ctrlSeqNo%QPCtrlSize) * SGESize
+	PutSGE(ctrl.Buf[slot:], s.remoteOrder, SGE{Addr: s.c.ReceiveBuffer.Addr + uint64(s.rbufFree), Key: s.c.ReceiveBuffer.Key, Length: uint32(half)})
+	s.sgl[0] = Segment{Addr: ctrl.Addr + uint64(slot), Length: SGESize, Key: ctrl.Key}
 	msg := MakeMsg(OpSGL, uint32(s.c.ReceiveQueueSize))
 	s.link.PostWriteMsg(uint64(msg), s.sgl[:], msg, s.remote.Addr+uint64(s.remoteSGE)*SGESize, s.remote.Key)
 	s.rbufAvail -= half
