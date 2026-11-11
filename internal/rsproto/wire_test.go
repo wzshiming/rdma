@@ -2,6 +2,8 @@ package rsproto_test
 
 import (
 	"encoding/binary"
+	"errors"
+	"io"
 	"testing"
 
 	"github.com/wzshiming/rdma/internal/rsproto"
@@ -98,6 +100,97 @@ func TestSGEWireFormat(t *testing.T) {
 			}
 			if back := rsproto.GetSGE(tt.wire[:], tt.order); back != grant {
 				t.Errorf("GetSGE(% x, %v) = %+v, want %+v", tt.wire, tt.order, back, grant)
+			}
+		})
+	}
+}
+
+// stockConnData is what rs_format_conn_data describes with the stock
+// defaults: rq_size credits, a grant table of RS_SGL_SIZE entries and the
+// first half of the receive buffer.
+var stockConnData = rsproto.ConnData{
+	Credits:    rsproto.DefaultReceiveQueueSize,
+	GrantTable: rsproto.SGE{Addr: 0x00007f1122330000, Key: 0x0000a1b2, Length: rsproto.SGLSize},
+	FirstGrant: rsproto.SGE{Addr: 0x00007f4455660000, Key: 0x0000c3d4, Length: rsproto.DefaultReceiveBufferSize / 2},
+}
+
+// stockConnDataWire is stockConnData from a little-endian host, big-endian
+// field by field: version 1, RS_CONN_FLAG_IOMAP with an iomap of 0 entries,
+// credits, 3 reserved bytes, then target_sgl and data_buf.
+var stockConnDataWire = [rsproto.ConnDataSize]byte{
+	0x01, 0x02, 0x01, 0x80, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x7f, 0x11, 0x22, 0x33, 0x00, 0x00, 0x00, 0x00, 0xa1, 0xb2, 0x00, 0x00, 0x00, 0x02,
+	0x00, 0x00, 0x7f, 0x44, 0x55, 0x66, 0x00, 0x00, 0x00, 0x00, 0xc3, 0xd4, 0x00, 0x01, 0x00, 0x00,
+}
+
+func TestConnDataEncode(t *testing.T) {
+	bigEndian := stockConnData
+	bigEndian.BigEndian = true
+	bigEndianWire := stockConnDataWire
+	bigEndianWire[1] = 0x03 // RS_CONN_FLAG_IOMAP | RS_CONN_FLAG_NET
+
+	tests := []struct {
+		c    string // the C function and case that formats the bytes
+		data rsproto.ConnData
+		wire [rsproto.ConnDataSize]byte
+	}{
+		{"rs_format_conn_data on a little-endian host", stockConnData, stockConnDataWire},
+		{"rs_format_conn_data on a big-endian host, RS_CONN_FLAG_NET set", bigEndian, bigEndianWire},
+	}
+	for _, tt := range tests {
+		t.Run(tt.c, func(t *testing.T) {
+			if got := tt.data.Encode(); got != tt.wire {
+				t.Errorf("%+v.Encode() =\n% x, want\n% x", tt.data, got, tt.wire)
+			}
+		})
+	}
+}
+
+func TestDecodeConnData(t *testing.T) {
+	bigEndian := stockConnData
+	bigEndian.BigEndian = true
+	bigEndianWire := stockConnDataWire
+	bigEndianWire[1] = 0x03 // RS_CONN_FLAG_IOMAP | RS_CONN_FLAG_NET
+	iomapWire := stockConnDataWire
+	iomapWire[7] = 5 // target_iomap_size
+
+	tests := []struct {
+		c    string // the C function and case that reads the bytes
+		wire []byte
+		want rsproto.ConnData
+	}{
+		{"rs_save_conn_data of a little-endian peer", stockConnDataWire[:], stockConnData},
+		{"rs_save_conn_data of a big-endian peer, RS_OPT_SWAP_SGL on a little-endian host", bigEndianWire[:], bigEndian},
+		{"rs_save_conn_data of a peer with an iomap, which is never written", iomapWire[:], stockConnData},
+		{"rs_accept of a request the IB CM zero-pads to 56 bytes", append(stockConnDataWire[:], make([]byte, 16)...), stockConnData},
+	}
+	for _, tt := range tests {
+		t.Run(tt.c, func(t *testing.T) {
+			got, err := rsproto.DecodeConnData(tt.wire)
+			if err != nil || got != tt.want {
+				t.Errorf("DecodeConnData(% x) = %+v, %v; want %+v, nil", tt.wire, got, err, tt.want)
+			}
+		})
+	}
+}
+
+func TestDecodeConnDataRejects(t *testing.T) {
+	version2 := stockConnDataWire
+	version2[0] = 2
+
+	tests := []struct {
+		c    string // the C function and case that refuses the bytes
+		wire []byte
+		want error
+	}{
+		{"rs_accept rejecting the zero-padded private data of a peer that sent none", make([]byte, 56), rsproto.ErrVersion},
+		{"rs_do_connect failing a reply of version 2 with ENOTSUP", version2[:], rsproto.ErrVersion},
+		{"none, as the IB CM delivers 56 or 196 bytes", stockConnDataWire[:rsproto.ConnDataSize-1], io.ErrUnexpectedEOF},
+	}
+	for _, tt := range tests {
+		t.Run(tt.c, func(t *testing.T) {
+			if _, err := rsproto.DecodeConnData(tt.wire); !errors.Is(err, tt.want) {
+				t.Errorf("DecodeConnData(% x) error = %v, want %v", tt.wire, err, tt.want)
 			}
 		})
 	}

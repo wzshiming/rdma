@@ -1,6 +1,11 @@
 package rsproto
 
-import "encoding/binary"
+import (
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"io"
+)
 
 // Sizes and limits of the protocol (rsocket.c lines 65-72).
 const (
@@ -79,4 +84,59 @@ func PutSGE(b []byte, order binary.ByteOrder, s SGE) {
 func GetSGE(b []byte, order binary.ByteOrder) SGE {
 	b = b[:SGESize]
 	return SGE{Addr: order.Uint64(b[0:8]), Key: order.Uint32(b[8:12]), Length: order.Uint32(b[12:16])}
+}
+
+// ConnData mirrors struct rs_conn_data (rsocket.c line 233), which each side
+// puts in the private data of the connection request and reply, big-endian.
+// Direct-I/O mappings are never advertised.
+type ConnData struct {
+	BigEndian  bool   // RS_CONN_FLAG_NET: the sender's host is big-endian
+	Credits    uint16 // the sender's receive queue depth
+	GrantTable SGE    // target_sgl: the sender's grant table, Length counting entries
+	FirstGrant SGE    // data_buf: the first half of the sender's receive buffer
+}
+
+// ConnDataSize is sizeof(struct rs_conn_data).
+const ConnDataSize = 40
+
+const (
+	connFlagNet   = 1 << 0 // RS_CONN_FLAG_NET
+	connFlagIOMap = 1 << 1 // RS_CONN_FLAG_IOMAP
+)
+
+// Encode mirrors rs_format_conn_data, which sets RS_CONN_FLAG_IOMAP even for
+// an iomap of 0 entries, the only size Encode writes.
+func (c ConnData) Encode() [ConnDataSize]byte {
+	var b [ConnDataSize]byte
+	b[0] = 1
+	b[1] = connFlagIOMap
+	if c.BigEndian {
+		b[1] |= connFlagNet
+	}
+	binary.BigEndian.PutUint16(b[2:4], c.Credits)
+	PutSGE(b[8:24], binary.BigEndian, c.GrantTable)
+	PutSGE(b[24:40], binary.BigEndian, c.FirstGrant)
+	return b
+}
+
+// ErrVersion reports connection data of a version other than 1, which
+// rs_accept rejects and rs_do_connect fails with ENOTSUP.
+var ErrVersion = errors.New("rsproto: unsupported connection data version")
+
+// DecodeConnData mirrors rs_save_conn_data. Fewer than ConnDataSize bytes
+// yield an error wrapping io.ErrUnexpectedEOF; the bytes after them, the
+// CM's zero padding of the private data, are ignored, as is the peer's iomap.
+func DecodeConnData(b []byte) (ConnData, error) {
+	if len(b) < ConnDataSize {
+		return ConnData{}, fmt.Errorf("rsproto: connection data of %d bytes, want %d: %w", len(b), ConnDataSize, io.ErrUnexpectedEOF)
+	}
+	if b[0] != 1 {
+		return ConnData{}, fmt.Errorf("%w %d", ErrVersion, b[0])
+	}
+	return ConnData{
+		BigEndian:  b[1]&connFlagNet != 0,
+		Credits:    binary.BigEndian.Uint16(b[2:4]),
+		GrantTable: GetSGE(b[8:24], binary.BigEndian),
+		FirstGrant: GetSGE(b[24:40], binary.BigEndian),
+	}, nil
 }
