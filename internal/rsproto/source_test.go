@@ -51,3 +51,16 @@ func TestPackageImportsOnlyTheStandardLibrary(t *testing.T) {
 		}
 	}
 }
+
+// The package starts no goroutine: no file holds a go statement.
+func TestPackageStartsNoGoroutine(t *testing.T) {
+	fset, files := sources(t)
+	for _, f := range files {
+		ast.Inspect(f, func(n ast.Node) bool {
+			if g, ok := n.(*ast.GoStmt); ok {
+				t.Errorf("%s starts a goroutine", fset.Position(g.Pos()))
+			}
+			return true
+		})
+	}
+}
