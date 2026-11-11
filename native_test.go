@@ -1,16 +1,33 @@
 package rdma
 
 import (
+	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"net/netip"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/wzshiming/rdma/internal/rsproto"
 )
 
 func TestNativeConnOnMemLink(t *testing.T) { testConn(t, nativeOnMemLink) }
+
+// A receive the transport refuses fails the building of the stream, before
+// any connection data goes out.
+func TestNativeStreamFailsOnARefusedReceive(t *testing.T) {
+	end, _ := rsproto.NewMemLink()
+	refused := errors.New("receive refused")
+	end.FailPost(refused)
+	tr := newMemTransport(end, memConfig(Config{}))
+	s, err := newNativeStream(tr, tr.mem, netip.AddrPort{}, netip.AddrPort{})
+	if s != nil || !errors.Is(err, refused) {
+		t.Errorf("newNativeStream on a transport refusing a receive = %v, %v; want no stream and an error wrapping %q", s, err, refused)
+	}
+}
 
 // The native engine's files import no rsocket and leave the message words,
 // credits and grants of rsockets to internal/rsproto: they name none of its

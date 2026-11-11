@@ -82,12 +82,15 @@ func (c *sendCounter) PostMsg(id uint64, msg rsproto.Msg) error {
 
 // newNativeStream builds a native stream on t and the memory of mem, which
 // t has registered, between the addresses: the receive queue is posted and
-// the stream awaits connect.
-func newNativeStream(t transport, mem rsproto.Config, local, remote netip.AddrPort) *nativeStream {
+// the stream awaits connect. It fails when t refuses a receive.
+func newNativeStream(t transport, mem rsproto.Config, local, remote netip.AddrPort) (*nativeStream, error) {
 	s := &nativeStream{t: t, local: local, remote: remote, closing: make(chan struct{})}
 	s.link.Link = t
 	s.st = rsproto.NewStream(&s.link, mem)
-	return s
+	if err := s.st.Err(); err != nil {
+		return nil, err
+	}
+	return s, nil
 }
 
 // connData returns the connection data to send the peer in the private data

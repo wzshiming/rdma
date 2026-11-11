@@ -59,7 +59,10 @@ func (e *memEngine) dial(ctx context.Context, laddr, raddr *Addr, c Config) (str
 		return nil, errRefused
 	}
 	e.nextPort++
-	client, server := e.connect(c, a.cfg, netip.AddrPortFrom(fakeIP, e.nextPort), a.bound)
+	client, server, err := e.connect(c, a.cfg, netip.AddrPortFrom(fakeIP, e.nextPort), a.bound)
+	if err != nil {
+		return nil, err
+	}
 	select {
 	case a.pending <- server:
 	default:
@@ -73,16 +76,20 @@ func (e *memEngine) dial(ctx context.Context, laddr, raddr *Addr, c Config) (str
 // connect joins a native stream on the memory of each Config over a new
 // memory link, as the handshake of rsockets does: each side takes the
 // connection data of the other. The caller holds e.mu.
-func (e *memEngine) connect(cc, sc Config, caddr, saddr netip.AddrPort) (client, server *nativeStream) {
+func (e *memEngine) connect(cc, sc Config, caddr, saddr netip.AddrPort) (client, server *nativeStream, err error) {
 	la, lb := rsproto.NewMemLink()
 	ta, tb := newMemTransport(la, memConfig(cc)), newMemTransport(lb, memConfig(sc))
 	ta.peer, tb.peer = tb, ta
 	e.ends = append(e.ends, ta, tb)
-	client = newNativeStream(ta, ta.mem, caddr, saddr)
-	server = newNativeStream(tb, tb.mem, saddr, caddr)
+	if client, err = newNativeStream(ta, ta.mem, caddr, saddr); err != nil {
+		return nil, nil, err
+	}
+	if server, err = newNativeStream(tb, tb.mem, saddr, caddr); err != nil {
+		return nil, nil, err
+	}
 	client.connect(e.handshake(server))
 	server.connect(e.handshake(client))
-	return client, server
+	return client, server, nil
 }
 
 // handshake returns the connection data of s as its peer reads it from the
