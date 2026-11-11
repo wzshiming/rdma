@@ -58,6 +58,21 @@ func (e nativeEngine) checkDevice(dev *verbs.Context) error {
 	return nil
 }
 
+// admit checks a connection request that arrived on dev with the private
+// data data as rs_accept does before it accepts, the connection data having
+// to be of version 1, and refuses dev when checkDevice does. It returns the
+// connection data of the peer.
+func (e nativeEngine) admit(data []byte, dev *verbs.Context) (rsproto.ConnData, error) {
+	peer, err := rsproto.DecodeConnData(data)
+	if err != nil {
+		return rsproto.ConnData{}, err
+	}
+	if err := e.checkDevice(dev); err != nil {
+		return rsproto.ConnData{}, err
+	}
+	return peer, nil
+}
+
 // dial connects a native stream to raddr as rs_do_connect connects an
 // rsocket: it resolves the route, sets the connection up on the device the
 // route leads to, sends the connection data of the stream with the request

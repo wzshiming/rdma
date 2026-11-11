@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/wzshiming/rdma/cm"
+	"github.com/wzshiming/rdma/internal/rsproto"
 	"github.com/wzshiming/rdma/verbs"
 )
 
@@ -91,6 +93,44 @@ func TestNativeEngineRefusesIWARPDevices(t *testing.T) {
 				t.Errorf("checkDevice on %v = %v, want nil", tt.transport, err)
 			case tt.refused && (!errors.Is(err, errors.ErrUnsupported) || !strings.Contains(fmt.Sprint(err), "librdmacm engine")):
 				t.Errorf("checkDevice on %v = %v, want an error matching errors.ErrUnsupported that names the librdmacm engine", tt.transport, err)
+			}
+		})
+	}
+}
+
+// A native listener admits a connection request as rs_accept does, only
+// with connection data of version 1, and on no iWARP device, refusing it
+// with an error that points at the librdmacm engine: the rest it rejects.
+func TestNativeListenerRejectsRequests(t *testing.T) {
+	// rdma_cm hands out the private data of a request zero padded.
+	request := func(version byte) []byte {
+		data := rsproto.ConnData{Credits: 384}.Encode()
+		data[0] = version
+		return append(data[:], make([]byte, cm.MaxConnectPrivateData-len(data))...)
+	}
+	for _, tt := range []struct {
+		name      string
+		data      []byte
+		transport verbs.TransportType
+		want      error // nil when admitted
+	}{
+		{"version 1 on InfiniBand", request(1), verbs.TransportIB, nil},
+		{"version 1 on usNIC", request(1), verbs.TransportUSNIC, nil},
+		{"version 0", request(0), verbs.TransportIB, rsproto.ErrVersion},
+		{"version 2", request(2), verbs.TransportIB, rsproto.ErrVersion},
+		{"version 255", request(255), verbs.TransportIB, rsproto.ErrVersion},
+		{"no connection data", make([]byte, cm.MaxConnectPrivateData), verbs.TransportIB, rsproto.ErrVersion},
+		{"version 1 on iWARP", request(1), verbs.TransportIWARP, errIWARP},
+		{"version 2 on iWARP", request(2), verbs.TransportIWARP, rsproto.ErrVersion},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			e := nativeEngine{transportType: func(*verbs.Context) verbs.TransportType { return tt.transport }}
+			peer, err := e.admit(tt.data, nil)
+			switch {
+			case tt.want == nil && (err != nil || peer.Credits != 384):
+				t.Errorf("admit = %+v, %v; want the request's connection data, nil", peer, err)
+			case tt.want != nil && !errors.Is(err, tt.want):
+				t.Errorf("admit error = %v, want %v", err, tt.want)
 			}
 		})
 	}
