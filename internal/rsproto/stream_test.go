@@ -351,8 +351,8 @@ func TestFailedSendIsAnError(t *testing.T) {
 	}
 	failed := errors.New("IBV_WC_RETRY_EXC_ERR")
 	s.Sent(l.data()[1].id, failed)
-	if err := s.Err(); !errors.Is(err, failed) || errors.Is(err, io.EOF) {
-		t.Errorf("Err() after a failed send = %v, want an error wrapping %q, not the io.EOF of an orderly end", err, failed)
+	if err := s.Err(); s.State() != rsproto.StateError || !errors.Is(err, failed) || errors.Is(err, io.EOF) {
+		t.Errorf("a failed send left the state %#x and Err() = %v, want %#x and an error wrapping %q, not the io.EOF of an orderly end", s.State(), err, rsproto.StateError, failed)
 	}
 }
 
@@ -1206,6 +1206,39 @@ func TestNoControlMessageOnceTheStreamEnds(t *testing.T) {
 			}
 			if got := l.posts[rsproto.QPCtrlSize:]; len(got) != 0 {
 				t.Errorf("the control slots coming back posted %+v, want nothing", got)
+			}
+		})
+	}
+}
+
+// rs_give_credits gives none unless the rsocket is rs_connected, which a
+// failed send, rs_error, and a disconnect, rs_disconnected, end.
+func TestNoCreditsAfterTheEnd(t *testing.T) {
+	tests := []struct {
+		c   string // the C function and case that ends the connection
+		end func(s *rsproto.Stream, l *recorder)
+	}{
+		{"rs_poll_cq of a failed send", func(s *rsproto.Stream, l *recorder) { s.Sent(l.data()[0].id, errors.New("IBV_WC_RETRY_EXC_ERR")) }},
+		{"rs_poll_cq of the peer's RS_CTRL_DISCONNECT", func(s *rsproto.Stream, l *recorder) {
+			s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlDisconnect))
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.c, func(t *testing.T) {
+			c := testConfig()
+			l := &recorder{}
+			s := rsproto.NewStream(l, c)
+			s.Connect(testPeer)
+			sendWhileCan(t, s, 1)
+			half := len(c.ReceiveBuffer.Buf) / 2
+			peerWrites(s, c, 0, make([]byte, half))
+			tt.end(s, l)
+			l.posts = nil
+
+			s.Peek()
+			s.Consume(half)
+			if len(l.posts) != 0 {
+				t.Errorf("reading half the receive buffer after the end posted %+v, want nothing", l.posts)
 			}
 		})
 	}

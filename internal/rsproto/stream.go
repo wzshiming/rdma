@@ -40,6 +40,7 @@ const (
 	StateReadable  State = 0x0400 // rs_readable: the peer has not ended its writing
 
 	StateDisconnected State = 0x1000 // rs_disconnected: the connection has ended
+	StateError        State = 0x2000 // rs_error: the connection has broken
 )
 
 // Stream is the state machine of one rsockets stream connection. It does no
@@ -235,7 +236,8 @@ func (s *Stream) Sent(id uint64, err error) {
 		s.sqeAvail++
 		s.sbufAvail += int(msg.Data())
 	}
-	if err != nil && s.err == nil {
+	if err != nil && s.state&StateConnected != 0 {
+		s.state = StateError
 		s.err = fmt.Errorf("rsproto: send failed: %w", err)
 	}
 	s.postHeld()
