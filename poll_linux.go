@@ -10,9 +10,15 @@ import (
 	"github.com/wzshiming/rdma/rsocket"
 )
 
-// platformEngine returns the engine of a Config: the librdmacm engine, with
-// one poller for the whole process.
-func platformEngine(Config) engine { return librdmacmEngine{&rsocketNet} }
+// platformEngine returns the engine c selects: the native engine for
+// EngineNative, the librdmacm engine, with one poller for the whole process,
+// otherwise.
+func platformEngine(c Config) engine {
+	if c.Engine == EngineNative {
+		return nativeEngine{}
+	}
+	return librdmacmEngine{&rsocketNet}
+}
 
 var rsocketNet rsocketNetwork
 

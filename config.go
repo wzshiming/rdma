@@ -13,6 +13,10 @@ import (
 // ListenConfig's to the listening socket and, by inheritance, to every
 // connection it accepts.
 type Config struct {
+	// Engine selects the engine that carries the connections:
+	// EngineLibrdmacm, also for the zero value, or EngineNative. A Listener
+	// accepts connections of its own engine, whatever the dialer runs.
+	Engine Engine
 	// SendBufferSize is the size in bytes of the registered send buffer
 	// (SO_SNDBUF), which rsockets double like the kernel does. Default 128
 	// KiB.
@@ -32,12 +36,32 @@ type Config struct {
 	MaxInline int
 }
 
+// Engine names an engine, what carries the connections of a Dialer or a
+// Listener; both speak the rsockets protocol, so either talks to the other
+// and to any rsockets application.
+type Engine string
+
+const (
+	// EngineNative runs the rsockets protocol in Go on the verbs and cm
+	// packages and lends its registered buffers to ReadFrom and WriteTo. It
+	// does not run on iWARP devices.
+	EngineNative Engine = "native"
+	// EngineLibrdmacm drives the rsockets of librdmacm.
+	EngineLibrdmacm Engine = "librdmacm"
+)
+
 // errConfig is the cause of the *net.OpError reported for a Config that no
 // socket could take.
 var errConfig = errors.New("invalid Config")
 
-// validate rejects negative fields before a socket is created.
+// validate rejects an Engine that names no engine and negative fields before
+// a socket is created.
 func (c Config) validate() error {
+	switch c.Engine {
+	case "", EngineNative, EngineLibrdmacm:
+	default:
+		return fmt.Errorf("%w: Engine %q is neither %q nor %q", errConfig, c.Engine, EngineNative, EngineLibrdmacm)
+	}
 	for _, f := range []struct {
 		name  string
 		value int

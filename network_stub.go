@@ -8,10 +8,17 @@ import (
 	"github.com/wzshiming/rdma/rsocket"
 )
 
-// platformEngine returns the engine of a Config on a platform without
-// librdmacm: the librdmacm engine on a network whose socket fails with
-// errors.ErrUnsupported, so nothing is ever polled.
-func platformEngine(Config) engine { return librdmacmEngine{unsupportedNetwork{}} }
+// platformEngine returns the engine c selects on a platform without
+// rdma-core, which fails with an error matching errors.ErrUnsupported either
+// way: the native engine for EngineNative, as no library it runs on can be
+// loaded, the librdmacm engine otherwise, on a network whose socket fails, so
+// nothing is ever polled.
+func platformEngine(c Config) engine {
+	if c.Engine == EngineNative {
+		return nativeEngine{}
+	}
+	return librdmacmEngine{unsupportedNetwork{}}
+}
 
 type unsupportedNetwork struct{}
 

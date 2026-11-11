@@ -11,8 +11,9 @@ import (
 	"github.com/wzshiming/rdma"
 )
 
-// TestStubUnsupported checks that without librdmacm the net-style
-// constructors fail the way the net package would report it.
+// TestStubUnsupported checks that without rdma-core the net-style
+// constructors fail the way the net package would report it, on either
+// engine.
 func TestStubUnsupported(t *testing.T) {
 	tests := []struct {
 		name string
@@ -29,10 +30,30 @@ func TestStubUnsupported(t *testing.T) {
 			_, err := d.Dial("rdma", "10.200.0.1:4791")
 			return err
 		}},
+		{"Dialer of EngineNative", "dial", func() error {
+			d := rdma.Dialer{Config: rdma.Config{Engine: rdma.EngineNative}}
+			_, err := d.Dial("rdma", "10.200.0.1:4791")
+			return err
+		}},
+		{"Dialer of EngineLibrdmacm", "dial", func() error {
+			d := rdma.Dialer{Config: rdma.Config{Engine: rdma.EngineLibrdmacm}}
+			_, err := d.Dial("rdma", "10.200.0.1:4791")
+			return err
+		}},
 		{"Listen", "listen", func() error { _, err := rdma.Listen("rdma", "10.200.0.1:0"); return err }},
 		{"ListenConfig", "listen", func() error {
 			lc := rdma.ListenConfig{Backlog: 4}
 			_, err := lc.Listen(context.Background(), "rdma", ":0")
+			return err
+		}},
+		{"ListenConfig of EngineNative", "listen", func() error {
+			lc := rdma.ListenConfig{Config: rdma.Config{Engine: rdma.EngineNative}}
+			_, err := lc.Listen(context.Background(), "rdma", "10.200.0.1:0")
+			return err
+		}},
+		{"ListenConfig of EngineLibrdmacm", "listen", func() error {
+			lc := rdma.ListenConfig{Config: rdma.Config{Engine: rdma.EngineLibrdmacm}}
+			_, err := lc.Listen(context.Background(), "rdma", "10.200.0.1:0")
 			return err
 		}},
 	}
