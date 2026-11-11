@@ -1240,6 +1240,29 @@ func TestHeldEndGoesOutAfterThePeerShutdown(t *testing.T) {
 	}
 }
 
+// rs_conn_all_sends_done, which rshutdown waits for before it takes the link
+// down, holds as soon as the peer's RS_CTRL_SHUTDOWN makes the rsocket
+// rs_disconnected; the stream waits for the end it held to go out and
+// complete too, so that the link outlives it.
+func TestSendsDoneWaitsForTheEndHeldAtThePeerShutdown(t *testing.T) {
+	s, l := fourCreditsDue(t)
+	s.CloseWrite()
+	s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlShutdown))
+	for i, p := range l.posts[:rsproto.QPCtrlSize] {
+		if s.SendsDone() {
+			t.Fatalf("SendsDone() after the peer's shutdown with %d of the %d credits completed and RS_CTRL_SHUTDOWN held", i, rsproto.QPCtrlSize)
+		}
+		s.Sent(p.id, nil)
+	}
+	if len(l.posts) != rsproto.QPCtrlSize+1 || s.SendsDone() {
+		t.Fatalf("the control slots coming back posted %+v, and SendsDone() = %v; want RS_CTRL_SHUTDOWN in flight and false", l.posts[rsproto.QPCtrlSize:], s.SendsDone())
+	}
+	s.Sent(l.posts[rsproto.QPCtrlSize].id, nil)
+	if !s.SendsDone() {
+		t.Error("SendsDone() = false once RS_CTRL_SHUTDOWN, the last post, completed")
+	}
+}
+
 // rs_give_credits gives none unless the rsocket is rs_connected, which a
 // failed send, rs_error, and a disconnect, rs_disconnected, end.
 func TestNoCreditsAfterTheEnd(t *testing.T) {

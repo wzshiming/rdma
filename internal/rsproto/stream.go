@@ -186,9 +186,11 @@ func (s *Stream) CanSend() bool {
 func (s *Stream) Writable() bool { return s.CanSend() || s.state&StateWritable == 0 }
 
 // SendsDone mirrors rs_conn_all_sends_done, which rshutdown waits for:
-// whether every post has completed or the connection has ended.
+// whether every post has completed or the connection has ended, though not
+// while an end held as the peer's RS_CTRL_SHUTDOWN ended it has yet to go out
+// and complete.
 func (s *Stream) SendsDone() bool {
-	return int(s.ctrlMaxSeqNo-s.ctrlSeqNo)+s.sqeAvail == s.c.SendQueueSize || s.state&StateConnected == 0
+	return int(s.ctrlMaxSeqNo-s.ctrlSeqNo)+s.sqeAvail == s.c.SendQueueSize || s.state&StateConnected == 0 && !s.endOwed
 }
 
 // Reserve lends the room of the send buffer that one message can carry now,
