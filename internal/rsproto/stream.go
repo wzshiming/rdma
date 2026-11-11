@@ -44,17 +44,25 @@ type Stream struct {
 	err       error
 }
 
+// recvID is the id of every receive, rs_recv_wr_id(0).
+const recvID = 1 << 63
+
 // NewStream returns a stream on memory the caller registered, as
-// rs_create_ep leaves it for a connection to be set up.
+// rs_create_ep leaves it for a connection to be set up: with
+// ReceiveQueueSize receives posted.
 func NewStream(l Link, c Config) *Stream {
 	clear(c.GrantTable.Buf[:SGLSize*SGESize])
-	return &Stream{
+	s := &Stream{
 		link:      l,
 		c:         c,
 		order:     ConnData{BigEndian: c.BigEndian}.ByteOrder(),
 		sqeAvail:  c.SendQueueSize - QPCtrlSize,
 		sbufAvail: len(c.SendBuffer.Buf),
 	}
+	for range c.ReceiveQueueSize {
+		l.PostRecv(recvID)
+	}
+	return s
 }
 
 // ConnData mirrors rs_format_conn_data: the connection data to send the peer.

@@ -19,10 +19,11 @@ type post struct {
 	key  uint32
 }
 
-// recorder is a link that records what a stream posts and answers each post
-// with err.
+// recorder is a link that records what a stream posts, the ids of receives
+// apart from the sends, and answers each post with err.
 type recorder struct {
 	posts []post
+	recvs []uint64
 	err   error
 }
 
@@ -37,7 +38,7 @@ func (r *recorder) PostMsg(id uint64, msg rsproto.Msg) error {
 }
 
 func (r *recorder) PostRecv(id uint64) error {
-	r.posts = append(r.posts, post{op: "rs_post_recv", id: id})
+	r.recvs = append(r.recvs, id)
 	return r.err
 }
 
@@ -418,6 +419,17 @@ func TestCommitReturnsThePostError(t *testing.T) {
 	s.Reserve()
 	if err := s.Commit(1); !errors.Is(err, refused) {
 		t.Errorf("Commit(1) with the post refused = %v, want %v", err, refused)
+	}
+}
+
+// rs_create_ep posts rq_size receives before the connection is made, each
+// with the id rs_recv_wr_id(0) by which rs_poll_cq tells them from sends.
+func TestNewStreamPostsTheReceiveQueue(t *testing.T) {
+	l := &recorder{}
+	rsproto.NewStream(l, testConfig())
+
+	if want := slices.Repeat([]uint64{1 << 63}, rsproto.DefaultReceiveQueueSize); !slices.Equal(l.recvs, want) {
+		t.Errorf("NewStream posted %d receives %#x, want %d with id %#x", len(l.recvs), l.recvs, len(want), uint64(1<<63))
 	}
 }
 
