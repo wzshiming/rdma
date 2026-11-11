@@ -196,9 +196,10 @@ func (s *Stream) Commit(n int) error {
 func (s *Stream) Sent(id uint64, err error) {
 	if Msg(id).Op() == OpSGL {
 		s.ctrlMaxSeqNo++
+	} else {
+		s.sqeAvail++
+		s.sbufAvail += int(Msg(id).Data())
 	}
-	s.sqeAvail++
-	s.sbufAvail += int(Msg(id).Data())
 	if err != nil && s.err == nil {
 		s.err = fmt.Errorf("rsproto: send failed: %w", err)
 	}

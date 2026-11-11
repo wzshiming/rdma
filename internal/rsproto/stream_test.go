@@ -840,6 +840,22 @@ func TestCreditCompletionGivesBackItsSlot(t *testing.T) {
 	}
 }
 
+// rs_poll_cq gives a send queue entry and send buffer bytes back for a data
+// send that completes, not for an RS_OP_SGL one, which took neither.
+func TestCreditCompletionGivesBackNoQueueEntry(t *testing.T) {
+	c := testConfig()
+	c.SendQueueSize = rsproto.QPMinSize
+	l := &recorder{}
+	s := rsproto.NewStream(l, c)
+	s.Connect(testPeer)
+	sendWhileCan(t, s, 100)
+
+	s.Sent(l.posts[0].id, nil)
+	if s.CanSend() {
+		t.Errorf("CanSend() after the grant of Connect completed with the send queue full of data, want false")
+	}
+}
+
 func TestStreamConnData(t *testing.T) {
 	c := testConfig()
 	little := rsproto.ConnData{
