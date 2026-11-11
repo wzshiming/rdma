@@ -202,7 +202,8 @@ func (s *Stream) Reserve() []byte {
 
 // Commit ends the reservation, sending the first n bytes of the view as one
 // data message, as rs_write_data does; once the write side has ended it sends
-// nothing and fails.
+// nothing and fails. A post the link refuses breaks the stream, which has
+// counted the message as sent, so that no message goes out behind the gap.
 func (s *Stream) Commit(n int) error {
 	if s.state&StateWritable == 0 {
 		return errWriteEnded
@@ -227,7 +228,9 @@ func (s *Stream) Commit(n int) error {
 		s.sbufPos = 0
 	}
 	msg := MakeMsg(OpData, uint32(n))
-	return s.link.PostWriteMsg(uint64(msg), s.sgl[:], msg, addr, key)
+	err := s.link.PostWriteMsg(uint64(msg), s.sgl[:], msg, addr, key)
+	s.checkPost(err)
+	return err
 }
 
 // Sent takes the completion of the post with the given id, err telling why it
@@ -390,8 +393,8 @@ func (s *Stream) postCtrl(ctrl uint32) {
 	s.checkPost(s.link.PostMsg(uint64(msg), msg))
 }
 
-// checkPost breaks the stream on err, the refusal of a post it made on its
-// own, unless it broke before.
+// checkPost breaks the stream on err, the refusal of a post it made, unless
+// it broke before.
 func (s *Stream) checkPost(err error) {
 	if err != nil && s.err == nil {
 		s.state = StateError

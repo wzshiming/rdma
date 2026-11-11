@@ -2,6 +2,7 @@ package rsproto_test
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"math/rand/v2"
 	"strings"
@@ -340,5 +341,34 @@ func TestControlMessageWaitsForAReceive(t *testing.T) {
 	pump(a, b)
 	if got, want := recv(b), strings.Repeat("x", rsproto.QPMinSize); got != want || !b.s.EOF() {
 		t.Errorf("once b posted its receives again it read %q and EOF() = %v, want %q and true", got, b.s.EOF(), want)
+	}
+}
+
+// A write that fails breaks the stream that made it, which then writes no
+// more, so that no message goes out behind the one lost: the stream is in the
+// error state, with the failure for its cause, not the io.EOF of an orderly
+// end.
+func TestFailedWriteIsNoOrderlyEnd(t *testing.T) {
+	failed := errors.New("injected failure")
+	tests := []struct {
+		name  string
+		write func(t *testing.T, a, b *side)
+	}{
+		{"post refused", func(t *testing.T, a, b *side) {
+			a.l.FailPost(failed)
+			a.s.Reserve()
+			if err := a.s.Commit(1); !errors.Is(err, failed) {
+				t.Fatalf("Commit(1) with the post refused = %v, want %v", err, failed)
+			}
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a, b := join(smallConfig(0xa0000000), smallConfig(0xb0000000))
+			tt.write(t, a, b)
+			if err := a.s.Err(); a.s.State() != rsproto.StateError || !errors.Is(err, failed) || errors.Is(err, io.EOF) || a.s.Reserve() != nil {
+				t.Errorf("a failed write left the state %#x, Err() = %v and Reserve() lending %d bytes, want %#x, an error wrapping %q and none", a.s.State(), err, len(a.s.Reserve()), rsproto.StateError, failed)
+			}
+		})
 	}
 }
