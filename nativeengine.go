@@ -7,6 +7,7 @@ import (
 	"math"
 
 	"github.com/wzshiming/rdma/cm"
+	"github.com/wzshiming/rdma/internal/dynlib"
 	"github.com/wzshiming/rdma/internal/rsproto"
 	"github.com/wzshiming/rdma/verbs"
 )
@@ -14,6 +15,9 @@ import (
 // nativeEngine is the engine that speaks the rsockets protocol in Go, each
 // connection a native stream on an RC queue pair of verbs that cm connects.
 type nativeEngine struct {
+	// libraries are what a dial loads before anything else, nil meaning
+	// nativeLibraries; tests name libraries that do not exist.
+	libraries []string
 	// transportType reports the transport of a device, nil meaning the
 	// device's own; tests make a device look like iWARP.
 	transportType func(*verbs.Context) verbs.TransportType
@@ -22,6 +26,24 @@ type nativeEngine struct {
 // errIWARP refuses a device of the iWARP transport, whose mode of rsockets
 // the native engine leaves out.
 var errIWARP = fmt.Errorf("rdma: the native engine does not run on iWARP devices, the librdmacm engine does: %w", errors.ErrUnsupported)
+
+// nativeLibraries are the libraries of rdma-core the native engine runs on.
+var nativeLibraries = []string{"libibverbs.so.1", "librdmacm.so.1"}
+
+// loadLibraries loads the libraries of the engine, which fails with an error
+// matching errors.ErrUnsupported for the first that cannot be loaded.
+func (e nativeEngine) loadLibraries() error {
+	names := e.libraries
+	if names == nil {
+		names = nativeLibraries
+	}
+	for _, name := range names {
+		if _, err := dynlib.Open(name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 // checkDevice reports why the engine cannot run on dev, nil when it can: on
 // every transport but iWARP, the one rs_create_ep sets up differently.
@@ -39,8 +61,11 @@ func (e nativeEngine) checkDevice(dev *verbs.Context) error {
 // dial connects a native stream to raddr as rs_do_connect connects an
 // rsocket: it resolves the route, sets the connection up on the device the
 // route leads to, sends the connection data of the stream with the request
-// and takes the peer's from the reply.
+// and takes the peer's from the reply. A library missing fails it first.
 func (e nativeEngine) dial(ctx context.Context, laddr, raddr *Addr, c Config) (stream, error) {
+	if err := e.loadLibraries(); err != nil {
+		return nil, err
+	}
 	id, err := cm.Resolve(ctx, laddr.addrPort(), raddr.addrPort())
 	if err != nil {
 		return nil, err

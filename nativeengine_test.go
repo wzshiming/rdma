@@ -95,3 +95,29 @@ func TestNativeEngineRefusesIWARPDevices(t *testing.T) {
 		})
 	}
 }
+
+// A native dial fails at once with a dial *net.OpError matching
+// errors.ErrUnsupported when one of the libraries it runs on, the first or
+// the second it loads, cannot be loaded.
+func TestNativeDialWithoutALibraryIsUnsupported(t *testing.T) {
+	const missing = "/nonexistent/"
+	for _, tt := range []struct {
+		name      string
+		libraries []string
+	}{
+		{"libibverbs", []string{missing + "libibverbs.so.1", "librdmacm.so.1"}},
+		{"librdmacm", []string{"libibverbs.so.1", missing + "librdmacm.so.1"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			d := Dialer{eng: nativeDialer{nativeEngine{libraries: tt.libraries}}}
+			c, err := d.Dial("rdma", "192.0.2.1:7471")
+			if err == nil {
+				c.Close()
+			}
+			if !isOpError(err, "dial", errors.ErrUnsupported) {
+				t.Errorf("Dial() loading %q error = %v, want a dial *net.OpError matching errors.ErrUnsupported", tt.libraries, err)
+			}
+			t.Logf("Dial() loading %q: %v", tt.libraries, err)
+		})
+	}
+}
