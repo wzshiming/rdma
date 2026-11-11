@@ -60,4 +60,24 @@
 // while the peer is alive; when it has vanished, rsockets wait for the posted
 // sends to be given up, which takes the transport's retry timeout, several
 // seconds.
+//
+// *Conn implements io.ReaderFrom and io.WriterTo, which io.Copy uses in
+// either direction. ReadFrom sends what the source reads, each read as soon
+// as it returns, and returns nil at the source's io.EOF. WriteTo hands the
+// destination what has arrived, all that lies contiguous at the time, and
+// returns nil once the peer has shut down writing and everything is handed
+// over, or io.ErrShortWrite when the destination takes less without an
+// error. Their errors are *net.OpError values of Op "readfrom" and
+// "writeto", which carry the source's and the destination's own. ReadFrom
+// holds the sending side and WriteTo the receiving side until they return;
+// Close and CloseWrite do not wait for them, and the deadlines bound their
+// waits for room and data but not the source and the destination. Whether
+// the bytes move without a copy depends on what carries the connection.
+// Over one that lends its registered buffers, the source reads straight into
+// the send buffer and the destination is handed the receive buffer, whose
+// room returns to the peer only once the destination has taken the bytes;
+// what a failing destination did not take stays to be read. librdmacm's
+// rsockets keep their buffers to themselves, so over them both methods move
+// the bytes through a buffer of their own, which returns the receive room
+// before the destination takes the bytes and loses those it refuses.
 package rdma
