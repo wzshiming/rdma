@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"math/rand/v2"
+	"strings"
 	"testing"
 
 	"github.com/wzshiming/rdma/internal/rsproto"
@@ -309,5 +310,35 @@ func TestAtMostFourControlMessagesInFlight(t *testing.T) {
 	pump(a, b)
 	if got := b.arrived[rsproto.OpSGL] - before; got != rsproto.QPCtrlSize+1 || !b.s.CanSend() {
 		t.Errorf("once a took its completions, %d credit messages had reached b and CanSend() = %v, want %d and true", got, b.s.CanSend(), rsproto.QPCtrlSize+1)
+	}
+}
+
+// A control message takes none of the writer's credits, so it can find the
+// peer's receives all used up by the data the credits allowed: rsockets
+// counts on the RNR retry of the link, and the message arrives once the peer
+// has taken the data and posted its receives again.
+func TestControlMessageWaitsForAReceive(t *testing.T) {
+	a, b := join(smallConfig(0xa0000000), smallConfig(0xb0000000))
+	for range rsproto.QPMinSize {
+		send(t, a, "x")
+	}
+	if a.s.CanSend() {
+		t.Fatalf("a can send with the %d credits of b used up", rsproto.QPMinSize)
+	}
+	var held []rsproto.Msg
+	for msg, ok := b.l.Deliver(); ok; msg, ok = b.l.Deliver() {
+		held = append(held, msg)
+	}
+	a.s.CloseWrite()
+	if msg, ok := b.l.Deliver(); ok {
+		t.Fatalf("Deliver() with the %d receives of b used up = %#x, want nothing", len(held), msg)
+	}
+
+	for _, msg := range held {
+		b.s.Received(msg)
+	}
+	pump(a, b)
+	if got, want := recv(b), strings.Repeat("x", rsproto.QPMinSize); got != want || !b.s.EOF() {
+		t.Errorf("once b posted its receives again it read %q and EOF() = %v, want %q and true", got, b.s.EOF(), want)
 	}
 }

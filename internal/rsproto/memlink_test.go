@@ -87,3 +87,37 @@ func TestMemLinkSendsCompleteInOrderOnceTaken(t *testing.T) {
 		t.Errorf("Completion() after all three = %d, want nothing", id)
 	}
 }
+
+// A message arrives only into a receive the peer has posted: while there is
+// none, Deliver leaves it on the link, and the messages behind it, to be
+// retried, as the stock rnr_retry_count of 7 retries without end, and it does
+// not complete.
+func TestMemLinkMessageWaitsForAReceive(t *testing.T) {
+	a, b := rsproto.NewMemLink()
+	first, second := rsproto.MakeMsg(rsproto.OpSGL, 1), rsproto.MakeMsg(rsproto.OpSGL, 2)
+	for i, msg := range []rsproto.Msg{first, second} {
+		if err := a.PostMsg(uint64(i), msg); err != nil {
+			t.Fatalf("PostMsg = %v", err)
+		}
+	}
+
+	for range 3 {
+		if got, ok := b.Deliver(); ok {
+			t.Fatalf("Deliver() with no receive posted = %#x, want nothing", got)
+		}
+	}
+	if id, _, ok := a.Completion(); ok {
+		t.Fatalf("send %d completed with no receive posted", id)
+	}
+	for _, want := range []rsproto.Msg{first, second} {
+		if err := b.PostRecv(1 << 63); err != nil {
+			t.Fatalf("PostRecv = %v", err)
+		}
+		if got, ok := b.Deliver(); !ok || got != want {
+			t.Fatalf("Deliver() with a receive posted = %#x, %v, want %#x", got, ok, want)
+		}
+		if got, ok := b.Deliver(); ok {
+			t.Fatalf("Deliver() with the receive used up = %#x, want nothing", got)
+		}
+	}
+}

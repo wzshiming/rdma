@@ -30,6 +30,7 @@ type MemEnd struct {
 	peer  *MemEnd
 	mem   []Region  // registered
 	sends []memSend // posted and not yet carried to the peer
+	recvs int       // receives posted and not yet used up
 	done  []uint64  // the ids of sends carried and not yet taken by Completion
 }
 
@@ -71,19 +72,28 @@ func (e *MemEnd) PostMsg(id uint64, msg Msg) error {
 }
 
 // PostRecv posts a receive for a message word of the peer.
-func (e *MemEnd) PostRecv(id uint64) error { return nil }
+func (e *MemEnd) PostRecv(id uint64) error {
+	e.link.mu.Lock()
+	defer e.link.mu.Unlock()
+	e.recvs++
+	return nil
+}
 
 // Deliver carries the oldest message the peer posted and this end has not
-// taken: its bytes into the memory registered here and its word, returned
-// for Stream.Received. It reports false when there is none. Deliver writes
-// the memory of this end, so the goroutine that drives its stream calls it.
+// taken into the oldest receive posted here: its bytes into the memory
+// registered here and its word, returned for Stream.Received. It reports
+// false when there is no message, or no receive, which leaves the message on
+// the link, with those behind it, for a later Deliver to retry as the RNR
+// retry of rnr_retry_count 7 does without end. Deliver writes the memory of
+// this end, so the goroutine that drives its stream calls it.
 func (e *MemEnd) Deliver() (Msg, bool) {
 	e.link.mu.Lock()
 	defer e.link.mu.Unlock()
 	from := e.peer
-	if len(from.sends) == 0 {
+	if len(from.sends) == 0 || e.recvs == 0 {
 		return 0, false
 	}
+	e.recvs--
 	p := from.sends[0]
 	from.sends = slices.Delete(from.sends, 0, 1)
 	var n uint64
