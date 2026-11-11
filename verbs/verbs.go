@@ -112,6 +112,36 @@ var gidTypeNames = []string{"IB", "RoCE v1", "RoCE v2"}
 
 func (t GIDType) String() string { return enumString("GIDType", int(t), gidTypeNames) }
 
+// TransportType is the transport of a device (IBV_TRANSPORT_*); RoCE devices
+// report TransportIB, as InfiniBand ones do.
+type TransportType int
+
+// Transport types.
+const (
+	TransportUnknown     TransportType = -1
+	TransportIB          TransportType = 0
+	TransportIWARP       TransportType = 1
+	TransportUSNIC       TransportType = 2
+	TransportUSNICUDP    TransportType = 3
+	TransportUnspecified TransportType = 4
+)
+
+var transportTypeNames = map[TransportType]string{
+	TransportUnknown:     "Unknown",
+	TransportIB:          "InfiniBand",
+	TransportIWARP:       "iWARP",
+	TransportUSNIC:       "usNIC",
+	TransportUSNICUDP:    "usNIC UDP",
+	TransportUnspecified: "Unspecified",
+}
+
+func (t TransportType) String() string {
+	if s, ok := transportTypeNames[t]; ok {
+		return s
+	}
+	return unknown("TransportType", int(t))
+}
+
 // AccessFlags are memory access permissions (IBV_ACCESS_*).
 type AccessFlags uint32
 
