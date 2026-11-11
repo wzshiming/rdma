@@ -84,7 +84,7 @@ func NewStream(l Link, c Config) *Stream {
 	}
 	for range c.ReceiveQueueSize {
 		if err := l.PostRecv(recvID); err != nil {
-			s.err = fmt.Errorf("rsproto: post failed: %w", err)
+			s.checkPost(err)
 			break
 		}
 	}
@@ -128,18 +128,14 @@ func (s *Stream) sendCredits() {
 	msg := MakeMsg(OpSGL, uint32(s.rseqNo)+uint32(s.c.ReceiveQueueSize))
 	half := len(s.c.ReceiveBuffer.Buf) / 2
 	if s.rbufAvail < half {
-		if err := s.link.PostMsg(uint64(msg), msg); err != nil && s.err == nil {
-			s.err = fmt.Errorf("rsproto: post failed: %w", err)
-		}
+		s.checkPost(s.link.PostMsg(uint64(msg), msg))
 		return
 	}
 	ctrl := s.c.ControlBuffer
 	slot := int(s.ctrlSeqNo%QPCtrlSize) * SGESize
 	PutSGE(ctrl.Buf[slot:], s.remoteOrder, SGE{Addr: s.c.ReceiveBuffer.Addr + uint64(s.rbufFree), Key: s.c.ReceiveBuffer.Key, Length: uint32(half)})
 	s.sgl[0] = Segment{Addr: ctrl.Addr + uint64(slot), Length: SGESize, Key: ctrl.Key}
-	if err := s.link.PostWriteMsg(uint64(msg), s.sgl[:], msg, s.remote.Addr+uint64(s.remoteSGE)*SGESize, s.remote.Key); err != nil && s.err == nil {
-		s.err = fmt.Errorf("rsproto: post failed: %w", err)
-	}
+	s.checkPost(s.link.PostWriteMsg(uint64(msg), s.sgl[:], msg, s.remote.Addr+uint64(s.remoteSGE)*SGESize, s.remote.Key))
 	s.rbufAvail -= half
 	if s.rbufFree += half; s.rbufFree >= len(s.c.ReceiveBuffer.Buf) {
 		s.rbufFree = 0
@@ -229,9 +225,7 @@ func (s *Stream) Received(msg Msg) {
 		}
 		s.rbufArrived += int(msg.Data())
 	}
-	if err := s.link.PostRecv(recvID); err != nil && s.err == nil {
-		s.err = fmt.Errorf("rsproto: post failed: %w", err)
-	}
+	s.checkPost(s.link.PostRecv(recvID))
 }
 
 // Peek lends the bytes that have arrived and lie contiguous in the receive
@@ -263,6 +257,14 @@ func (s *Stream) Consume(n int) {
 		}
 	}
 	s.updateCredits()
+}
+
+// checkPost breaks the stream on err, the refusal of a post it made on its
+// own, unless it broke before.
+func (s *Stream) checkPost(err error) {
+	if err != nil && s.err == nil {
+		s.err = fmt.Errorf("rsproto: post failed: %w", err)
+	}
 }
 
 // Err returns why the stream broke, nil while it has not.
