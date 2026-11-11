@@ -109,9 +109,12 @@ func (e nativeEngine) dial(ctx context.Context, laddr, raddr *Addr, c Config) (s
 }
 
 // listen listens on laddr through cm, as rlisten does, and has an acceptor
-// establish each request that arrives with acceptRequest. A library missing
-// fails it first.
+// establish each request that arrives with acceptRequest. A Config no
+// connection could be sized for fails it first, then a library missing.
 func (e nativeEngine) listen(laddr *Addr, backlog int, c Config) (acceptor, error) {
+	if _, err := sizesFor(c, rsproto.QPMaxSize); err != nil {
+		return nil, err
+	}
 	if err := e.loadLibraries(); err != nil {
 		return nil, err
 	}

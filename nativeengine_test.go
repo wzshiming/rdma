@@ -69,6 +69,23 @@ func TestNativeSizesRefuseBuffersBeyond32Bits(t *testing.T) {
 	}
 }
 
+// A native listen refuses a Config whose buffers the 32 bits of rsockets
+// cannot hold before it listens, rather than refuse every request.
+func TestNativeListenRefusesBuffersBeyond32Bits(t *testing.T) {
+	if math.MaxInt == math.MaxInt32 {
+		t.Skip("an int holds no such size here")
+	}
+	fits := math.MaxUint32 / 2
+	lc := ListenConfig{Config: Config{ReceiveBufferSize: fits + 1}, eng: nativeEngine{}}
+	ln, err := lc.Listen(t.Context(), "rdma", "192.0.2.1:7471")
+	if err == nil {
+		ln.Close()
+	}
+	if !isOpError(err, "listen", errConfig) {
+		t.Errorf("Listen() with %+v error = %v, want a listen *net.OpError matching errConfig", lc.Config, err)
+	}
+}
+
 // The native engine refuses a device of the iWARP transport, whose mode of
 // rsockets it leaves out, with an error matching errors.ErrUnsupported that
 // points at the librdmacm engine, and takes every other one, as rs_create_ep
