@@ -269,6 +269,14 @@ func (s *Stream) Consume(n int) {
 	s.updateCredits()
 }
 
+// CloseWrite mirrors rshutdown(SHUT_WR): the write side ends, which the peer
+// learns by RS_CTRL_SHUTDOWN.
+func (s *Stream) CloseWrite() {
+	s.state &^= StateWritable
+	msg := MakeMsg(OpCtrl, CtrlShutdown)
+	s.link.PostMsg(uint64(msg), msg)
+}
+
 // checkPost breaks the stream on err, the refusal of a post it made on its
 // own, unless it broke before.
 func (s *Stream) checkPost(err error) {

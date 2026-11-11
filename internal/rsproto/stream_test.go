@@ -948,6 +948,32 @@ func TestKeepaliveAndUnknownControlDataAreIgnored(t *testing.T) {
 	}
 }
 
+// isCtrl reports whether p is the control message rshutdown posts with
+// rs_post_msg, RS_OP_CTRL carrying ctrl.
+func isCtrl(p post, ctrl uint32) bool {
+	return p.op == "rs_post_msg" && p.msg == rsproto.MakeMsg(rsproto.OpCtrl, ctrl)
+}
+
+// rshutdown(SHUT_WR) of a connected rsocket that is still readable clears
+// rs_writable only and posts RS_CTRL_SHUTDOWN; rs_poll_cq goes on taking the
+// data that arrives and posting receives for it.
+func TestCloseWriteSendsShutdownAndReadsGoOn(t *testing.T) {
+	c := testConfig()
+	l := &recorder{}
+	s := rsproto.NewStream(l, c)
+	s.Connect(testPeer)
+	l.posts, l.recvs = nil, nil
+
+	s.CloseWrite()
+	if len(l.posts) != 1 || !isCtrl(l.posts[0], rsproto.CtrlShutdown) {
+		t.Fatalf("CloseWrite posted %+v, want RS_CTRL_SHUTDOWN", l.posts)
+	}
+	peerWrites(s, c, 0, []byte("after"))
+	if want := rsproto.StateConnected | rsproto.StateReadable; s.State() != want || string(s.Peek()) != "after" || len(l.recvs) != 1 {
+		t.Errorf("after CloseWrite the state is %#x, and data arriving was lent as %q with %d receives posted; want %#x, %q and 1", s.State(), s.Peek(), len(l.recvs), want, "after")
+	}
+}
+
 func TestStreamConnData(t *testing.T) {
 	c := testConfig()
 	little := rsproto.ConnData{
