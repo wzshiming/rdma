@@ -1244,6 +1244,39 @@ func TestNoCreditsAfterTheEnd(t *testing.T) {
 	}
 }
 
+// rs_poll_cq makes even an rs_error rsocket rs_disconnected when its own
+// RS_CTRL_DISCONNECT completes or the peer's arrives, but err keeps the EIO
+// of the failure: the end is no orderly one.
+func TestFailureStaysTheCauseOfTheEnd(t *testing.T) {
+	tests := []struct {
+		c   string // the C function and case that ends the connection
+		end func(s *rsproto.Stream, l *recorder)
+	}{
+		{"rs_poll_cq of the completion of RS_CTRL_DISCONNECT, flushed", func(s *rsproto.Stream, l *recorder) {
+			s.Sent(l.posts[len(l.posts)-1].id, errors.New("IBV_WC_WR_FLUSH_ERR"))
+		}},
+		{"rs_poll_cq of the peer's RS_CTRL_DISCONNECT", func(s *rsproto.Stream, l *recorder) {
+			s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlDisconnect))
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.c, func(t *testing.T) {
+			l := &recorder{}
+			s := rsproto.NewStream(l, testConfig())
+			s.Connect(testPeer)
+			sendWhileCan(t, s, 1)
+			s.Disconnect()
+			failed := errors.New("IBV_WC_RETRY_EXC_ERR")
+			s.Sent(l.data()[0].id, failed)
+			tt.end(s, l)
+
+			if err := s.Err(); s.State() != rsproto.StateDisconnected || !errors.Is(err, failed) {
+				t.Errorf("the end after a failed send left the state %#x and Err() = %v, want %#x and an error wrapping %q", s.State(), err, rsproto.StateDisconnected, failed)
+			}
+		})
+	}
+}
+
 func TestStreamConnData(t *testing.T) {
 	c := testConfig()
 	little := rsproto.ConnData{

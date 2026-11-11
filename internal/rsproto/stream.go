@@ -274,10 +274,13 @@ func (s *Stream) Received(msg Msg) {
 	}
 }
 
-// disconnect ends the connection in order, as rs_disconnected.
+// disconnect ends the connection, as rs_disconnected, in order unless it
+// broke before.
 func (s *Stream) disconnect() {
 	s.state = StateDisconnected
-	s.err = io.EOF
+	if s.err == nil {
+		s.err = io.EOF
+	}
 }
 
 // Peek lends the bytes that have arrived and lie contiguous in the receive
