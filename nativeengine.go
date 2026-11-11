@@ -108,6 +108,45 @@ func (e nativeEngine) dial(ctx context.Context, laddr, raddr *Addr, c Config) (s
 	return s, nil
 }
 
+// listen listens on laddr through cm, as rlisten does, and has an acceptor
+// establish each request that arrives with acceptRequest.
+func (e nativeEngine) listen(laddr *Addr, backlog int, c Config) (acceptor, error) {
+	l, err := cm.Listen(laddr.addrPort(), backlog)
+	if err != nil {
+		return nil, err
+	}
+	return newNativeAcceptor(l, func(ctx context.Context, req *cm.Request) (stream, error) {
+		return e.acceptRequest(ctx, req, c)
+	}), nil
+}
+
+// acceptRequest establishes a native stream sized for c on the connection
+// req asks for, as rs_accept does: it rejects the request admit refuses,
+// sets the connection up on the request's ID, accepts with the connection
+// data of the stream in the reply and the request's parameters echoed, and
+// connects the stream to the peer's connection data once the connection is
+// established. ctx abandons it.
+func (e nativeEngine) acceptRequest(ctx context.Context, req *cm.Request, c Config) (stream, error) {
+	peer, err := e.admit(req.PrivateData, req.ID.Device())
+	if err != nil {
+		req.Reject(nil)
+		req.ID.Close() // a reject that failed left it open
+		return nil, err
+	}
+	s, err := newQPStream(req.ID, c)
+	if err != nil {
+		return nil, err
+	}
+	data := s.connData().Encode()
+	param := cm.ConnParam{PrivateData: data[:], ResponderResources: req.ResponderResources, InitiatorDepth: req.InitiatorDepth}
+	if err := req.Accept(ctx, &param); err != nil {
+		s.close()
+		return nil, err
+	}
+	s.connect(peer)
+	return s, nil
+}
+
 // newQPStream builds a native stream sized for c on a connection set up on
 // id, which it owns from then on: when it fails, id is closed.
 func newQPStream(id *cm.ID, c Config) (*nativeStream, error) {

@@ -7,10 +7,13 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/netip"
 	"runtime"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/wzshiming/rdma/cm"
 	"github.com/wzshiming/rdma/internal/rdmatest"
 	"github.com/wzshiming/rdma/verbs"
 )
@@ -165,5 +168,145 @@ func testRXEGoroutinesReturnToBaseline(t *testing.T, dial, listen engine) {
 	}
 	if after := runtime.NumGoroutine(); after > goroutines {
 		t.Errorf("goroutines: %d before, %d after closing %d connections", goroutines, after, n)
+	}
+}
+
+// peerDialers are the engines whose Dialers a native listener is tested
+// against.
+var peerDialers = []struct {
+	name string
+	eng  engine
+}{
+	{"librdmacm dialer", librdmacmEngine{&rsocketNet}},
+	{"native dialer", nativeEngine{}},
+}
+
+// A native listener interoperates with a Dialer of either engine, the end it
+// accepts playing either role of the exchanges.
+func TestRXENativeListener(t *testing.T) {
+	for _, dial := range peerDialers {
+		t.Run(dial.name, func(t *testing.T) {
+			for _, tt := range []struct {
+				name string
+				cfg  Config
+				test func(t *testing.T, client, server *Conn)
+			}{
+				{"Echo", smallConfig, testRXEEcho},
+				{"CloseWriteLetsThePeerWriteBack", Config{}, testRXECloseWriteLetsThePeerWriteBack},
+				{"BufferedDataPrecedesEOF", Config{}, testRXEBufferedDataPrecedesEOF},
+			} {
+				t.Run(tt.name, func(t *testing.T) {
+					t.Run("accepted end as server", func(t *testing.T) {
+						dialed, accepted := rxeEnginePair(t, tt.cfg, dial.eng, nativeEngine{})
+						tt.test(t, dialed, accepted)
+					})
+					t.Run("accepted end as client", func(t *testing.T) {
+						dialed, accepted := rxeEnginePair(t, tt.cfg, dial.eng, nativeEngine{})
+						tt.test(t, accepted, dialed)
+					})
+				})
+			}
+		})
+	}
+}
+
+// A native listener and a Dialer of either engine move 64 MiB each way at
+// once through io.Copy.
+func TestRXENativeListenerCopy(t *testing.T) {
+	for _, dial := range peerDialers {
+		t.Run(dial.name, func(t *testing.T) {
+			testRXECopy(t, dial.eng, nativeEngine{}, 64<<20)
+		})
+	}
+}
+
+// Closing a native listener wakes an Accept waiting on it with
+// net.ErrClosed.
+func TestRXENativeListenerCloseUnblocksAccept(t *testing.T) {
+	testRXEListenerCloseUnblocksAccept(t, nativeEngine{})
+}
+
+// Once a native listener is closed, a Dialer of either engine dialing its port
+// is refused with ECONNREFUSED.
+func TestRXENativeListenerClosedRefusesDials(t *testing.T) {
+	for _, dial := range peerDialers {
+		t.Run(dial.name, func(t *testing.T) {
+			testRXEDialRefusedWithoutListener(t, dial.eng, nativeEngine{})
+		})
+	}
+}
+
+// rstream's client runs the exchange against a native listener.
+func TestRXERstreamClientAgainstNativeListener(t *testing.T) {
+	testRXERstreamClientAgainstListener(t, nativeEngine{})
+}
+
+// A native listener rejects the requests that arrive on an iWARP device: the
+// Dialer of either engine is refused with ECONNREFUSED and Accept never
+// returns them.
+func TestRXENativeListenerRejectsIWARP(t *testing.T) {
+	iwarp := nativeEngine{transportType: func(*verbs.Context) verbs.TransportType { return verbs.TransportIWARP }}
+	for _, dial := range peerDialers {
+		t.Run(dial.name, func(t *testing.T) {
+			ln := rxeListenOn(t, Config{}, iwarp)
+			acc := acceptAsync(ln)
+			d := Dialer{Timeout: rxeTimeout, eng: dial.eng}
+			c, err := d.Dial("rdma", ln.Addr().String())
+			if err == nil {
+				c.Close()
+				t.Fatalf("Dial(%v) to a listener on an iWARP device succeeded, want it refused", ln.Addr())
+			}
+			if !isOpError(err, "dial", syscall.ECONNREFUSED) {
+				t.Errorf("Dial(%v) to a listener on an iWARP device error = %v, want a dial *net.OpError matching ECONNREFUSED", ln.Addr(), err)
+			}
+			checkNothingAccepted(t, ln, acc)
+		})
+	}
+}
+
+// A native listener rejects a request whose connection data is of a version
+// other than 1: the connect is refused with ECONNREFUSED and Accept never
+// returns it.
+func TestRXENativeListenerRejectsOtherVersions(t *testing.T) {
+	ln := rxeListenOn(t, Config{}, nativeEngine{})
+	acc := acceptAsync(ln)
+	ctx, cancel := context.WithTimeout(context.Background(), rxeTimeout)
+	defer cancel()
+	id, err := cm.Resolve(ctx, netip.AddrPort{}, ln.Addr().(*Addr).addrPort())
+	if err != nil {
+		t.Fatalf("Resolve(%v) error: %v", ln.Addr(), err)
+	}
+	// A native stream sets the queue pair up that the request comes from.
+	s, err := newQPStream(id, Config{})
+	if err != nil {
+		t.Fatalf("newQPStream error: %v", err)
+	}
+	defer s.close()
+	data := s.connData().Encode()
+	data[0] = 2
+	if _, err := id.Connect(ctx, &cm.ConnParam{PrivateData: data[:]}); !errors.Is(err, syscall.ECONNREFUSED) {
+		t.Errorf("Connect(%v) with connection data of version 2 error = %v, want ECONNREFUSED", ln.Addr(), err)
+	}
+	checkNothingAccepted(t, ln, acc)
+}
+
+// checkNothingAccepted closes ln, on which acc waits for an Accept, and fails
+// the test when that Accept returned a connection.
+func checkNothingAccepted(t *testing.T, ln *Listener, acc <-chan accepted) {
+	t.Helper()
+	ln.Close()
+	if r := <-acc; r.err == nil {
+		r.c.Close()
+		t.Error("Accept returned the connection of a rejected request")
+	}
+}
+
+// Closed, a native listener and the connections it accepted leave no
+// goroutine behind.
+func TestRXENativeListenerGoroutinesReturnToBaseline(t *testing.T) {
+	for _, dial := range peerDialers {
+		t.Run(dial.name, func(t *testing.T) {
+			testRXEGoroutinesReturnToBaseline(t, dial.eng, nativeEngine{})
+		})
 	}
 }
