@@ -55,6 +55,7 @@ type Stream struct {
 	remoteOrder  binary.ByteOrder // of the peer's host, which its grant table is in
 	ctrlSeqNo    uint32           // credit messages posted: ctrl_seqno
 	ctrlMaxSeqNo uint32           // the ctrlSeqNo the slots for them run out at
+	connected    bool             // Connect has taken the peer's connection data
 	rseqNo       uint16           // data messages read, wrapping
 	rseqComp     uint16           // the rseqNo to give credits at
 
@@ -106,12 +107,13 @@ func (s *Stream) Connect(peer ConnData) {
 	s.remote = peer.GrantTable
 	s.remoteSGE = 1
 	s.remoteOrder = peer.ByteOrder()
+	s.connected = true
 	s.updateCredits()
 }
 
 // updateCredits mirrors rs_update_credits, which rs_give_credits decides.
 func (s *Stream) updateCredits() {
-	if (s.rbufAvail >= len(s.c.ReceiveBuffer.Buf)/2 || int16(s.rseqNo-s.rseqComp) >= 0) && s.ctrlSeqNo != s.ctrlMaxSeqNo {
+	if (s.rbufAvail >= len(s.c.ReceiveBuffer.Buf)/2 || int16(s.rseqNo-s.rseqComp) >= 0) && s.ctrlSeqNo != s.ctrlMaxSeqNo && s.connected {
 		s.sendCredits()
 	}
 }

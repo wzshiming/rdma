@@ -856,6 +856,22 @@ func TestCreditCompletionGivesBackNoQueueEntry(t *testing.T) {
 	}
 }
 
+// rs_give_credits gives none before the rsocket is rs_connected, when there
+// is no grant table of the peer to write to yet.
+func TestNoCreditsBeforeConnect(t *testing.T) {
+	c := testConfig()
+	l := &recorder{}
+	s := rsproto.NewStream(l, c)
+	half := len(c.ReceiveBuffer.Buf) / 2
+	peerWrites(s, c, 0, make([]byte, half))
+	s.Peek()
+	s.Consume(half)
+
+	if len(l.posts) != 0 {
+		t.Errorf("reading half the receive buffer before Connect posted %+v, want nothing", l.posts)
+	}
+}
+
 func TestStreamConnData(t *testing.T) {
 	c := testConfig()
 	little := rsproto.ConnData{
