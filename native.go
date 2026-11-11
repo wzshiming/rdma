@@ -214,6 +214,9 @@ func (s *nativeStream) lendRead() ([]byte, error) {
 	v := s.st.Peek()
 	if len(v) == 0 {
 		if s.st.EOF() {
+			if err := s.st.Err(); err != nil && err != io.EOF {
+				return nil, errConnReset
+			}
 			return nil, io.EOF
 		}
 		return nil, errAgain

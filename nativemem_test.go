@@ -326,6 +326,14 @@ func (t *memTransport) release() {
 	t.released = true
 }
 
+// breakLink loses the link without an end of the connection, as a cut cable
+// does.
+func (t *memTransport) breakLink(err error) {
+	t.end.Break(err)
+	t.poke()
+	t.peer.poke()
+}
+
 func (t *memTransport) isReleased() bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()

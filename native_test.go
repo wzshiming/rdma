@@ -93,6 +93,23 @@ func TestNativeReadWriteRoundsDoNotAllocate(t *testing.T) {
 	}
 }
 
+// A link lost without the peer's end of the connection reads as ECONNRESET
+// once the data that arrived before is read.
+func TestNativeLostLinkReadsAsResetAfterTheData(t *testing.T) {
+	client, server := nativeOnMemLink.pair(t, Config{})
+	if _, err := client.Write([]byte("hello")); err != nil {
+		t.Fatalf("Write error: %v", err)
+	}
+	if _, err := io.ReadFull(server, make([]byte, 1)); err != nil {
+		t.Fatalf("ReadFull error: %v", err)
+	}
+	memTransportOf(client).breakLink(errors.New("cable cut"))
+	rest, err := io.ReadAll(server)
+	if string(rest) != "ello" || !isOpError(err, "read", errConnReset) {
+		t.Errorf("peer read %q, %v after the link was lost; want %q and a read *net.OpError with ECONNRESET", rest, err, "ello")
+	}
+}
+
 // A receive the transport refuses fails the building of the stream, before
 // any connection data goes out.
 func TestNativeStreamFailsOnARefusedReceive(t *testing.T) {
