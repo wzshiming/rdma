@@ -10,6 +10,12 @@ import (
 	"github.com/wzshiming/rdma/verbs"
 )
 
+// nativeDialer injects the native engine into a Dialer, an engine having to
+// listen too, which the native one does not yet.
+type nativeDialer struct{ nativeEngine }
+
+func (nativeDialer) listen(*Addr, int, Config) (acceptor, error) { return nil, errors.ErrUnsupported }
+
 // A native connection is sized as rsockets sizes an rsocket that the
 // librdmacm engine set the same Config on: buffer sizes doubled, a send
 // buffer of 4096 bytes when that falls short of RS_SNDLOWAT, queue depths and

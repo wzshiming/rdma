@@ -1,10 +1,12 @@
 package rdma
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
 
+	"github.com/wzshiming/rdma/cm"
 	"github.com/wzshiming/rdma/internal/rsproto"
 	"github.com/wzshiming/rdma/verbs"
 )
@@ -32,6 +34,44 @@ func (e nativeEngine) checkDevice(dev *verbs.Context) error {
 		return errIWARP
 	}
 	return nil
+}
+
+// dial connects a native stream to raddr as rs_do_connect connects an
+// rsocket: it resolves the route, sets the connection up on the device the
+// route leads to, sends the connection data of the stream with the request
+// and takes the peer's from the reply.
+func (e nativeEngine) dial(ctx context.Context, laddr, raddr *Addr, c Config) (stream, error) {
+	id, err := cm.Resolve(ctx, laddr.addrPort(), raddr.addrPort())
+	if err != nil {
+		return nil, err
+	}
+	if err := e.checkDevice(id.Device()); err != nil {
+		id.Close()
+		return nil, err
+	}
+	t, err := newQPTransport(id, c)
+	if err != nil {
+		return nil, err
+	}
+	s, err := newNativeStream(t, t.mem, id.LocalAddr(), id.RemoteAddr())
+	if err != nil {
+		t.down()
+		t.release()
+		return nil, err
+	}
+	data := s.connData().Encode()
+	info, err := id.Connect(ctx, &cm.ConnParam{PrivateData: data[:], RetryCount: 7, RNRRetryCount: 7})
+	if err != nil {
+		s.close()
+		return nil, err
+	}
+	peer, err := rsproto.DecodeConnData(info.PrivateData)
+	if err != nil {
+		s.close()
+		return nil, err
+	}
+	s.connect(peer)
+	return s, nil
 }
 
 // connSizes are the sizes of the buffers and queues of a native connection.
