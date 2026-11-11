@@ -289,6 +289,7 @@ func TestRXENativeCopyLendsRegisteredMemory(t *testing.T) {
 // every buffer WriteTo hands its destination in the receive memory of its
 // own, as registered reports them.
 func testCopyLendsRegisteredMemory(t *testing.T, client, server *Conn, total int, registered func(*Conn) (send, recv []byte)) {
+	start := time.Now()
 	var wg sync.WaitGroup
 	var ins, outs [2]*testStream
 	var reads, writes, foreignReads, foreignWrites [2]int
@@ -330,6 +331,7 @@ func testCopyLendsRegisteredMemory(t *testing.T, client, server *Conn, total int
 		}()
 	}
 	wg.Wait()
+	t.Logf("%d MiB each way in %v", total>>20, time.Since(start).Round(time.Millisecond))
 	for i := range ins {
 		t.Logf("direction #%d: ReadFrom handed the source %d buffers, WriteTo the destination %d", i, reads[i], writes[i])
 		if foreignReads[i] > 0 || foreignWrites[i] > 0 {
@@ -369,6 +371,7 @@ func testViewsOutliveClose(t *testing.T, pair func(*testing.T) (client, server *
 	t.Run("source in Read", func(t *testing.T) {
 		client, _ := pair(t)
 		entered, resume := make(chan struct{}), make(chan struct{})
+		var filled int
 		readFrom := async(func() (int64, error) {
 			return client.ReadFrom(readerFunc(func(p []byte) (int, error) {
 				close(entered)
@@ -376,6 +379,7 @@ func testViewsOutliveClose(t *testing.T, pair func(*testing.T) (client, server *
 				for i := range p {
 					p[i] = byte(i)
 				}
+				filled = len(p)
 				return len(p), nil
 			}))
 		})
@@ -385,6 +389,7 @@ func testViewsOutliveClose(t *testing.T, pair func(*testing.T) (client, server *
 		if r := await(t, "ReadFrom", readFrom); r.n != 0 || !isOpError(r.err, "readfrom", net.ErrClosed) {
 			t.Errorf("ReadFrom() = %d, %v; want 0 and a readfrom *net.OpError with net.ErrClosed", r.n, r.err)
 		}
+		t.Logf("the source filled its view of %d bytes after Close", filled)
 		if !released(client) {
 			t.Error("the memory was kept once the source's view was back")
 		}
@@ -416,6 +421,7 @@ func testViewsOutliveClose(t *testing.T, pair func(*testing.T) (client, server *
 		if !intact {
 			t.Error("after Close the destination's view no longer held what the peer wrote")
 		}
+		t.Logf("the destination read its view of %d bytes after Close", held)
 		if !released(client) {
 			t.Error("the memory was kept once the destination's view was back")
 		}
@@ -570,6 +576,7 @@ func TestRXENativeKilledPeerReadsAsResetAfterTheData(t *testing.T) {
 		<-exited
 		conn.SetReadDeadline(time.Now().Add(rxeTimeout))
 		got, err := io.ReadAll(conn)
+		t.Logf("read %d bytes once the peer process was killed, then: %v", len(got), err)
 		if !bytes.Equal(got, want) || !isOpError(err, "read", syscall.ECONNRESET) {
 			t.Errorf("read %d bytes and %v once the peer process was killed; want its %d bytes and a read *net.OpError with ECONNRESET", len(got), err, len(want))
 		}
@@ -682,6 +689,7 @@ func testGoroutinesPerConnection(t *testing.T, pair func(*testing.T) (client, se
 	if moved.Load() == start {
 		t.Error("no byte moved while the goroutines were counted")
 	}
+	t.Logf("%d goroutines before, %d with %d connections idle, %d with them moving %d bytes on %d of the test's", base, base+len(conns)*perConn, len(conns), busy, moved.Load()-start, 2*len(conns))
 	close(stop)
 	wg.Wait()
 	awaitGoroutines(t, base+len(conns)*perConn, fmt.Sprintf("with %d connections idle again", len(conns)))
