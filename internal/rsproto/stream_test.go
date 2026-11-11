@@ -1056,6 +1056,20 @@ func TestControlCompletionGivesBackItsSlot(t *testing.T) {
 	}
 }
 
+// rshutdown(SHUT_RDWR), which rclose makes, clears rs_readable and
+// rs_writable of a connected rsocket and posts RS_CTRL_DISCONNECT.
+func TestDisconnectSendsDisconnect(t *testing.T) {
+	l := &recorder{}
+	s := rsproto.NewStream(l, testConfig())
+	s.Connect(testPeer)
+	l.posts = nil
+
+	s.Disconnect()
+	if len(l.posts) != 1 || !isCtrl(l.posts[0], rsproto.CtrlDisconnect) || s.State() != rsproto.StateConnected {
+		t.Errorf("Disconnect posted %+v and left the state %#x, want RS_CTRL_DISCONNECT and %#x", l.posts, s.State(), rsproto.StateConnected)
+	}
+}
+
 func TestStreamConnData(t *testing.T) {
 	c := testConfig()
 	little := rsproto.ConnData{

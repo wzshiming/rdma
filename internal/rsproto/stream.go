@@ -296,6 +296,14 @@ func (s *Stream) CloseWrite() {
 	s.postHeld()
 }
 
+// Disconnect mirrors rshutdown(SHUT_RDWR), which rclose makes: both sides
+// end, which the peer learns by RS_CTRL_DISCONNECT.
+func (s *Stream) Disconnect() {
+	s.state &^= StateReadable | StateWritable
+	msg := MakeMsg(OpCtrl, CtrlDisconnect)
+	s.link.PostMsg(uint64(msg), msg)
+}
+
 // postHeld posts the control message held for a control slot if one is free.
 func (s *Stream) postHeld() {
 	if s.shutdownHeld && s.ctrlSeqNo != s.ctrlMaxSeqNo {
