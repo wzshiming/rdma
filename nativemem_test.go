@@ -320,9 +320,16 @@ func (t *memTransport) down() {
 	}
 }
 
+// release poisons the memory, as freeing it would let it be reused, so that
+// a view used after release shows.
 func (t *memTransport) release() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	for _, r := range []rsproto.Region{t.mem.SendBuffer, t.mem.ReceiveBuffer, t.mem.GrantTable, t.mem.ControlBuffer} {
+		for i := range r.Buf {
+			r.Buf[i] = 0xdb
+		}
+	}
 	t.released = true
 }
 

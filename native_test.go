@@ -7,6 +7,7 @@ import (
 	"go/parser"
 	"go/token"
 	"io"
+	"net"
 	"net/netip"
 	"path/filepath"
 	"slices"
@@ -121,6 +122,48 @@ func TestNativeRefusedSendFailsTheWrite(t *testing.T) {
 	tr.end.FailPost(errors.New("send refused"))
 	if n, err := client.Write([]byte("hello")); !isOpError(err, "write", errConnReset) {
 		t.Errorf("Write with its send refused = %d, %v; want a write *net.OpError with ECONNRESET", n, err)
+	}
+}
+
+// A view lent before Close stays usable after it, and the memory of the
+// stream is released only once every view is back.
+func TestNativeViewsOutliveClose(t *testing.T) {
+	client, server := nativeOnMemLink.pair(t, Config{})
+	if _, err := server.Write([]byte("hello")); err != nil {
+		t.Fatalf("Write error: %v", err)
+	}
+	l := client.s.(lender)
+	rview, err := l.lendRead()
+	for errors.Is(err, errAgain) {
+		client.s.wait(readable, nil)
+		rview, err = l.lendRead()
+	}
+	if err != nil {
+		t.Fatalf("lendRead error: %v", err)
+	}
+	wview, err := l.lendWrite()
+	if err != nil {
+		t.Fatalf("lendWrite error: %v", err)
+	}
+	tr := memTransportOf(client)
+	if err := client.Close(); err != nil {
+		t.Fatalf("Close error: %v", err)
+	}
+	copy(wview, "written after Close")
+	if string(rview) != "hello" || tr.isReleased() {
+		t.Errorf("after Close the read view holds %q and the memory is released: %v; want %q and false", rview, tr.isReleased(), "hello")
+	}
+	if err := l.returnRead(len(rview)); !errors.Is(err, net.ErrClosed) {
+		t.Errorf("returnRead after Close error = %v, want net.ErrClosed", err)
+	}
+	if tr.isReleased() {
+		t.Error("memory released with the write view still out")
+	}
+	if err := l.commitWrite(len(wview)); !errors.Is(err, net.ErrClosed) {
+		t.Errorf("commitWrite after Close error = %v, want net.ErrClosed", err)
+	}
+	if !tr.isReleased() {
+		t.Error("memory not released once both views are back")
 	}
 }
 

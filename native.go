@@ -58,9 +58,12 @@ type nativeStream struct {
 	st        *rsproto.Stream
 	link      sendCounter
 	waiting   [2]bool // by direction, a wait sleeps on wake
+	rview     bool    // a read view is out
+	wview     bool    // a write view is out
 	writeShut bool    // closeWrite was called
 	closed    bool
 	settled   chan struct{} // closed once the sends of a closing stream are done
+	unfreed   bool          // the link is down and the memory awaits the views out
 }
 
 // sendCounter is the Link a native stream posts through: its transport's,
@@ -221,13 +224,16 @@ func (s *nativeStream) lendRead() ([]byte, error) {
 		}
 		return nil, errAgain
 	}
+	s.rview = true
 	return v, nil
 }
 
 func (s *nativeStream) returnRead(n int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.rview = false
 	if s.closed {
+		s.freeIdle()
 		return net.ErrClosed
 	}
 	s.st.Consume(n)
@@ -244,13 +250,16 @@ func (s *nativeStream) lendWrite() ([]byte, error) {
 	if v == nil {
 		return nil, errAgain
 	}
+	s.wview = true
 	return v, nil
 }
 
 func (s *nativeStream) commitWrite(n int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.wview = false
 	if err := s.writeError(); err != nil {
+		s.freeIdle()
 		return err
 	}
 	if s.st.Commit(n) != nil {
@@ -296,7 +305,7 @@ func (s *nativeStream) closeWrite() error {
 
 // close ends the connection behind the data written, waits until the sends
 // have completed, at most closeTimeout, takes the link down and releases the
-// memory.
+// memory once no view of it is out.
 func (s *nativeStream) close() error {
 	s.mu.Lock()
 	if s.closed {
@@ -318,6 +327,18 @@ func (s *nativeStream) close() error {
 	case <-time.After(closeTimeout):
 	}
 	s.t.down()
-	s.t.release()
+	s.mu.Lock()
+	s.unfreed = true
+	s.freeIdle()
+	s.mu.Unlock()
 	return nil
+}
+
+// freeIdle releases the memory once the link is down and no view is out.
+// The caller holds mu.
+func (s *nativeStream) freeIdle() {
+	if s.unfreed && !s.rview && !s.wview {
+		s.unfreed = false
+		s.t.release()
+	}
 }
