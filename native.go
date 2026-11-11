@@ -253,7 +253,9 @@ func (s *nativeStream) commitWrite(n int) error {
 	if err := s.writeError(); err != nil {
 		return err
 	}
-	s.st.Commit(n)
+	if s.st.Commit(n) != nil {
+		return errConnReset
+	}
 	return nil
 }
 

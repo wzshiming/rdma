@@ -110,6 +110,20 @@ func TestNativeLostLinkReadsAsResetAfterTheData(t *testing.T) {
 	}
 }
 
+// A send the transport refuses breaks the stream, and the Write that made it
+// fails with ECONNRESET.
+func TestNativeRefusedSendFailsTheWrite(t *testing.T) {
+	client, _ := nativeOnMemLink.pair(t, Config{})
+	tr := memTransportOf(client)
+	// Silent, the pump posts no receive that would take the failure.
+	tr.silence.Lock()
+	defer tr.silence.Unlock()
+	tr.end.FailPost(errors.New("send refused"))
+	if n, err := client.Write([]byte("hello")); !isOpError(err, "write", errConnReset) {
+		t.Errorf("Write with its send refused = %d, %v; want a write *net.OpError with ECONNRESET", n, err)
+	}
+}
+
 // A receive the transport refuses fails the building of the stream, before
 // any connection data goes out.
 func TestNativeStreamFailsOnARefusedReceive(t *testing.T) {
