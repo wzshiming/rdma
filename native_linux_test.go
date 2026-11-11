@@ -67,11 +67,6 @@ func TestRXENativeDialerCopy(t *testing.T) {
 	testRXECopy(t, Config{}, EngineNative, EngineLibrdmacm, 64<<20)
 }
 
-// A native Dialer runs the exchange of rstream against its server.
-func TestRXENativeDialerAgainstRstreamServer(t *testing.T) {
-	testRXEDialerAgainstRstreamServer(t, EngineNative)
-}
-
 // A native dial refuses a device whose transport is iWARP before it reaches
 // the peer, and connects on any other.
 func TestRXENativeDialRefusesIWARP(t *testing.T) {
@@ -177,11 +172,6 @@ func TestRXENativeListenerCopy(t *testing.T) {
 			testRXECopy(t, Config{}, dial.eng, EngineNative, 64<<20)
 		})
 	}
-}
-
-// rstream's client runs the exchange against a native listener.
-func TestRXERstreamClientAgainstNativeListener(t *testing.T) {
-	testRXERstreamClientAgainstListener(t, EngineNative)
 }
 
 // A native listener rejects the requests that arrive on an iWARP device: the

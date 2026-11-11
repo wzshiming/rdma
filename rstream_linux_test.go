@@ -148,9 +148,9 @@ func rstreamArgs(side string, ip net.IP, port int) []string {
 }
 
 // TestRXERstreamClientAgainstListener has rstream's client run the exchange
-// against a Listener of this package.
+// against a Listener of each engine.
 func TestRXERstreamClientAgainstListener(t *testing.T) {
-	testRXERstreamClientAgainstListener(t, EngineNative)
+	forEachEngine(t, testRXERstreamClientAgainstListener)
 }
 
 // testRXERstreamClientAgainstListener has rstream's client run the exchange
@@ -173,10 +173,10 @@ func testRXERstreamClientAgainstListener(t *testing.T, e Engine) {
 	wait()
 }
 
-// TestRXEDialerAgainstRstreamServer has a Dialer of this package run the
+// TestRXEDialerAgainstRstreamServer has a Dialer of each engine run the
 // exchange against rstream's server.
 func TestRXEDialerAgainstRstreamServer(t *testing.T) {
-	testRXEDialerAgainstRstreamServer(t, EngineNative)
+	forEachEngine(t, testRXEDialerAgainstRstreamServer)
 }
 
 // testRXEDialerAgainstRstreamServer has a Dialer of the engine e run the
