@@ -33,6 +33,13 @@ var fakeEngines = []engineUnderTest{
 	{name: "copying", new: newCopyingFake, addr: "10.99.0.1:0"},
 }
 
+// librdmacmOnFakeNet is the librdmacm engine on the fake rsockets.
+var librdmacmOnFakeNet = engineUnderTest{
+	name: "librdmacm",
+	new:  func(t testing.TB) engine { return librdmacmEngine{newFakeNet(t)} },
+	addr: "10.99.0.1:0",
+}
+
 // pair connects a dialer to a listener on a fresh engine of e, both with cfg,
 // and returns the two ends.
 func (e engineUnderTest) pair(t testing.TB, cfg Config) (client, server *Conn) {
@@ -76,8 +83,8 @@ func TestConnOnFakeEngines(t *testing.T) {
 	}
 }
 
-func TestCopyPathsOnFakeEngines(t *testing.T) {
-	for _, e := range fakeEngines {
+func TestCopyPaths(t *testing.T) {
+	for _, e := range append(fakeEngines, librdmacmOnFakeNet) {
 		t.Run(e.name, func(t *testing.T) { testCopyPaths(t, e) })
 	}
 }
@@ -102,6 +109,10 @@ func testCopyPaths(t *testing.T, e engineUnderTest) {
 		{"WriteToLeavesWhatTheDestinationRefused", testWriteToLeavesWhatTheDestinationRefused},
 		{"WriteToFreesRoomOnlyOnceTaken", testWriteToFreesRoomOnlyOnceTaken},
 		{"LendingRoundsDoNotAllocate", testLendingRoundsDoNotAllocate},
+		{"ReadFromTimesOutWaitingForRoom", testReadFromTimesOutWaitingForRoom},
+		{"WriteToTimesOutWaitingForData", testWriteToTimesOutWaitingForData},
+		{"DeadlineLetsTheSourceFinish", testDeadlineLetsTheSourceFinish},
+		{"DeadlineLetsTheDestinationFinish", testDeadlineLetsTheDestinationFinish},
 	} {
 		t.Run(tt.name, func(t *testing.T) { tt.test(t, e) })
 	}
@@ -664,5 +675,101 @@ func testLendingRoundsDoNotAllocate(t *testing.T, e engineUnderTest) {
 	}
 	if few, many := writeTo(64), writeTo(128); many != few {
 		t.Errorf("WriteTo of 64 and 128 rounds: %v and %v allocations; want as many", few, many)
+	}
+}
+
+// zeros is an endless source.
+var zeros = readerFunc(func(p []byte) (int, error) { return len(p), nil })
+
+// readAll reads c until an error, which it returns with the count.
+func readAll(c *Conn) (int64, error) {
+	buf := make([]byte, 64<<10)
+	var total int64
+	for {
+		n, err := c.Read(buf)
+		total += int64(n)
+		if err != nil {
+			return total, err
+		}
+	}
+}
+
+// testReadFromTimesOutWaitingForRoom checks that the write deadline ends a
+// ReadFrom waiting for room with the count of the bytes sent, which the peer
+// receives in full.
+func testReadFromTimesOutWaitingForRoom(t *testing.T, e engineUnderTest) {
+	client, server := e.pair(t, Config{})
+	client.SetWriteDeadline(time.Now().Add(50 * time.Millisecond))
+	n, err := client.ReadFrom(zeros)
+	if n == 0 || !isOpError(err, "readfrom", os.ErrDeadlineExceeded) || !isTimeout(err) {
+		t.Fatalf("ReadFrom() while the peer reads nothing = %d, %v; want bytes sent and a readfrom timeout", n, err)
+	}
+	server.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+	if got, _ := readAll(server); got != n {
+		t.Errorf("peer received %d bytes, ReadFrom reported %d", got, n)
+	}
+}
+
+// testWriteToTimesOutWaitingForData checks that the read deadline ends a
+// WriteTo waiting for data with the count handed over.
+func testWriteToTimesOutWaitingForData(t *testing.T, e engineUnderTest) {
+	client, server := e.pair(t, Config{})
+	if _, err := server.Write([]byte("hello")); err != nil {
+		t.Fatalf("Write error: %v", err)
+	}
+	client.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
+	n, err := client.WriteTo(io.Discard)
+	if n != 5 || !isOpError(err, "writeto", os.ErrDeadlineExceeded) || !isTimeout(err) {
+		t.Fatalf("WriteTo() = %d, %v; want 5 and a writeto timeout", n, err)
+	}
+}
+
+// testDeadlineLetsTheSourceFinish checks that a write deadline passing while
+// the source blocks in Read ends ReadFrom only after what it read is sent.
+func testDeadlineLetsTheSourceFinish(t *testing.T, e engineUnderTest) {
+	client, server := e.pair(t, Config{})
+	client.SetWriteDeadline(time.Now().Add(50 * time.Millisecond))
+	start := time.Now()
+	late := true
+	n, err := client.ReadFrom(readerFunc(func(p []byte) (int, error) {
+		if !late {
+			return 0, io.EOF
+		}
+		late = false
+		time.Sleep(150 * time.Millisecond)
+		return copy(p, "late"), nil
+	}))
+	if elapsed := time.Since(start); elapsed < 150*time.Millisecond {
+		t.Errorf("ReadFrom() returned after %v, before the source's Read did", elapsed)
+	}
+	if n != 4 || !isOpError(err, "readfrom", os.ErrDeadlineExceeded) {
+		t.Fatalf("ReadFrom() = %d, %v; want 4 and a readfrom timeout", n, err)
+	}
+	got := make([]byte, 4)
+	server.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := io.ReadFull(server, got); err != nil || string(got) != "late" {
+		t.Fatalf("peer read %q, %v; want %q", got, err, "late")
+	}
+}
+
+// testDeadlineLetsTheDestinationFinish checks that a read deadline passing
+// while the destination blocks in Write ends WriteTo only after the Write,
+// whose bytes it counts.
+func testDeadlineLetsTheDestinationFinish(t *testing.T, e engineUnderTest) {
+	client, server := e.pair(t, Config{})
+	if _, err := server.Write([]byte("late")); err != nil {
+		t.Fatalf("Write error: %v", err)
+	}
+	client.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
+	start := time.Now()
+	n, err := client.WriteTo(writerFunc(func(p []byte) (int, error) {
+		time.Sleep(150 * time.Millisecond)
+		return len(p), nil
+	}))
+	if elapsed := time.Since(start); elapsed < 150*time.Millisecond {
+		t.Errorf("WriteTo() returned after %v, before the destination's Write did", elapsed)
+	}
+	if n != 4 || !isOpError(err, "writeto", os.ErrDeadlineExceeded) {
+		t.Fatalf("WriteTo() = %d, %v; want 4 and a writeto timeout", n, err)
 	}
 }

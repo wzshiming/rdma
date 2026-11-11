@@ -75,9 +75,12 @@ func (c *Conn) readFrom(r io.Reader) (int64, error) {
 	buf := make([]byte, copyBufferSize)
 	var total int64
 	for {
+		if _, err := c.writeState(); err != nil {
+			return total, err
+		}
 		n, rerr := r.Read(buf)
 		if n > 0 {
-			m, err := c.write(buf[:n])
+			m, err := c.send(buf[:n])
 			total += int64(m)
 			if err != nil {
 				return total, err
@@ -90,6 +93,24 @@ func (c *Conn) readFrom(r io.Reader) (int64, error) {
 			return total, rerr
 		}
 	}
+}
+
+// send writes p, which the source has already given up: what fits goes at
+// once, the deadline notwithstanding, as it would into lent room, and the
+// rest as write sends it. The caller holds wmu.
+func (c *Conn) send(p []byte) (int, error) {
+	if err := c.writeClosedError(); err != nil {
+		return 0, err
+	}
+	n, err := c.s.write(p)
+	if err != nil && !errors.Is(err, errAgain) {
+		return n, err
+	}
+	if n == len(p) {
+		return n, nil
+	}
+	m, err := c.write(p[n:])
+	return n + m, err
 }
 
 // WriteTo implements io.WriterTo, which io.Copy from the connection uses: it
