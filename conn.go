@@ -70,12 +70,9 @@ func (c *Conn) Read(p []byte) (int, error) {
 // caller holds rmu.
 func (c *Conn) read(p []byte) (int, error) {
 	for {
-		if c.isClosed() {
-			return 0, net.ErrClosed
-		}
-		expired, changed := c.rd.state()
-		if expired {
-			return 0, os.ErrDeadlineExceeded
+		changed, err := c.readState()
+		if err != nil {
+			return 0, err
 		}
 		n, err := c.s.read(p)
 		if !errors.Is(err, errAgain) {
@@ -85,6 +82,19 @@ func (c *Conn) read(p []byte) (int, error) {
 			return 0, err
 		}
 	}
+}
+
+// readState reports why reading cannot go on, if it cannot, and returns the
+// channel that a change of the read deadline closes.
+func (c *Conn) readState() (changed <-chan struct{}, err error) {
+	if c.isClosed() {
+		return nil, net.ErrClosed
+	}
+	expired, changed := c.rd.state()
+	if expired {
+		return nil, os.ErrDeadlineExceeded
+	}
+	return changed, nil
 }
 
 // Write writes data to the connection. It returns once every byte has been
@@ -104,18 +114,9 @@ func (c *Conn) Write(p []byte) (int, error) {
 func (c *Conn) write(p []byte) (int, error) {
 	total := 0
 	for {
-		c.mu.Lock()
-		closed, writeClosed := c.closed, c.writeClosed
-		c.mu.Unlock()
-		switch {
-		case closed:
-			return total, net.ErrClosed
-		case writeClosed:
-			return total, errPipe
-		}
-		expired, changed := c.wd.state()
-		if expired {
-			return total, os.ErrDeadlineExceeded
+		changed, err := c.writeState()
+		if err != nil {
+			return total, err
 		}
 		if len(p) == 0 {
 			return total, nil
@@ -133,6 +134,25 @@ func (c *Conn) write(p []byte) (int, error) {
 			return total, err
 		}
 	}
+}
+
+// writeState reports why writing cannot go on, if it cannot, and returns the
+// channel that a change of the write deadline closes.
+func (c *Conn) writeState() (changed <-chan struct{}, err error) {
+	c.mu.Lock()
+	closed, writeClosed := c.closed, c.writeClosed
+	c.mu.Unlock()
+	switch {
+	case closed:
+		return nil, net.ErrClosed
+	case writeClosed:
+		return nil, errPipe
+	}
+	expired, changed := c.wd.state()
+	if expired {
+		return nil, os.ErrDeadlineExceeded
+	}
+	return changed, nil
 }
 
 // CloseWrite closes the sending side: the peer reads io.EOF after the data

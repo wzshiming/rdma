@@ -3,8 +3,6 @@ package rdma
 import (
 	"errors"
 	"io"
-	"net"
-	"os"
 )
 
 // copyBufferSize is the size of the buffer a copy moves its bytes through
@@ -58,18 +56,9 @@ func (c *Conn) readFromLent(l lender, r io.Reader) (int64, error) {
 // The caller holds wmu.
 func (c *Conn) lendWrite(l lender) ([]byte, error) {
 	for {
-		c.mu.Lock()
-		closed, writeClosed := c.closed, c.writeClosed
-		c.mu.Unlock()
-		switch {
-		case closed:
-			return nil, net.ErrClosed
-		case writeClosed:
-			return nil, errPipe
-		}
-		expired, changed := c.wd.state()
-		if expired {
-			return nil, os.ErrDeadlineExceeded
+		changed, err := c.writeState()
+		if err != nil {
+			return nil, err
 		}
 		view, err := l.lendWrite()
 		if !errors.Is(err, errAgain) {
@@ -155,12 +144,9 @@ func (c *Conn) writeToLent(l lender, w io.Writer) (int64, error) {
 // within the read deadline. The caller holds rmu.
 func (c *Conn) lendRead(l lender) ([]byte, error) {
 	for {
-		if c.isClosed() {
-			return nil, net.ErrClosed
-		}
-		expired, changed := c.rd.state()
-		if expired {
-			return nil, os.ErrDeadlineExceeded
+		changed, err := c.readState()
+		if err != nil {
+			return nil, err
 		}
 		view, err := l.lendRead()
 		if !errors.Is(err, errAgain) {
