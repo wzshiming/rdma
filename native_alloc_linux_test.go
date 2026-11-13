@@ -22,7 +22,7 @@ import (
 // of its ReadFrom and WriteTo allocate nothing on the goroutine that calls
 // them.
 func TestRXENativeRoundsDoNotAllocate(t *testing.T) {
-	client, server := rxeEnginePair(t, Config{ReceiveBufferSize: 1 << 20}, EngineNative, EngineNative)
+	client, server := rxeEnginePair(t, Config{ReceiveBufferSize: 1 << 20}, engineNative, engineNative)
 	testRoundsDoNotAllocate(t, client, server, registeredMemory)
 }
 

@@ -34,8 +34,8 @@ func (a *Addr) String() string {
 	return net.JoinHostPort(ip, strconv.Itoa(a.Port))
 }
 
-// addrPort converts the address for the rsocket package; a nil IP gives the
-// zero AddrPort.
+// addrPort converts the address for an engine; a nil IP gives the zero
+// AddrPort.
 func (a *Addr) addrPort() netip.AddrPort {
 	if a == nil {
 		return netip.AddrPort{}
@@ -51,8 +51,8 @@ func (a *Addr) addrPort() netip.AddrPort {
 	return netip.AddrPortFrom(ip, uint16(a.Port))
 }
 
-// addrFromAddrPort converts an address reported by the rsocket package; the
-// zero AddrPort gives nil.
+// addrFromAddrPort converts an address an engine reports; the zero AddrPort
+// gives nil.
 func addrFromAddrPort(ap netip.AddrPort) *Addr {
 	if !ap.IsValid() {
 		return nil

@@ -26,17 +26,16 @@ import (
 
 // rxeEnginePair connects a Dialer of the engine dial to a fresh listener of
 // the engine listen on the device, both with cfg otherwise, and closes the
-// listener. The dialed end must run on dial and the accepted one on listen,
-// its listener's engine whatever the dialer's.
-func rxeEnginePair(t testing.TB, cfg Config, dial, listen Engine) (client, server *Conn) {
+// listener: rdma-core before 53 (24061f015bd9) polls a stale descriptor array
+// in its listen thread once more than three listeners are registered, so
+// none is kept open longer than needed. The dialed end must run on dial and
+// the accepted one on listen, its listener's engine whatever the dialer's.
+func rxeEnginePair(t testing.TB, cfg Config, dial, listen engineName) (client, server *Conn) {
 	t.Helper()
-	lcfg := cfg
-	lcfg.Engine = listen
-	ln := rxeListen(t, lcfg)
+	ln := rxeListenOn(t, cfg, listen.engine())
 	defer ln.Close()
 	acc := acceptAsync(ln)
-	d := Dialer{Config: cfg, Timeout: rxeTimeout}
-	d.Config.Engine = dial
+	d := Dialer{Config: cfg, Timeout: rxeTimeout, eng: dial.engine()}
 	client, err := d.Dial("rdma", ln.Addr().String())
 	if err != nil {
 		t.Fatalf("Dial(%v) error: %v", ln.Addr(), err)
@@ -56,13 +55,13 @@ func rxeEnginePair(t testing.TB, cfg Config, dial, listen Engine) (client, serve
 	return client, r.c
 }
 
-// engineOf returns the engine that carries c, "" for none of the platform's.
-func engineOf(c *Conn) Engine {
+// engineOf returns the engine that carries c, "" for none of the tests'.
+func engineOf(c *Conn) engineName {
 	switch c.s.(type) {
 	case *nativeStream:
-		return EngineNative
+		return engineNative
 	case *rstream:
-		return EngineLibrdmacm
+		return engineLibrdmacm
 	}
 	return ""
 }
@@ -70,7 +69,7 @@ func engineOf(c *Conn) Engine {
 // A native Dialer and a listener of the librdmacm engine move 64 MiB each way
 // at once through io.Copy.
 func TestRXENativeDialerCopy(t *testing.T) {
-	testRXECopy(t, Config{}, EngineNative, EngineLibrdmacm, 64<<20)
+	testRXECopy(t, Config{}, engineNative, engineLibrdmacm, 64<<20)
 }
 
 // A native dial refuses a device whose transport is iWARP before it reaches
@@ -85,7 +84,7 @@ func TestRXENativeDialRefusesIWARP(t *testing.T) {
 		{verbs.TransportIWARP, true},
 	} {
 		t.Run(tt.transport.String(), func(t *testing.T) {
-			lc := ListenConfig{Config: Config{Engine: EngineLibrdmacm}}
+			lc := ListenConfig{eng: engineLibrdmacm.engine()}
 			ln, err := lc.Listen(context.Background(), "rdma", net.JoinHostPort(dev.IP.String(), "0"))
 			if err != nil {
 				t.Fatalf("Listen(%v:0) error: %v", dev.IP, err)
@@ -123,13 +122,13 @@ func TestRXENativeDialRefusesIWARP(t *testing.T) {
 
 // Closed, the connections of the native engine leave no goroutine behind.
 func TestRXENativeDialerGoroutinesReturnToBaseline(t *testing.T) {
-	testRXEGoroutinesReturnToBaseline(t, EngineNative, EngineLibrdmacm)
+	testRXEGoroutinesReturnToBaseline(t, engineNative, engineLibrdmacm)
 }
 
 // testRXEGoroutinesReturnToBaseline connects a few pairs of a Dialer of the
 // engine dial and a listener of the engine listen, moves a byte each way on
 // each and closes both ends, and checks that no goroutine is left behind.
-func testRXEGoroutinesReturnToBaseline(t *testing.T, dial, listen Engine) {
+func testRXEGoroutinesReturnToBaseline(t *testing.T, dial, listen engineName) {
 	rdmatest.Device(t)
 	goroutines := runtime.NumGoroutine()
 	const n = 4
@@ -164,10 +163,10 @@ func testRXEGoroutinesReturnToBaseline(t *testing.T, dial, listen Engine) {
 // against.
 var peerDialers = []struct {
 	name string
-	eng  Engine
+	eng  engineName
 }{
-	{"librdmacm dialer", EngineLibrdmacm},
-	{"native dialer", EngineNative},
+	{"librdmacm dialer", engineLibrdmacm},
+	{"native dialer", engineNative},
 }
 
 // A native listener and a Dialer of either engine move 64 MiB each way at
@@ -175,7 +174,7 @@ var peerDialers = []struct {
 func TestRXENativeListenerCopy(t *testing.T) {
 	for _, dial := range peerDialers {
 		t.Run(dial.name, func(t *testing.T) {
-			testRXECopy(t, Config{}, dial.eng, EngineNative, 64<<20)
+			testRXECopy(t, Config{}, dial.eng, engineNative, 64<<20)
 		})
 	}
 }
@@ -189,7 +188,7 @@ func TestRXENativeListenerRejectsIWARP(t *testing.T) {
 		t.Run(dial.name, func(t *testing.T) {
 			ln := rxeListenOn(t, Config{}, iwarp)
 			acc := acceptAsync(ln)
-			d := Dialer{Config: Config{Engine: dial.eng}, Timeout: rxeTimeout}
+			d := Dialer{Timeout: rxeTimeout, eng: dial.eng.engine()}
 			c, err := d.Dial("rdma", ln.Addr().String())
 			if err == nil {
 				c.Close()
@@ -207,7 +206,7 @@ func TestRXENativeListenerRejectsIWARP(t *testing.T) {
 // other than 1: the connect is refused with ECONNREFUSED and Accept never
 // returns it.
 func TestRXENativeListenerRejectsOtherVersions(t *testing.T) {
-	ln := rxeListen(t, Config{Engine: EngineNative})
+	ln := rxeListen(t, Config{})
 	acc := acceptAsync(ln)
 	ctx, cancel := context.WithTimeout(context.Background(), rxeTimeout)
 	defer cancel()
@@ -245,7 +244,7 @@ func checkNothingAccepted(t *testing.T, ln *Listener, acc <-chan accepted) {
 func TestRXENativeListenerGoroutinesReturnToBaseline(t *testing.T) {
 	for _, dial := range peerDialers {
 		t.Run(dial.name, func(t *testing.T) {
-			testRXEGoroutinesReturnToBaseline(t, dial.eng, EngineNative)
+			testRXEGoroutinesReturnToBaseline(t, dial.eng, engineNative)
 		})
 	}
 }
@@ -275,7 +274,7 @@ func TestRXENativeCopyLendsRegisteredMemory(t *testing.T) {
 		{"small", smallConfig},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			client, server := rxeEnginePair(t, tt.cfg, EngineNative, EngineNative)
+			client, server := rxeEnginePair(t, tt.cfg, engineNative, engineNative)
 			testCopyLendsRegisteredMemory(t, client, server, 64<<20, registeredMemory)
 		})
 	}
@@ -355,7 +354,7 @@ func memoryReleased(c *Conn) bool {
 func TestRXENativeViewsOutliveClose(t *testing.T) {
 	rdmatest.Device(t)
 	testViewsOutliveClose(t, func(t *testing.T) (client, server *Conn) {
-		return rxeEnginePair(t, Config{}, EngineNative, EngineNative)
+		return rxeEnginePair(t, Config{}, engineNative, engineNative)
 	}, memoryReleased)
 }
 
@@ -447,13 +446,13 @@ func closeWithAViewOut(t *testing.T, c *Conn, released func(*Conn) bool) {
 // and io.EOF.
 func TestRXENativeCloseWithThePeerNotReading(t *testing.T) {
 	rdmatest.Device(t)
-	forEachEngine(t, func(t *testing.T, peer Engine) {
+	forEachEngine(t, func(t *testing.T, peer engineName) {
 		t.Run("native end dialed", func(t *testing.T) {
-			closer, other := rxeEnginePair(t, Config{}, EngineNative, peer)
+			closer, other := rxeEnginePair(t, Config{}, engineNative, peer)
 			testCloseWithThePeerNotReading(t, closer, other)
 		})
 		t.Run("native end accepted", func(t *testing.T) {
-			other, closer := rxeEnginePair(t, Config{}, peer, EngineNative)
+			other, closer := rxeEnginePair(t, Config{}, peer, engineNative)
 			testCloseWithThePeerNotReading(t, closer, other)
 		})
 	})
@@ -521,13 +520,13 @@ func killedPeerData() []byte {
 // ECONNRESET.
 func TestRXENativeKilledPeerReadsAsResetAfterTheData(t *testing.T) {
 	if addr := os.Getenv(peerAddrEnv); addr != "" {
-		writeAndAwaitTheKill(t, Engine(os.Getenv(peerEngineEnv)), addr)
+		writeAndAwaitTheKill(t, engineName(os.Getenv(peerEngineEnv)), addr)
 		return
 	}
 	rdmatest.Device(t)
 	want := killedPeerData()
-	forEachEngine(t, func(t *testing.T, peer Engine) {
-		ln := rxeListen(t, Config{Engine: EngineNative})
+	forEachEngine(t, func(t *testing.T, peer engineName) {
+		ln := rxeListen(t, Config{})
 		acc := acceptAsync(ln)
 		cmd := exec.Command(os.Args[0], "-test.run=^TestRXENativeKilledPeerReadsAsResetAfterTheData$", "-test.count=1")
 		cmd.Env = append(os.Environ(), peerAddrEnv+"="+ln.Addr().String(), peerEngineEnv+"="+string(peer))
@@ -584,8 +583,8 @@ func TestRXENativeKilledPeerReadsAsResetAfterTheData(t *testing.T) {
 
 // writeAndAwaitTheKill is the peer process: it dials addr with the engine e,
 // writes killedPeerData and waits to be killed.
-func writeAndAwaitTheKill(t *testing.T, e Engine, addr string) {
-	d := Dialer{Config: Config{Engine: e}, Timeout: rxeTimeout}
+func writeAndAwaitTheKill(t *testing.T, e engineName, addr string) {
+	d := Dialer{Timeout: rxeTimeout, eng: e.engine()}
 	c, err := d.Dial("rdma", addr)
 	if err != nil {
 		t.Fatalf("Dial(%s) error: %v", addr, err)
@@ -618,7 +617,7 @@ const goroutinesPerNativeConn = 2
 func TestRXENativeGoroutinesPerConnectionAreConstant(t *testing.T) {
 	rdmatest.Device(t)
 	testGoroutinesPerConnection(t, func(t *testing.T) (client, server *Conn) {
-		return rxeEnginePair(t, Config{}, EngineNative, EngineNative)
+		return rxeEnginePair(t, Config{}, engineNative, engineNative)
 	}, goroutinesPerNativeConn)
 }
 

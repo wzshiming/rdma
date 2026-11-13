@@ -18,8 +18,8 @@ import (
 // the peer reads in full and writes back, and a ReadFull of the echo; on
 // rstream an iteration of a transfer each way.
 func BenchmarkRXERoundTrip(b *testing.B) {
-	benchOnEachEngine(b, sizeRows(64, 4<<10), benchEngines, rstreamRoundTrip, func(b *testing.B, cfg Config, size int) {
-		client, server := rxeEnginePair(b, cfg, cfg.Engine, cfg.Engine)
+	benchOnEachEngine(b, sizeRows(64, 4<<10), benchEngines, rstreamRoundTrip, func(b *testing.B, e engineName, cfg Config, size int) {
+		client, server := rxeEnginePair(b, cfg, e, e)
 		benchRoundTrip(b, client, server, size)
 	})
 }
@@ -30,8 +30,8 @@ func BenchmarkRXERoundTrip(b *testing.B) {
 // cost of a message, largeBufferRow the window of bulk transfers.
 func BenchmarkRXEWriteRead(b *testing.B) {
 	rows := append(sizeRows(64), sizeRows(throughputSizes...)...)
-	benchOnEachEngine(b, append(rows, largeBufferRow), benchEngines, rstreamStream, func(b *testing.B, cfg Config, size int) {
-		client, server := rxeEnginePair(b, cfg, cfg.Engine, cfg.Engine)
+	benchOnEachEngine(b, append(rows, largeBufferRow), benchEngines, rstreamStream, func(b *testing.B, e engineName, cfg Config, size int) {
+		client, server := rxeEnginePair(b, cfg, e, e)
 		benchWriteRead(b, client, server, size)
 	})
 }
@@ -41,9 +41,9 @@ func BenchmarkRXEWriteRead(b *testing.B) {
 // fails unless they take the path of the engine: views of the registered
 // memory on the native engine, the generic copy on librdmacm's.
 func BenchmarkRXEReadFromWriteTo(b *testing.B) {
-	benchOnEachEngine(b, append(sizeRows(throughputSizes...), largeBufferRow), benchEngines, noRstream, func(b *testing.B, cfg Config, size int) {
-		client, server := rxeEnginePair(b, cfg, cfg.Engine, cfg.Engine)
-		src, dst := copyPath(cfg.Engine, client, server)
+	benchOnEachEngine(b, append(sizeRows(throughputSizes...), largeBufferRow), benchEngines, noRstream, func(b *testing.B, e engineName, cfg Config, size int) {
+		client, server := rxeEnginePair(b, cfg, e, e)
+		src, dst := copyPath(e, client, server)
 		benchReadFromWriteTo(b, client, server, size, src, dst)
 	})
 }
@@ -53,8 +53,8 @@ func BenchmarkRXEReadFromWriteTo(b *testing.B) {
 // on the native engine alone: the librdmacm engine's at times wedged the
 // process on rxe.
 func BenchmarkRXEDuplex(b *testing.B) {
-	benchOnEachEngine(b, sizeRows(64<<10), []Engine{EngineNative}, noRstream, func(b *testing.B, cfg Config, size int) {
-		client, server := rxeEnginePair(b, cfg, cfg.Engine, cfg.Engine)
+	benchOnEachEngine(b, sizeRows(64<<10), []engineName{engineNative}, noRstream, func(b *testing.B, e engineName, cfg Config, size int) {
+		client, server := rxeEnginePair(b, cfg, e, e)
 		benchDuplex(b, client, server, size)
 	})
 }
@@ -63,10 +63,10 @@ func BenchmarkRXEDuplex(b *testing.B) {
 // connections than CPUs, two pairs per CPU at once. On the librdmacm engine
 // it skips before rdma-core 53, as the tests of many connections do.
 func BenchmarkRXEConcurrentRoundTrip(b *testing.B) {
-	benchOnEachEngine(b, sizeRows(64), benchEngines, noRstream, func(b *testing.B, cfg Config, size int) {
-		manyConnections(b, cfg.Engine)
+	benchOnEachEngine(b, sizeRows(64), benchEngines, noRstream, func(b *testing.B, e engineName, cfg Config, size int) {
+		manyConnections(b, e)
 		benchConcurrentRoundTrip(b, func() (client, server *Conn) {
-			return rxeEnginePair(b, cfg, cfg.Engine, cfg.Engine)
+			return rxeEnginePair(b, cfg, e, e)
 		}, size)
 	})
 }
@@ -75,8 +75,8 @@ func BenchmarkRXEConcurrentRoundTrip(b *testing.B) {
 // at a time: the dial, the accept of it on a listener of the same engine,
 // and the close of both ends.
 func BenchmarkRXEConnect(b *testing.B) {
-	benchOnEachEngine(b, []benchRow{{name: "conns=1"}}, benchEngines, noRstream, func(b *testing.B, cfg Config, _ int) {
-		benchConnect(b, rxeListen(b, cfg), Dialer{Config: cfg, Timeout: rxeTimeout})
+	benchOnEachEngine(b, []benchRow{{name: "conns=1"}}, benchEngines, noRstream, func(b *testing.B, e engineName, cfg Config, _ int) {
+		benchConnect(b, rxeListenOn(b, cfg, e.engine()), Dialer{Config: cfg, Timeout: rxeTimeout, eng: e.engine()})
 	})
 }
 
@@ -85,8 +85,8 @@ func BenchmarkRXEConnect(b *testing.B) {
 // polledRows. The polled benchmarks come last, leaving the others to run as
 // they did before them.
 func BenchmarkRXEPolledRoundTrip(b *testing.B) {
-	benchOnEachEngine(b, polledRows(64, 4<<10), []Engine{EngineNative}, noRstream, func(b *testing.B, cfg Config, size int) {
-		client, server := rxeEnginePair(b, cfg, cfg.Engine, cfg.Engine)
+	benchOnEachEngine(b, polledRows(64, 4<<10), []engineName{engineNative}, noRstream, func(b *testing.B, e engineName, cfg Config, size int) {
+		client, server := rxeEnginePair(b, cfg, e, e)
 		benchRoundTrip(b, client, server, size)
 	})
 }
@@ -95,8 +95,8 @@ func BenchmarkRXEPolledRoundTrip(b *testing.B) {
 // BenchmarkRXEWriteRead on the native engine alone, between connections of
 // polledRows.
 func BenchmarkRXEPolledWriteRead(b *testing.B) {
-	benchOnEachEngine(b, polledRows(64), []Engine{EngineNative}, noRstream, func(b *testing.B, cfg Config, size int) {
-		client, server := rxeEnginePair(b, cfg, cfg.Engine, cfg.Engine)
+	benchOnEachEngine(b, polledRows(64), []engineName{engineNative}, noRstream, func(b *testing.B, e engineName, cfg Config, size int) {
+		client, server := rxeEnginePair(b, cfg, e, e)
 		benchWriteRead(b, client, server, size)
 	})
 }
@@ -110,7 +110,7 @@ var largeBufferRow = benchRow{"buffer=1048576", 1 << 20, Config{SendBufferSize: 
 
 // benchEngines are the engines the benchmarks compare, librdmacm's first:
 // benchstat -col /engine takes the first column it reads as the base.
-var benchEngines = []Engine{EngineLibrdmacm, EngineNative}
+var benchEngines = []engineName{engineLibrdmacm, engineNative}
 
 // benchRow is a row of a benchmark, the first level of its sub-benchmarks:
 // ops of size bytes between connections of cfg.
@@ -140,18 +140,15 @@ func polledRows(sizes ...int) []benchRow {
 }
 
 // benchOnEachEngine runs bench for each row on each of engines in turn, as
-// the sub-benchmarks <row>/engine=<engine>, with the Config of the row on
-// that engine, and then the row's ops of op between two rstreams, as
-// <row>/engine=rstream, unless op is noRstream. Without a device it skips b,
-// as the tests do.
-func benchOnEachEngine(b *testing.B, rows []benchRow, engines []Engine, op rstreamOp, bench func(b *testing.B, cfg Config, size int)) {
+// the sub-benchmarks <row>/engine=<engine>, with the Config of the row, and
+// then the row's ops of op between two rstreams, as <row>/engine=rstream,
+// unless op is noRstream. Without a device it skips b, as the tests do.
+func benchOnEachEngine(b *testing.B, rows []benchRow, engines []engineName, op rstreamOp, bench func(b *testing.B, e engineName, cfg Config, size int)) {
 	rdmatest.Device(b)
 	for _, row := range rows {
 		b.Run(row.name, func(b *testing.B) {
 			for _, e := range engines {
-				cfg := row.cfg
-				cfg.Engine = e
-				b.Run("engine="+string(e), func(b *testing.B) { bench(b, cfg, row.size) })
+				b.Run("engine="+string(e), func(b *testing.B) { bench(b, e, row.cfg, row.size) })
 			}
 			if op != noRstream {
 				b.Run("engine=rstream", func(b *testing.B) { benchRstream(b, op, row.cfg, row.size) })
@@ -546,8 +543,8 @@ func (c *pathCheck) verify(b *testing.B, what string) {
 // client and WriteTo its destination on server against the path of the
 // engine e: the native engine lends the memory the connections registered,
 // librdmacm's takes the generic copy.
-func copyPath(e Engine, client, server *Conn) (src, dst *pathCheck) {
-	if e == EngineNative {
+func copyPath(e engineName, client, server *Conn) (src, dst *pathCheck) {
+	if e == engineNative {
 		send, _ := registeredMemory(client)
 		_, recv := registeredMemory(server)
 		return lentFrom("the registered send memory", send), lentFrom("the registered receive memory", recv)

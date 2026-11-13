@@ -572,7 +572,7 @@ func TestNativeEngineLeavesTheProtocolToRsproto(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, imp := range f.Imports {
-			if imp.Path.Value == `"github.com/wzshiming/rdma/rsocket"` {
+			if imp.Path.Value == `"github.com/wzshiming/rdma/internal/rsocket"` {
 				t.Errorf("%s imports rsocket", name)
 			}
 		}

@@ -220,9 +220,9 @@ func TestRXERstreamClientAgainstListener(t *testing.T) {
 
 // testRXERstreamClientAgainstListener has rstream's client run the exchange
 // against a Listener of the engine e.
-func testRXERstreamClientAgainstListener(t *testing.T, e Engine) {
+func testRXERstreamClientAgainstListener(t *testing.T, e engineName) {
 	rstream := rstreamPath(t)
-	ln := rxeListen(t, Config{Engine: e})
+	ln := rxeListenOn(t, Config{}, e.engine())
 	addr := ln.Addr().(*Addr)
 	wait := startRstream(t, rstream, rstreamArgs("-s", addr.IP, addr.Port)...)
 	acc := acceptAsync(ln)
@@ -246,7 +246,7 @@ func TestRXEDialerAgainstRstreamServer(t *testing.T) {
 
 // testRXEDialerAgainstRstreamServer has a Dialer of the engine e run the
 // exchange against rstream's server.
-func testRXEDialerAgainstRstreamServer(t *testing.T, e Engine) {
+func testRXEDialerAgainstRstreamServer(t *testing.T, e engineName) {
 	rstream := rstreamPath(t)
 	// rstream binds the port it is given, so a free one is found first.
 	probe := rxeListen(t, Config{})
@@ -257,7 +257,7 @@ func testRXEDialerAgainstRstreamServer(t *testing.T, e Engine) {
 	// until the server listens.
 	ctx, cancel := context.WithTimeout(context.Background(), rstreamTimeout)
 	defer cancel()
-	d := Dialer{Config: Config{Engine: e}}
+	d := Dialer{eng: e.engine()}
 	var conn *Conn
 	for conn == nil {
 		c, err := d.DialContext(ctx, "rdma", addr.String())

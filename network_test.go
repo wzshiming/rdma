@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/wzshiming/rdma/rsocket"
+	"github.com/wzshiming/rdma/internal/rsocket"
 )
 
 // socket is the non-blocking stream socket the librdmacm engine drives, with
@@ -78,18 +78,6 @@ type network interface {
 	detach(s socket)
 }
 
-// rsock adapts *rsocket.Socket to the socket interface, whose Accept
-// returns the interface.
-type rsock struct{ *rsocket.Socket }
-
-func (s *rsock) Accept() (socket, netip.AddrPort, error) {
-	c, peer, err := s.Socket.Accept()
-	if err != nil {
-		return nil, netip.AddrPort{}, err
-	}
-	return &rsock{c}, peer, nil
-}
-
 // domain returns the address family of a, IPv6 unless it holds an IPv4
 // address.
 func domain(a *Addr) rsocket.Domain {
@@ -97,6 +85,28 @@ func domain(a *Addr) rsocket.Domain {
 		return rsocket.IPv4
 	}
 	return rsocket.IPv6
+}
+
+// apply sets every non-zero field on s, which must not be connected or
+// listening yet.
+func (c Config) apply(s socket) error {
+	for _, o := range []struct {
+		value int
+		set   func(int) error
+	}{
+		{c.SendBufferSize, s.SetSendBuffer},
+		{c.ReceiveBufferSize, s.SetReceiveBuffer},
+		{c.SendQueueSize, s.SetSendQueueSize},
+		{c.ReceiveQueueSize, s.SetReceiveQueueSize},
+		{c.MaxInline, s.SetInline},
+	} {
+		if o.value != 0 {
+			if err := o.set(o.value); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // librdmacmEngine is the engine that carries the connections as rsockets of
