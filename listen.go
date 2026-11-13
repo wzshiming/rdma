@@ -11,9 +11,8 @@ import (
 // ListenConfig contains options for listening to an address, like
 // net.ListenConfig. The zero value is ready to use.
 type ListenConfig struct {
-	// Config selects the engine of the listener, which the connections it
-	// accepts run on whatever the dialer's, and sets the rsockets options
-	// they inherit.
+	// Config sets the rsockets options of the listener, which the
+	// connections it accepts inherit.
 	Config Config
 	// Backlog bounds the connection requests waiting to be accepted; 0
 	// means the kernel's default.
@@ -67,7 +66,7 @@ func (lc *ListenConfig) engine() engine {
 	if lc.eng != nil {
 		return lc.eng
 	}
-	return platformEngine(lc.Config)
+	return platformEngine()
 }
 
 // Listener is an RDMA stream listener. It implements net.Listener.

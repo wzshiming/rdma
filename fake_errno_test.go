@@ -11,3 +11,7 @@ var (
 	errInvalid   error = syscall.EINVAL
 	errNotConn   error = syscall.ENOTCONN
 )
+
+// errInProgress reports a connect that goes on in the background, as rsockets
+// and the fake network do.
+var errInProgress error = syscall.EINPROGRESS

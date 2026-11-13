@@ -37,7 +37,7 @@ func TestRXENativeSendsMessagesAboveMaxTransfer(t *testing.T) {
 	rdmatest.Device(t)
 	for _, listen := range engines {
 		t.Run("to "+string(listen), func(t *testing.T) {
-			client, server := rxeEnginePair(t, largeBuffers, EngineNative, listen)
+			client, server := rxeEnginePair(t, largeBuffers, engineNative, listen)
 			in, out := newStream(1), newStream(1)
 			received := async(func() (int64, error) { return io.Copy(&sink{s: out}, server) })
 			src := &largestRead{r: &fullSource{s: in, left: 8 << 20}}
@@ -78,7 +78,6 @@ func (r *rstreamBytes) Read(p []byte) (int, error) {
 func TestRXERstreamTakesMessagesAboveMaxTransfer(t *testing.T) {
 	rstream := rstreamPath(t)
 	cfg := largeBuffers
-	cfg.Engine = EngineNative
 	ln := rxeListen(t, cfg)
 	addr := ln.Addr().(*Addr)
 	const iterations, count, size = 2, 2, 1 << 20

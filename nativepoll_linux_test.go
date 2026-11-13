@@ -11,7 +11,7 @@ import (
 // PollTime of their Config, and neither of them poll for zero.
 func TestRXENativeStreamsPollForThePollTime(t *testing.T) {
 	for _, poll := range []time.Duration{0, 3 * time.Microsecond} {
-		client, server := rxeEnginePair(t, Config{PollTime: poll}, EngineNative, EngineNative)
+		client, server := rxeEnginePair(t, Config{PollTime: poll}, engineNative, engineNative)
 		for _, c := range []*Conn{client, server} {
 			if got := pollTimeOf(c); got != poll {
 				t.Errorf("with PollTime %v a native stream polls for %v, want %v", poll, got, poll)

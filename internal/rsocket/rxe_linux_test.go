@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/wzshiming/rdma/internal/rdmatest"
-	"github.com/wzshiming/rdma/rsocket"
+	"github.com/wzshiming/rdma/internal/rsocket"
 	"github.com/wzshiming/rdma/verbs"
 )
 

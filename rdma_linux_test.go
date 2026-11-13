@@ -20,7 +20,7 @@ import (
 	"golang.org/x/net/nettest"
 
 	"github.com/wzshiming/rdma/internal/rdmatest"
-	"github.com/wzshiming/rdma/rsocket"
+	"github.com/wzshiming/rdma/internal/rsocket"
 )
 
 const rxeTimeout = 20 * time.Second
@@ -29,11 +29,36 @@ const rxeTimeout = 20 * time.Second
 // so that back-pressure and credit returns happen all the time.
 var smallConfig = Config{SendBufferSize: 16 << 10, ReceiveBufferSize: 16 << 10, SendQueueSize: 8, ReceiveQueueSize: 8}
 
-// engines are the engines Config.Engine selects, which the rxe tests run on.
-var engines = []Engine{EngineNative, EngineLibrdmacm}
+// engines are the engines the rxe tests run on: the native engine and the
+// librdmacm engine, its control.
+var engines = []engineName{engineNative, engineLibrdmacm}
+
+// engine returns the engine n names, which a test injects through Dialer and
+// ListenConfig: for the control, the librdmacm engine on the poller of the
+// process.
+func (n engineName) engine() engine {
+	switch n {
+	case engineNative:
+		return nativeEngine{}
+	case engineLibrdmacm:
+		return librdmacmEngine{&rsocketNet}
+	}
+	panic("rdma: no engine is named " + strconv.Quote(string(n)))
+}
+
+// The names of the engines select those engines, the librdmacm engine on the
+// poller of the process.
+func TestEngineNamesSelectTheirEngines(t *testing.T) {
+	if _, ok := engineNative.engine().(nativeEngine); !ok {
+		t.Errorf("%s names a %T, want a nativeEngine", engineNative, engineNative.engine())
+	}
+	if e, ok := engineLibrdmacm.engine().(librdmacmEngine); !ok || e.nw != network(&rsocketNet) {
+		t.Errorf("%s names %#v, want the librdmacm engine on rsocketNet", engineLibrdmacm, engineLibrdmacm.engine())
+	}
+}
 
 // forEachEngine runs test on each engine, as a subtest named after it.
-func forEachEngine(t *testing.T, test func(t *testing.T, e Engine)) {
+func forEachEngine(t *testing.T, test func(t *testing.T, e engineName)) {
 	for _, e := range engines {
 		t.Run(string(e), func(t *testing.T) { test(t, e) })
 	}
@@ -41,7 +66,7 @@ func forEachEngine(t *testing.T, test func(t *testing.T, e Engine)) {
 
 // forEachPair runs test on each pair of the engine of a Dialer and that of
 // a Listener, as a subtest named after them.
-func forEachPair(t *testing.T, test func(t *testing.T, dial, listen Engine)) {
+func forEachPair(t *testing.T, test func(t *testing.T, dial, listen engineName)) {
 	for _, dial := range engines {
 		for _, listen := range engines {
 			t.Run(string(dial)+" to "+string(listen), func(t *testing.T) { test(t, dial, listen) })
@@ -55,7 +80,7 @@ func forEachPair(t *testing.T, test func(t *testing.T, dial, listen Engine)) {
 // server.
 func testOnEachPair(t *testing.T, cfg Config, exchange func(t *testing.T, client, server *Conn)) {
 	rdmatest.Device(t)
-	forEachPair(t, func(t *testing.T, dial, listen Engine) {
+	forEachPair(t, func(t *testing.T, dial, listen engineName) {
 		t.Run("dialed end as client", func(t *testing.T) {
 			dialed, accepted := rxeEnginePair(t, cfg, dial, listen)
 			exchange(t, dialed, accepted)
@@ -72,7 +97,7 @@ func testOnEachPair(t *testing.T, cfg Config, exchange func(t *testing.T, client
 // manyConnectionsVerdict decides: on the librdmacm engine a skip before 53, a
 // failure under RDMA_TEST_REQUIRE=1, and a run under RDMA_TEST_MANY_CONNS=1
 // regardless; a run on the native engine.
-func manyConnections(t testing.TB, e Engine) {
+func manyConnections(t testing.TB, e engineName) {
 	t.Helper()
 	rdmatest.Device(t)
 	release := rdmaCoreRelease()
@@ -116,8 +141,8 @@ func rxeListen(t testing.TB, cfg Config) *Listener {
 	return rxeListenOn(t, cfg, nil)
 }
 
-// rxeListenOn starts a Listener of the engine eng, nil for the one cfg
-// selects, on port 0 of the rdmatest device's IP.
+// rxeListenOn starts a Listener of the engine eng, nil for the platform's, on
+// port 0 of the rdmatest device's IP.
 func rxeListenOn(t testing.TB, cfg Config, eng engine) *Listener {
 	t.Helper()
 	dev := rdmatest.Device(t)
@@ -130,43 +155,11 @@ func rxeListenOn(t testing.TB, cfg Config, eng engine) *Listener {
 	return ln
 }
 
-// rxeDial dials addr with cfg within rxeTimeout.
-func rxeDial(t testing.TB, cfg Config, addr net.Addr) *Conn {
-	t.Helper()
-	d := Dialer{Config: cfg, Timeout: rxeTimeout}
-	c, err := d.Dial("rdma", addr.String())
-	if err != nil {
-		t.Fatalf("Dial(%v) error: %v", addr, err)
-	}
-	t.Cleanup(func() { c.Close() })
-	return c
-}
-
-// rxePair connects a client to a fresh listener on the device and closes the
-// listener: rdma-core before 53 (24061f015bd9) polls a stale descriptor array
-// in its listen thread once more than three listeners are registered, so
-// none is kept open longer than needed.
-func rxePair(t testing.TB, cfg Config) (client, server *Conn) {
-	t.Helper()
-	ln := rxeListen(t, cfg)
-	acc := acceptAsync(ln)
-	client = rxeDial(t, cfg, ln.Addr())
-	r := <-acc
-	if r.err != nil {
-		t.Fatalf("AcceptRDMA() error: %v", r.err)
-	}
-	t.Cleanup(func() { r.c.Close() })
-	if err := ln.Close(); err != nil {
-		t.Fatalf("Listener Close() error: %v", err)
-	}
-	return client, r.c
-}
-
 func TestRXEConn(t *testing.T) {
 	rdmatest.Device(t)
-	forEachEngine(t, func(t *testing.T, e Engine) {
+	forEachEngine(t, func(t *testing.T, e engineName) {
 		nettest.TestConn(t, func() (c1, c2 net.Conn, stop func(), err error) {
-			client, server := rxePair(t, Config{Engine: e})
+			client, server := rxeEnginePair(t, Config{}, e, e)
 			return client, server, func() {
 				client.Close()
 				server.Close()
@@ -206,11 +199,10 @@ func testRXEEcho(t *testing.T, client, server *Conn) {
 
 func TestRXETransfer(t *testing.T) {
 	rdmatest.Device(t)
-	forEachEngine(t, func(t *testing.T, e Engine) {
+	forEachEngine(t, func(t *testing.T, e engineName) {
 		for name, cfg := range map[string]Config{"defaults": {}, "small": smallConfig} {
-			cfg.Engine = e
 			t.Run(name, func(t *testing.T) {
-				client, server := rxePair(t, cfg)
+				client, server := rxeEnginePair(t, cfg, e, e)
 				const total = 1 << 30
 				start := time.Now()
 				transfer(t, client, server, total, 64<<10, client.CloseWrite)
@@ -222,10 +214,9 @@ func TestRXETransfer(t *testing.T) {
 }
 
 func TestRXEConcurrentConnections(t *testing.T) {
-	forEachEngine(t, func(t *testing.T, e Engine) {
+	forEachEngine(t, func(t *testing.T, e engineName) {
 		manyConnections(t, e)
-		cfg := Config{Engine: e}
-		ln := rxeListen(t, cfg)
+		ln := rxeListenOn(t, Config{}, e.engine())
 		const conns = 32
 		const total = 4 << 20
 		var wg sync.WaitGroup
@@ -251,7 +242,7 @@ func TestRXEConcurrentConnections(t *testing.T) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				d := Dialer{Config: cfg, Timeout: rxeTimeout}
+				d := Dialer{Timeout: rxeTimeout, eng: e.engine()}
 				client, err := d.Dial("rdma", ln.Addr().String())
 				if err != nil {
 					t.Errorf("Dial() #%d error: %v", i, err)
@@ -290,8 +281,8 @@ func TestRXEListenerCloseUnblocksAccept(t *testing.T) {
 
 // testRXEListenerCloseUnblocksAccept closes a Listener of the engine e while
 // an Accept waits on it.
-func testRXEListenerCloseUnblocksAccept(t *testing.T, e Engine) {
-	ln := rxeListen(t, Config{Engine: e})
+func testRXEListenerCloseUnblocksAccept(t *testing.T, e engineName) {
+	ln := rxeListenOn(t, Config{}, e.engine())
 	errc := make(chan error, 1)
 	go func() {
 		_, err := ln.Accept()
@@ -317,8 +308,8 @@ func TestRXEDialRefusedWithoutListener(t *testing.T) {
 
 // testRXEDialRefusedWithoutListener has a Dialer of the engine dial dial the
 // port of a Listener of the engine listen once it is closed.
-func testRXEDialRefusedWithoutListener(t *testing.T, dial, listen Engine) {
-	ln := rxeListen(t, Config{Engine: listen})
+func testRXEDialRefusedWithoutListener(t *testing.T, dial, listen engineName) {
+	ln := rxeListenOn(t, Config{}, listen.engine())
 	addr := ln.Addr().String()
 	if err := ln.Close(); err != nil {
 		t.Fatalf("Close() error: %v", err)
@@ -326,7 +317,7 @@ func testRXEDialRefusedWithoutListener(t *testing.T, dial, listen Engine) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	start := time.Now()
-	d := Dialer{Config: Config{Engine: dial}}
+	d := Dialer{eng: dial.engine()}
 	c, err := d.DialContext(ctx, "rdma", addr)
 	if err == nil {
 		c.Close()
@@ -345,7 +336,7 @@ func TestRXEDialContextCancel(t *testing.T) {
 	// host behind it, so the address resolution retries until cancelled.
 	dev := rdmatest.Device(t)
 	nowhere := net.JoinHostPort(dev.IP.Next().String(), "4791")
-	forEachEngine(t, func(t *testing.T, e Engine) {
+	forEachEngine(t, func(t *testing.T, e engineName) {
 		goroutines := runtime.NumGoroutine()
 		ctx, cancel := context.WithCancel(context.Background())
 		go func() {
@@ -353,7 +344,7 @@ func TestRXEDialContextCancel(t *testing.T) {
 			cancel()
 		}()
 		start := time.Now()
-		d := Dialer{Config: Config{Engine: e}}
+		d := Dialer{eng: e.engine()}
 		c, err := d.DialContext(ctx, "rdma", nowhere)
 		if err == nil {
 			c.Close()
@@ -376,8 +367,8 @@ func TestRXEDialContextCancel(t *testing.T) {
 }
 
 func TestRXEIdleReadDeadline(t *testing.T) {
-	forEachEngine(t, func(t *testing.T, e Engine) {
-		client, _ := rxePair(t, Config{Engine: e})
+	forEachEngine(t, func(t *testing.T, e engineName) {
+		client, _ := rxeEnginePair(t, Config{}, e, e)
 		const d = 50 * time.Millisecond
 		start := time.Now()
 		client.SetReadDeadline(start.Add(d))
@@ -393,10 +384,8 @@ func TestRXEIdleReadDeadline(t *testing.T) {
 }
 
 func TestRXECloseWakesBlockedReadAndWrite(t *testing.T) {
-	forEachEngine(t, func(t *testing.T, e Engine) {
-		cfg := smallConfig
-		cfg.Engine = e
-		client, _ := rxePair(t, cfg)
+	forEachEngine(t, func(t *testing.T, e engineName) {
+		client, _ := rxeEnginePair(t, smallConfig, e, e)
 		readErr := make(chan error, 1)
 		go func() {
 			_, err := client.Read(make([]byte, 1))
@@ -464,10 +453,10 @@ func testRXECloseWriteLetsThePeerWriteBack(t *testing.T, client, server *Conn) {
 
 func TestRXEDialerLocalAddrPinsTheSource(t *testing.T) {
 	dev := rdmatest.Device(t)
-	forEachEngine(t, func(t *testing.T, e Engine) {
-		ln := rxeListen(t, Config{Engine: e})
+	forEachEngine(t, func(t *testing.T, e engineName) {
+		ln := rxeListenOn(t, Config{}, e.engine())
 		acc := acceptAsync(ln)
-		d := Dialer{Config: Config{Engine: e}, LocalAddr: &Addr{IP: dev.IP.AsSlice()}, Timeout: rxeTimeout}
+		d := Dialer{LocalAddr: &Addr{IP: dev.IP.AsSlice()}, Timeout: rxeTimeout, eng: e.engine()}
 		client, err := d.Dial("rdma", ln.Addr().String())
 		if err != nil {
 			t.Fatalf("Dial() from %v error: %v", d.LocalAddr, err)
@@ -518,13 +507,13 @@ func cpuTime(t *testing.T) time.Duration {
 
 func TestRXEResourcesReturnToBaseline(t *testing.T) {
 	rdmatest.Device(t)
-	forEachEngine(t, func(t *testing.T, e Engine) {
+	forEachEngine(t, func(t *testing.T, e engineName) {
 		goroutines := runtime.NumGoroutine()
-		ln := rxeListen(t, Config{Engine: e})
+		ln := rxeListenOn(t, Config{}, e.engine())
 		const n = 8
 		for range n {
 			acc := acceptAsync(ln)
-			d := Dialer{Config: Config{Engine: e}, Timeout: rxeTimeout}
+			d := Dialer{Timeout: rxeTimeout, eng: e.engine()}
 			client, err := d.Dial("rdma", ln.Addr().String())
 			if err != nil {
 				t.Fatalf("Dial() error: %v", err)
@@ -562,11 +551,9 @@ func TestRXEResourcesReturnToBaseline(t *testing.T) {
 }
 
 func TestRXEIdleConnectionsAreCheap(t *testing.T) {
-	forEachEngine(t, func(t *testing.T, e Engine) {
+	forEachEngine(t, func(t *testing.T, e engineName) {
 		manyConnections(t, e)
-		cfg := smallConfig
-		cfg.Engine = e
-		ln := rxeListen(t, cfg)
+		ln := rxeListenOn(t, smallConfig, e.engine())
 		const conns = 100
 		var servers []*Conn
 		var mu sync.Mutex
@@ -585,7 +572,7 @@ func TestRXEIdleConnectionsAreCheap(t *testing.T) {
 				mu.Unlock()
 			}
 		}()
-		d := Dialer{Timeout: rxeTimeout, Config: cfg}
+		d := Dialer{Timeout: rxeTimeout, Config: smallConfig, eng: e.engine()}
 		for i := range conns {
 			c, err := d.Dial("rdma", ln.Addr().String())
 			if err != nil {
