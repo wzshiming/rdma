@@ -202,4 +202,4 @@ Of the RDMA transports, the native engine runs on InfiniBand and RoCE, and iWARP
 
 ## License
 
-[MIT](LICENSE)
+Licensed under the MIT License. See [LICENSE](https://github.com/wzshiming/rdma/blob/master/LICENSE) for the full license text.
