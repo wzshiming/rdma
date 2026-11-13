@@ -5,6 +5,7 @@ import (
 	"flag"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wzshiming/rdma"
 )
@@ -24,8 +25,8 @@ func TestParsePingpong(t *testing.T) {
 		},
 		{
 			"client with every flag",
-			[]string{"-connect", "rdma.example:4791", "-engine", "librdmacm", "-size", "4096", "-n", "10", "-sndbuf", "65536", "-rcvbuf", "131072", "-sqsize", "64", "-rqsize", "128", "-inline", "256"},
-			pingpongOptions{endpoint: endpoint{connect: "rdma.example:4791", engine: "librdmacm", sndbuf: 65536, rcvbuf: 131072, sqsize: 64, rqsize: 128, inline: 256}, size: 4096, n: 10},
+			[]string{"-connect", "rdma.example:4791", "-engine", "librdmacm", "-size", "4096", "-n", "10", "-sndbuf", "65536", "-rcvbuf", "131072", "-sqsize", "64", "-rqsize", "128", "-inline", "256", "-poll", "20us"},
+			pingpongOptions{endpoint: endpoint{connect: "rdma.example:4791", engine: "librdmacm", sndbuf: 65536, rcvbuf: 131072, sqsize: 64, rqsize: 128, inline: 256, poll: 20 * time.Microsecond}, size: 4096, n: 10},
 			"",
 		},
 		{
@@ -51,11 +52,13 @@ func TestParsePingpong(t *testing.T) {
 		{"negative send queue", []string{"-connect", "h:1", "-sqsize", "-1"}, pingpongOptions{}, "-sqsize must not be negative"},
 		{"negative receive queue", []string{"-connect", "h:1", "-rqsize", "-1"}, pingpongOptions{}, "-rqsize must not be negative"},
 		{"negative inline", []string{"-connect", "h:1", "-inline", "-1"}, pingpongOptions{}, "-inline must not be negative"},
+		{"negative poll time", []string{"-connect", "h:1", "-poll=-1ns"}, pingpongOptions{}, "-poll must not be negative"},
 		{"unknown engine", []string{"-connect", "h:1", "-engine", "verbs"}, pingpongOptions{}, "-engine must be native or librdmacm"},
 		{"the old message size flag is gone", []string{"-connect", "h:1", "-msgsize", "4096"}, pingpongOptions{}, "flag provided but not defined: -msgsize"},
 		{"the old depth flag is gone", []string{"-connect", "h:1", "-depth", "4"}, pingpongOptions{}, "flag provided but not defined: -depth"},
 		{"unknown flag", []string{"-connect", "h:1", "-bogus"}, pingpongOptions{}, "flag provided but not defined: -bogus"},
 		{"non-numeric -n", []string{"-connect", "h:1", "-n", "many"}, pingpongOptions{}, `invalid value "many" for flag -n`},
+		{"poll time without a unit", []string{"-connect", "h:1", "-poll", "10"}, pingpongOptions{}, `invalid value "10" for flag -poll`},
 		{"stray argument", []string{"-connect", "h:1", "extra"}, pingpongOptions{}, `unexpected argument "extra"`},
 	}
 	for _, tt := range tests {
@@ -101,8 +104,8 @@ func TestEndpointConfig(t *testing.T) {
 		want rdma.Config
 	}{
 		{"defaults stay zero", endpoint{}, rdma.Config{}},
-		{"every knob maps to its Config field", endpoint{engine: "librdmacm", sndbuf: 1 << 16, rcvbuf: 1 << 17, sqsize: 64, rqsize: 128, inline: 256},
-			rdma.Config{Engine: rdma.EngineLibrdmacm, SendBufferSize: 1 << 16, ReceiveBufferSize: 1 << 17, SendQueueSize: 64, ReceiveQueueSize: 128, MaxInline: 256}},
+		{"every knob maps to its Config field", endpoint{engine: "librdmacm", sndbuf: 1 << 16, rcvbuf: 1 << 17, sqsize: 64, rqsize: 128, inline: 256, poll: 20 * time.Microsecond},
+			rdma.Config{Engine: rdma.EngineLibrdmacm, SendBufferSize: 1 << 16, ReceiveBufferSize: 1 << 17, SendQueueSize: 64, ReceiveQueueSize: 128, MaxInline: 256, PollTime: 20 * time.Microsecond}},
 		{"the native engine", endpoint{engine: "native"}, rdma.Config{Engine: rdma.EngineNative}},
 	}
 	for _, tt := range tests {
@@ -123,7 +126,7 @@ func TestPingpongUsage(t *testing.T) {
 		stderr string
 	}{
 		{"help lists the flags and the fields", []string{"help", "pingpong"}, exitOK,
-			[]string{"Usage: rdma pingpong", "-listen", "-connect", "-engine", "-size", "-n", "-sndbuf", "-rcvbuf", "-sqsize", "-rqsize", "-inline", "-keep", "iterations", "min", "median", "p99", "max", "msg/s"}, ""},
+			[]string{"Usage: rdma pingpong", "-listen", "-connect", "-engine", "-size", "-n", "-sndbuf", "-rcvbuf", "-sqsize", "-rqsize", "-inline", "-poll", "-keep", "iterations", "min", "median", "p99", "max", "msg/s"}, ""},
 		{"no endpoint is a usage error", []string{"pingpong"}, exitUsage, nil, "rdma pingpong: one of -listen or -connect is required"},
 		{"a bad flag is a usage error", []string{"pingpong", "-connect", "h:1", "-n", "0"}, exitUsage, nil, "-n must be at least 1"},
 		{"an unknown engine is a usage error", []string{"pingpong", "-connect", "h:1", "-engine", "bogus"}, exitUsage, nil, "rdma pingpong: -engine must be native or librdmacm"},

@@ -22,8 +22,8 @@ func TestParseBW(t *testing.T) {
 		},
 		{
 			"client with every flag",
-			[]string{"-connect", "rdma.example:4791", "-engine", "native", "-size", "1048576", "-duration", "2s", "-conns", "4", "-sndbuf", "1048576", "-rcvbuf", "1048576", "-sqsize", "512", "-rqsize", "512", "-inline", "0"},
-			bwOptions{endpoint: endpoint{connect: "rdma.example:4791", engine: "native", sndbuf: 1 << 20, rcvbuf: 1 << 20, sqsize: 512, rqsize: 512}, size: 1 << 20, duration: 2 * time.Second, conns: 4},
+			[]string{"-connect", "rdma.example:4791", "-engine", "native", "-size", "1048576", "-duration", "2s", "-conns", "4", "-sndbuf", "1048576", "-rcvbuf", "1048576", "-sqsize", "512", "-rqsize", "512", "-inline", "0", "-poll", "5us"},
+			bwOptions{endpoint: endpoint{connect: "rdma.example:4791", engine: "native", sndbuf: 1 << 20, rcvbuf: 1 << 20, sqsize: 512, rqsize: 512, poll: 5 * time.Microsecond}, size: 1 << 20, duration: 2 * time.Second, conns: 4},
 			"",
 		},
 		{
@@ -63,7 +63,7 @@ func TestBWUsage(t *testing.T) {
 		stderr string
 	}{
 		{"help lists the flags and the fields", []string{"help", "bw"}, exitOK,
-			[]string{"Usage: rdma bw", "-listen", "-connect", "-engine", "-size", "-duration", "-conns", "-sndbuf", "-rcvbuf", "-sqsize", "-rqsize", "-inline", "-keep", "connections", "bytes", "duration", "MiB/s", "Gbit/s"}, ""},
+			[]string{"Usage: rdma bw", "-listen", "-connect", "-engine", "-size", "-duration", "-conns", "-sndbuf", "-rcvbuf", "-sqsize", "-rqsize", "-inline", "-poll", "-keep", "connections", "bytes", "duration", "MiB/s", "Gbit/s"}, ""},
 		{"no endpoint is a usage error", []string{"bw"}, exitUsage, nil, "rdma bw: one of -listen or -connect is required"},
 		{"a bad flag is a usage error", []string{"bw", "-connect", "h:1", "-conns", "0"}, exitUsage, nil, "-conns must be at least 1"},
 	}

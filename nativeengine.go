@@ -154,8 +154,9 @@ func (e nativeEngine) acceptRequest(ctx context.Context, req *cm.Request, c Conf
 	return s, nil
 }
 
-// newQPStream builds a native stream sized for c on a connection set up on
-// id, which it owns from then on: when it fails, id is closed.
+// newQPStream builds a native stream sized for c, polling for c's poll time,
+// on a connection set up on id, which it owns from then on: when it fails,
+// id is closed.
 func newQPStream(id *cm.ID, c Config) (*nativeStream, error) {
 	t, err := newQPTransport(id, c)
 	if err != nil {
@@ -167,6 +168,7 @@ func newQPStream(id *cm.ID, c Config) (*nativeStream, error) {
 		t.release()
 		return nil, err
 	}
+	s.pollFor(c.PollTime)
 	return s, nil
 }
 

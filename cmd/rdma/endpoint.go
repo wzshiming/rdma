@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"time"
 
 	"github.com/wzshiming/rdma"
 )
@@ -22,6 +23,7 @@ type endpoint struct {
 	sqsize  int
 	rqsize  int
 	inline  int
+	poll    time.Duration
 	keep    bool
 }
 
@@ -34,6 +36,7 @@ func (e *endpoint) bind(fs *flag.FlagSet) {
 	fs.IntVar(&e.sqsize, "sqsize", 0, "send queue depth in `entries`, rdma.Config.SendQueueSize (0: the rsockets default)")
 	fs.IntVar(&e.rqsize, "rqsize", 0, "receive queue depth in `entries`, rdma.Config.ReceiveQueueSize (0: the rsockets default)")
 	fs.IntVar(&e.inline, "inline", 0, "largest send posted inline in `bytes`, rdma.Config.MaxInline (0: the rsockets default)")
+	fs.DurationVar(&e.poll, "poll", 0, "how long a Read or Write that has to wait polls before it sleeps, rdma.Config.PollTime (0: no polling; rsockets poll 10us by default; the librdmacm engine ignores it)")
 	fs.BoolVar(&e.keep, "keep", false, "keep serving after the first client run")
 }
 
@@ -59,12 +62,15 @@ func (e *endpoint) check() error {
 			return fmt.Errorf("-%s must not be negative", f.name)
 		}
 	}
+	if e.poll < 0 {
+		return errors.New("-poll must not be negative")
+	}
 	return nil
 }
 
 // config returns the engine and the rsockets options the flags ask for.
 func (e *endpoint) config() rdma.Config {
-	return rdma.Config{Engine: rdma.Engine(e.engine), SendBufferSize: e.sndbuf, ReceiveBufferSize: e.rcvbuf, SendQueueSize: e.sqsize, ReceiveQueueSize: e.rqsize, MaxInline: e.inline}
+	return rdma.Config{Engine: rdma.Engine(e.engine), SendBufferSize: e.sndbuf, ReceiveBufferSize: e.rcvbuf, SendQueueSize: e.sqsize, ReceiveQueueSize: e.rqsize, MaxInline: e.inline, PollTime: e.poll}
 }
 
 // dial connects to the server named by -connect.

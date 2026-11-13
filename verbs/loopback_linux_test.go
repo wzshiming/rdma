@@ -392,7 +392,7 @@ func TestRCLoopback(t *testing.T) {
 		}
 		pollOne(t, p.cqA)
 
-		// The event was acknowledged, so an idle wait only ends with the context.
+		// The event was taken, so an idle wait only ends with the context.
 		ctx2, cancel2 := context.WithTimeout(context.Background(), 200*time.Millisecond)
 		defer cancel2()
 		if _, err := p.ch.Wait(ctx2); !errors.Is(err, context.DeadlineExceeded) {
@@ -465,6 +465,82 @@ func TestCompChannelWaitCancel(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Error("Wait() did not return after Close()")
+	}
+}
+
+// event arms cq, posts wr on qp, whose completions go to cq, and takes the
+// event that raises off the channel and the completion off cq.
+func (p *rcPair) event(t *testing.T, ctx context.Context, cq *verbs.CQ, qp *verbs.QP, wr verbs.SendWR) {
+	t.Helper()
+	if err := cq.RequestNotify(false); err != nil {
+		t.Fatalf("RequestNotify() error: %v", err)
+	}
+	if err := qp.PostSend(wr); err != nil {
+		t.Fatalf("PostSend() error: %v", err)
+	}
+	if got, err := p.ch.Wait(ctx); err != nil || got != cq {
+		t.Fatalf("Wait() = %p, %v; want %p, nil", got, err, cq)
+	}
+	pollOne(t, cq)
+}
+
+// Closing a CQ returns at once, however many events Wait took for it and
+// whatever wait is pending on its channel, which still ends with its context:
+// libibverbs destroys a CQ only once all its events are acknowledged.
+func TestCQCloseAfterManyEventsOnOneChannel(t *testing.T) {
+	p := newRCPair(t)
+	mrA, mrB := allocMR(t, p.pd, 4096), allocMR(t, p.pd, 4096)
+	toB := verbs.SendWR{ID: 1, Op: verbs.WRWrite, SGE: []verbs.SGE{mrA.SGE(mrA.Bytes()[:8])}, Flags: verbs.SendSignaled, RemoteAddr: mrB.SGE(mrB.Bytes()).Addr, RKey: mrB.RKey()}
+	toA := verbs.SendWR{ID: 2, Op: verbs.WRWrite, SGE: []verbs.SGE{mrB.SGE(mrB.Bytes()[:8])}, Flags: verbs.SendSignaled, RemoteAddr: mrA.SGE(mrA.Bytes()).Addr, RKey: mrA.RKey()}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	const events = 1001 // odd, so that batches of any size leave some over
+	for range events {
+		p.event(t, ctx, p.cqA, p.a, toB)
+		p.event(t, ctx, p.cqB, p.b, toA)
+	}
+
+	pending, cancelPending := context.WithCancel(context.Background())
+	defer cancelPending()
+	waited := make(chan error, 1)
+	go func() {
+		_, err := p.ch.Wait(pending)
+		waited <- err
+	}()
+	time.Sleep(100 * time.Millisecond)
+
+	// A CQ that a queue pair uses cannot be destroyed.
+	for _, qp := range []*verbs.QP{p.a, p.b} {
+		if err := qp.Close(); err != nil {
+			t.Fatalf("QP.Close() error: %v", err)
+		}
+	}
+	for _, cq := range []*verbs.CQ{p.cqA, p.cqB} {
+		closed := make(chan error, 1)
+		go func() { closed <- cq.Close() }()
+		select {
+		case err := <-closed:
+			if err != nil {
+				t.Errorf("CQ.Close() error: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("CQ.Close() did not return within 5s after %d events", events)
+		}
+	}
+
+	select {
+	case err := <-waited:
+		t.Fatalf("pending Wait() returned %v as the CQs closed, want it to wait for its context", err)
+	default:
+	}
+	cancelPending()
+	select {
+	case err := <-waited:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("cancelled Wait() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("Wait() did not return after its context was cancelled")
 	}
 }
 

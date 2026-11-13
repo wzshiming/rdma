@@ -10,6 +10,8 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -40,9 +42,16 @@ const (
 
 // rstreamPath finds the rstream binary of rdmacm-utils, skipping or failing
 // the test like rdmatest.Device when it is missing.
-func rstreamPath(t *testing.T) string {
+func rstreamPath(t testing.TB) string {
 	t.Helper()
 	rdmatest.Device(t)
+	return lookRstream(t)
+}
+
+// lookRstream finds rstream on PATH, skipping the test without it, or
+// failing it under RDMA_TEST_REQUIRE=1.
+func lookRstream(t testing.TB) string {
+	t.Helper()
 	path, err := exec.LookPath("rstream")
 	if err != nil {
 		msg := "rstream (rdmacm-utils) not found: " + err.Error()
@@ -57,33 +66,53 @@ func rstreamPath(t *testing.T) string {
 // startRstream runs rstream with args and returns a function that waits for
 // it, checks that it exited 0 and printed the statistics line, and returns
 // its standard output.
-func startRstream(t *testing.T, path string, args ...string) (wait func() string) {
+func startRstream(t testing.TB, path string, args ...string) (wait func() string) {
+	t.Helper()
+	r := runRstream(t, path, args...)
+	return func() string {
+		t.Helper()
+		err := r.wait()
+		t.Logf("rstream %s exited with %v\nstdout:\n%sstderr:\n%s", strings.Join(args, " "), err, r.stdout.String(), r.stderr.String())
+		if err != nil {
+			t.Errorf("rstream %s: %v", strings.Join(args, " "), err)
+		}
+		if !strings.Contains(r.stdout.String(), "\ncustom") {
+			t.Errorf("rstream %s printed no statistics line", strings.Join(args, " "))
+		}
+		return r.stdout.String()
+	}
+}
+
+// rstreamRun is an rstream process of a test.
+type rstreamRun struct {
+	cmd            *exec.Cmd
+	cancel         context.CancelFunc
+	stdout, stderr bytes.Buffer
+}
+
+// runRstream starts rstream with args, which is killed after rstreamTimeout
+// or when t ends.
+func runRstream(t testing.TB, path string, args ...string) *rstreamRun {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), rstreamTimeout)
-	cmd := exec.CommandContext(ctx, path, args...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	if err := cmd.Start(); err != nil {
+	r := &rstreamRun{cmd: exec.CommandContext(ctx, path, args...), cancel: cancel}
+	r.cmd.Stdout, r.cmd.Stderr = &r.stdout, &r.stderr
+	if err := r.cmd.Start(); err != nil {
 		cancel()
 		t.Fatalf("start rstream %s: %v", strings.Join(args, " "), err)
 	}
 	t.Cleanup(func() {
 		cancel()
-		cmd.Wait()
+		r.cmd.Wait()
 	})
-	return func() string {
-		t.Helper()
-		err := cmd.Wait()
-		cancel()
-		t.Logf("rstream %s exited with %v\nstdout:\n%sstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
-		if err != nil {
-			t.Errorf("rstream %s: %v", strings.Join(args, " "), err)
-		}
-		if !strings.Contains(stdout.String(), "\ncustom") {
-			t.Errorf("rstream %s printed no statistics line", strings.Join(args, " "))
-		}
-		return stdout.String()
-	}
+	return r
+}
+
+// wait waits for rstream to exit and returns the error it exited with.
+func (r *rstreamRun) wait() error {
+	err := r.cmd.Wait()
+	r.cancel()
+	return err
 }
 
 // rstreamServe plays the server side of the exchange on conn and reads the
@@ -143,8 +172,44 @@ func rstreamClient(t *testing.T, conn *Conn) {
 }
 
 func rstreamArgs(side string, ip net.IP, port int) []string {
+	return rstreamCustomArgs(side, ip, port, rstreamIterations, rstreamCount, rstreamSize)
+}
+
+// rstreamCustomArgs are the arguments of rstream's custom test on side, "-s"
+// for the client of ip:port and "-b" for the server bound to it: iterations
+// of count transfers of size bytes each way.
+func rstreamCustomArgs(side string, ip net.IP, port, iterations, count, size int) []string {
 	return []string{side, ip.String(), "-p", strconv.Itoa(port),
-		"-I", strconv.Itoa(rstreamIterations), "-C", strconv.Itoa(rstreamCount), "-S", strconv.Itoa(rstreamSize)}
+		"-I", strconv.Itoa(iterations), "-C", strconv.Itoa(count), "-S", strconv.Itoa(size)}
+}
+
+// The interop tests run 10 iterations of 10 transfers of 1000 bytes.
+func TestRstreamArgs(t *testing.T) {
+	got := rstreamArgs("-s", net.IPv4(10, 200, 0, 1), 7471)
+	want := []string{"-s", "10.200.0.1", "-p", "7471", "-I", "10", "-C", "10", "-S", "1000"}
+	if !slices.Equal(got, want) {
+		t.Errorf("rstreamArgs(-s, 10.200.0.1, 7471) = %q, want %q", got, want)
+	}
+}
+
+// fakeRstream writes an executable named rstream that runs script into a
+// directory of its own and returns its path.
+func fakeRstream(t *testing.T, script string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "rstream")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// The function startRstream returns waits for rstream and returns what it
+// printed.
+func TestStartRstream(t *testing.T) {
+	wait := startRstream(t, fakeRstream(t, "printf 'name\\ncustom\\n'\n"), "-s", "10.200.0.1")
+	if out := wait(); out != "name\ncustom\n" {
+		t.Errorf("wait() = %q, want what rstream printed", out)
+	}
 }
 
 // TestRXERstreamClientAgainstListener has rstream's client run the exchange

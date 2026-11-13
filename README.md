@@ -124,7 +124,7 @@ Gbit/s: 4.159
 
 The samples above come from Soft-RoCE on a GitHub Actions runner; hardware is a different league.
 
-`-engine` picks the engine of the connections, `native` or `librdmacm` (`Config.Engine`; left out, the library's default, the native engine), and the two ends need not pick the same; `-sndbuf`, `-rcvbuf`, `-sqsize`, `-rqsize` and `-inline` set the rsockets options of the connections (`Config.SendBufferSize`, `Config.ReceiveBufferSize`, `Config.SendQueueSize`, `Config.ReceiveQueueSize` and `Config.MaxInline`; 0 keeps the rsockets default), and `-keep` makes a server serve run after run.
+`-engine` picks the engine of the connections, `native` or `librdmacm` (`Config.Engine`; left out, the library's default, the native engine), and the two ends need not pick the same; `-sndbuf`, `-rcvbuf`, `-sqsize`, `-rqsize` and `-inline` set the rsockets options of the connections (`Config.SendBufferSize`, `Config.ReceiveBufferSize`, `Config.SendQueueSize`, `Config.ReceiveQueueSize` and `Config.MaxInline`; 0 keeps the rsockets default); `-poll` sets how long a call of the native engine that has to wait polls for completions before it sleeps (`Config.PollTime`; left out or 0, it does not poll, and `-poll 10us` polls for the 10 µs that rsockets poll by default, their `polling_time`; the librdmacm engine ignores it); and `-keep` makes a server serve run after run.
 
 ## Docker
 
@@ -174,17 +174,24 @@ rdma pingpong -connect 10.200.0.1:4791
 
 ## Benchmarks
 
-The root package has Go benchmarks that put the two engines side by side on one device: `BenchmarkRXERoundTrip` times the round trip of 64 B and of 4 KiB, a `Write` that the peer reads and writes back and a `ReadFull` of the echo; `BenchmarkRXEWriteRead` measures the throughput one way of a loop of `Write` calls against a loop of `Read` calls, and `BenchmarkRXEReadFromWriteTo` that of `ReadFrom` on the sending end against `WriteTo` on the receiving one, both at 4 KiB, 64 KiB and 1 MiB a call, the latter failing unless the copy takes the path of its engine: the lent registered buffers on the native engine, a buffer of its own on the librdmacm engine. Each size runs on `engine=librdmacm` and then on `engine=native`. The benchmarks find their device as the tests do, `RDMA_TEST_DEVICE` naming one, and skip without one.
+The root package has Go benchmarks that put the engines side by side on one device, with rstream, the test program of librdmacm, as the C side where it has a counterpart: `BenchmarkRXERoundTrip` times the round trip of 64 B and of 4 KiB, a `Write` that the peer reads and writes back and a `ReadFull` of the echo; `BenchmarkRXEWriteRead` measures the throughput one way of a loop of `Write` calls against a loop of `Read` calls, at 64 B, 4 KiB, 64 KiB and 1 MiB a call and at 1 MiB between connections of 1 MiB buffers, and `BenchmarkRXEReadFromWriteTo` that of `ReadFrom` on the sending end against `WriteTo` on the receiving one, at 4 KiB, 64 KiB and 1 MiB and with the 1 MiB buffers, failing unless the copy takes the path of its engine: the lent registered buffers on the native engine, a buffer of its own on the librdmacm engine. `BenchmarkRXEDuplex` writes 64 KiB both ways at once, on the native engine alone, as the librdmacm engine's at times wedged the process on Soft-RoCE; `BenchmarkRXEConcurrentRoundTrip` makes round trips on two connections per CPU; `BenchmarkRXEConnect` dials, accepts and closes a connection; `BenchmarkRXEPolledRoundTrip` and `BenchmarkRXEPolledWriteRead` repeat the round trips and the 64 B stream on the native engine alone, its waits polling for 10 µs (`Config.PollTime`), the `polling_time` of rsockets, before they sleep. Each row runs on `engine=librdmacm`, then on `engine=native` and, for the round trips and the write-read streams, on `engine=rstream`, two rstreams in blocking mode with the buffers of the row. Next to the time and the throughput of an op, the engines report its allocations, its read and write class system calls, its CPU time and its voluntary context switches. The benchmarks find their device as the tests do, `RDMA_TEST_DEVICE` naming one, and skip without one.
 
-Ten rounds of every benchmark, in which the engines take turns on the machine, make the samples, and benchstat, at the version `go.mod` pins as a tool, compares them: a row per benchmark and size, a column per engine, the native one set against librdmacm's, the base. From a checkout, on a host with a device:
+`hack/benchcompare.sh` runs the comparison of a host. It builds the root package of the checkout it belongs to, or of the tree given last, runs ten rounds of the benchmarks, or `-rounds`, and has benchstat, at the version `go.mod` pins as a tool, set the samples side by side in the table "Implementations": rstream, librdmacm and native on that tree, the native engine set against rstream, the base, in time and throughput, and against librdmacm in what rstream does not report. On a host with a device and rstream on `PATH`, from a checkout:
 
 ```sh
 ulimit -l unlimited
-for i in $(seq 10); do go test -run '^$' -bench '^BenchmarkRXE' -benchtime 500ms -count 1 .; done > bench.txt
-go tool benchstat -col /engine bench.txt
+RDMA_TEST_DEVICE=rxe0 hack/benchcompare.sh
 ```
 
-Every run of the [Go workflow](https://github.com/wzshiming/rdma/actions/workflows/go.yml) does the same on Soft-RoCE in its integration job, after the tests: the run's Summary page shows the table under "Engines on rxe0", with the runner's CPU, kernel, Go and rdma-core versions and its load before and after, the log of the step "Summarize the benchmarks" repeats it, and the artifact `engine-benchmarks` holds the raw output. The figures never fail the job; a benchmark that fails does. Soft-RoCE is a software device, so only the relative differences mean anything; for orientation, one run on 4 CPUs of an AMD EPYC 9V45 gave:
+Given a baseline commit, each round runs the native engine on the baseline, on the tree and on the baseline again before the engines, and two more tables follow, of the benchmarks both trees have: "Noise", the baseline after the tree against the baseline before it, and "Change", the tree against the baseline, both of its groups; a baseline with the files of the tree leaves the implementations alone.
+
+```sh
+RDMA_TEST_DEVICE=rxe0 hack/benchcompare.sh -base master
+```
+
+The script prints the summary, the tables under a header of the trees and the host, and writes it to `summary.md` in a new temporary directory, or the one `-out` names, next to the output of each group's passes, `engines.txt`, `base-1.txt`, `test.txt` and `base-2.txt`, and to `profile.txt` and `cpu.pprof` of a pass that profiles the native engine on the tree before the rounds. It sets `RDMA_TEST_REQUIRE=1`, so that a benchmark that would skip, without the device or rstream, fails instead, and a pass that fails, runs no benchmark or outlasts `-timeout`, 300 seconds by default, ends the comparison with its output and without a summary. The rows of 1 MiB buffers pin about 8 MiB a pair of connections, which the locked-memory limit has to hold.
+
+Every run of the [Go workflow](https://github.com/wzshiming/rdma/actions/workflows/go.yml) runs the script on Soft-RoCE in its integration job, after the tests, in the step "Compare the benchmarks": a push to an existing branch against the tip of the branch before the push, a new branch, a pull request and a forced push whose previous tip is gone against the merge base with master. The run's Summary page shows the tables under "Benchmarks on rxe0", the log of the step repeats them and names the baseline, and the artifact `benchmark-comparison` holds what the script wrote. The figures never fail the job; a benchmark that fails does. Soft-RoCE is a software device, so only the relative differences mean anything; for orientation, one run on 4 CPUs of an AMD EPYC 9V45 gave:
 
 | Benchmark | librdmacm | native |
 | --- | --- | --- |
@@ -193,6 +200,23 @@ Every run of the [Go workflow](https://github.com/wzshiming/rdma/actions/workflo
 | `Write` / `Read`, 64 KiB | 329 MiB/s | 358 MiB/s |
 | `ReadFrom` / `WriteTo`, 4 KiB | 142 MiB/s | 340 MiB/s |
 | `ReadFrom` / `WriteTo`, 1 MiB | 328 MiB/s | 358 MiB/s |
+
+Between two hosts, `rdma pingpong` and `rdma bw` of the [command line](#command-line) make the round trips and the stream of `Write` calls of the benchmarks, and rstream makes them in C: its server binds with `-b`, its client connects with `-s`, both block, `-T b`, and both take the same size (`-S`), transfers per iteration (`-C`) and iterations (`-I`), which rstream does not send its peer; `-B 65536` gives it the buffers of the zero `Config`, 128 KiB registered each way. Each server serves one client and exits, so the client's command follows each of the server's in turn:
+
+```sh
+# on the server, 10.0.0.1
+rdma pingpong -listen 10.0.0.1:7471 -engine native
+rstream -b 10.0.0.1 -p 7471 -T b -B 65536 -S 64 -C 1 -I 100000
+rdma bw -listen 10.0.0.1:7471 -engine native
+rstream -b 10.0.0.1 -p 7471 -T b -B 65536 -S 65536 -C 10000 -I 1
+# on the client
+rdma pingpong -connect 10.0.0.1:7471 -engine native -size 64 -n 100000
+rstream -s 10.0.0.1 -p 7471 -T b -B 65536 -S 64 -C 1 -I 100000
+rdma bw -connect 10.0.0.1:7471 -engine native -size 65536 -duration 10s
+rstream -s 10.0.0.1 -p 7471 -T b -B 65536 -S 65536 -C 10000 -I 1
+```
+
+pingpong reports the round trip, rstream its `usec/xfer`, the time of a transfer one way, which is half a round trip in the first test; bw reports `Gbit/s` one way, rstream `Gb/sec` over its transfers to the server and then back. `-engine librdmacm` runs the other engine, and `-sndbuf 1048576 -rcvbuf 1048576` on both commands with `-B 1048576` for rstream the buffers of the 1 MiB rows.
 
 ## Platforms
 

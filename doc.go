@@ -46,10 +46,14 @@
 // and cm packages, over InfiniBand and RoCE but not iWARP, where a dial fails
 // with an error matching errors.ErrUnsupported and a listener turns the
 // requests away. Each of its connections has a few goroutines of its own,
-// parked on the runtime poller while idle, which take in what arrives
-// without waiting for a call, so that an idle connection learns of the
-// peer's close; connections share no poller. Its zero knobs are the
-// compile-time defaults of rsockets: /etc/rdma/rsocket is not read.
+// parked on the runtime poller while idle, which take in what arrives while
+// a call waits for it, and the end of the connection without one, so that
+// an idle connection learns of the peer's close; connections share no
+// poller. A Read or Write that has to wait polls the connection itself first
+// for Config.PollTime, if it is positive, and polls less while its polls
+// find nothing; by default it does not poll, where rsockets poll for 10 µs.
+// Its zero knobs are the compile-time defaults of rsockets: /etc/rdma/rsocket
+// is not read.
 // EngineLibrdmacm selects the librdmacm engine, which drives librdmacm's own
 // rsockets, iWARP included: every socket runs in non-blocking mode, one
 // goroutine per process waits for all of them in rpoll, woken through a pipe

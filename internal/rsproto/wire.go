@@ -10,7 +10,7 @@ import (
 // Sizes and limits of the protocol (rsocket.c lines 65-72).
 const (
 	OLAPStartSize = 2048   // RS_OLAP_START_SIZE: the first message of a send, each next one doubling up to MaxTransfer
-	MaxTransfer   = 65536  // RS_MAX_TRANSFER: the largest data message
+	MaxTransfer   = 65536  // RS_MAX_TRANSFER: the largest data message rsend sends, which a Stream's may exceed
 	SndLowat      = 2048   // RS_SNDLOWAT: the free send buffer a sender waits for
 	QPMinSize     = 16     // RS_QP_MIN_SIZE: the least send or receive queue depth
 	QPMaxSize     = 0xFFFE // RS_QP_MAX_SIZE: the greatest send or receive queue depth
@@ -57,6 +57,9 @@ func MakeMsg(op Op, data uint32) Msg { return Msg(op)<<29 | Msg(data) }
 
 // Op mirrors rs_msg_op.
 func (m Msg) Op() Op { return Op(m >> 29) }
+
+// maxData is the most the 29 bits of data of a message word count.
+const maxData = 1<<29 - 1
 
 // Data mirrors rs_msg_data.
 func (m Msg) Data() uint32 { return uint32(m) & 0x1FFFFFFF }
