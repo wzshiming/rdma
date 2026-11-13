@@ -3,6 +3,7 @@ package rdma
 import (
 	"errors"
 	"fmt"
+	"time"
 )
 
 // Config selects the engine of a connection and carries its rsockets
@@ -35,6 +36,11 @@ type Config struct {
 	// MaxInline is the largest send in bytes posted inline (RDMA_INLINE).
 	// Default 64.
 	MaxInline int
+	// PollTime is how long a Read or Write of the native engine that has to
+	// wait polls for completions before its goroutine sleeps. Zero does not
+	// poll, unlike stock rsockets, which poll for 10 µs by default
+	// (polling_time). The librdmacm engine ignores it.
+	PollTime time.Duration
 }
 
 // Engine names an engine, what carries the connections of a Dialer or a
@@ -76,6 +82,9 @@ func (c Config) validate() error {
 		if f.value < 0 {
 			return fmt.Errorf("%w: %s %d is negative", errConfig, f.name, f.value)
 		}
+	}
+	if c.PollTime < 0 {
+		return fmt.Errorf("%w: PollTime %v is negative", errConfig, c.PollTime)
 	}
 	return nil
 }

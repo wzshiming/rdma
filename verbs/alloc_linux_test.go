@@ -3,6 +3,7 @@
 package verbs_test
 
 import (
+	"context"
 	"testing"
 
 	"github.com/wzshiming/rdma/verbs"
@@ -14,9 +15,10 @@ import (
 // detector sync.Pool, which dynlib draws its argument block from, drops
 // entries at random, so these tests stay out of race builds.
 const (
-	maxPostSendAllocs = 0
-	maxPostRecvAllocs = 0
-	maxPollAllocs     = 0
+	maxPostSendAllocs  = 0
+	maxPostRecvAllocs  = 0
+	maxPollAllocs      = 0
+	maxWaitRoundAllocs = 0
 )
 
 // allocRuns keeps the warm-up post and the measured ones within the 32-deep
@@ -73,5 +75,36 @@ func TestPollAllocations(t *testing.T) {
 	t.Logf("Poll: %v allocations per call", n)
 	if n > maxPollAllocs {
 		t.Errorf("Poll() allocates %v times per call, want at most %d", n, maxPollAllocs)
+	}
+}
+
+// A round is what the pump of a native connection does to sleep: arm the CQ,
+// wait on the channel with the one context it keeps, and poll the completion
+// that raised the event.
+func TestCompChannelWaitRoundAllocations(t *testing.T) {
+	p := newRCPair(t)
+	mrA, mrB := allocMR(t, p.pd, 4096), allocMR(t, p.pd, 4096)
+	wr := verbs.SendWR{ID: 1, Op: verbs.WRWrite, SGE: []verbs.SGE{mrA.SGE(mrA.Bytes()[:8])}, Flags: verbs.SendSignaled, RemoteAddr: mrB.SGE(mrB.Bytes()).Addr, RKey: mrB.RKey()}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	wcs := make([]verbs.WC, 1)
+	n := testing.AllocsPerRun(100, func() {
+		if err := p.cqA.RequestNotify(false); err != nil {
+			t.Fatalf("RequestNotify() error: %v", err)
+		}
+		if err := p.a.PostSend(wr); err != nil {
+			t.Fatalf("PostSend() error: %v", err)
+		}
+		if cq, err := p.ch.Wait(ctx); err != nil || cq != p.cqA {
+			t.Fatalf("Wait() = %p, %v; want %p, nil", cq, err, p.cqA)
+		}
+		// The event follows the completion into the queue.
+		if k, err := p.cqA.Poll(wcs); err != nil || k != 1 {
+			t.Fatalf("Poll() = %d, %v; want 1, nil", k, err)
+		}
+	})
+	t.Logf("RequestNotify, PostSend, Wait and Poll: %v allocations per round", n)
+	if n > maxWaitRoundAllocs {
+		t.Errorf("a round of RequestNotify, PostSend, Wait and Poll allocates %v times, want at most %d", n, maxWaitRoundAllocs)
 	}
 }

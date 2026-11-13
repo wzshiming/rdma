@@ -598,9 +598,11 @@ func writeAndAwaitTheKill(t *testing.T, e Engine, addr string) {
 }
 
 // arrived returns how many bytes have arrived on c, a connection of the
-// native engine, in one piece and wait to be read.
+// native engine, in one piece and wait to be read, once its transport has
+// processed what is ready, as a Read would.
 func arrived(c *Conn) int {
 	s := c.s.(*nativeStream)
+	s.t.process()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.st.Peek())

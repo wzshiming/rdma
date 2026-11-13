@@ -106,7 +106,7 @@ jobs:
 
   integration:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       # Soft-RoCE gets a netdev of its own: some runners carry a hardware RDMA
       # device on eth0 (Microsoft MANA) that would share eth0's IP, and rdma_cm
@@ -119,7 +119,10 @@ jobs:
       # the release tarball below is built and installed under /usr/local.
       RDMA_CORE_VERSION: "66.0"
     steps:
+    # The whole history, so that the benchmarks find their baseline.
     - uses: actions/checkout@v7
+      with:
+        fetch-depth: 0
 
     - name: Set up Go
       uses: actions/setup-go@v7
@@ -267,50 +270,33 @@ jobs:
         RDMA_TEST_REQUIRE=1 go test -race -count=1 -v ./...
         CGO_ENABLED=0 RDMA_TEST_REQUIRE=1 GODEBUG=clobberfree=1 go test -count=1 -v ./...
 
-    - name: Benchmark the engines
+    - name: Compare the benchmarks
       env:
         RDMA_TEST_DEVICE: rxe0
-        RDMA_TEST_REQUIRE: "1"
-      # Ten rounds without the race detector, each of which runs every
-      # benchmark at each size on the librdmacm engine and then on the native
-      # one, so that the two take turns on this runner. A benchmark that fails
-      # fails the step; the figures never do.
+        # The tip of the branch before a push, all zeros when the push makes
+        # the branch; a new branch is compared with the merge base with
+        # master instead, and so are a pull request and a forced push whose
+        # previous tip is gone.
+        PREVIOUS_TIP: ${{ github.event_name == 'push' && github.event.before || '' }}
+      # Ten rounds without the race detector, each of which runs the native
+      # engine on the baseline, on this tree and on the baseline again, and
+      # then every engine on this tree, so that trees and engines take turns
+      # on this runner; BenchmarkRXEDuplex runs on the native engine alone,
+      # as librdmacm's at times wedged the process on rxe. A pass that fails
+      # or hangs fails the step; the figures never do. The log repeats the
+      # summary, which the API does not serve.
       shell: bash
       run: |
         sudo prlimit --pid $$ --memlock=unlimited:unlimited
-        cut -d ' ' -f 1-3 /proc/loadavg > "$RUNNER_TEMP/load-before"
-        for _ in $(seq 10); do
-          go test -run '^$' -bench '^BenchmarkRXE' -benchtime 500ms -count 1 . | tee -a "$RUNNER_TEMP/bench.txt"
-        done
-        cut -d ' ' -f 1-3 /proc/loadavg > "$RUNNER_TEMP/load-after"
-
-    - name: Summarize the benchmarks
-      # The log repeats the summary, which the API does not serve.
-      shell: bash
-      run: |
-        arch=$(dpkg-architecture -qDEB_HOST_MULTIARCH)
-        {
-          echo "## Engines on rxe0"
-          echo
-          echo "Ten samples of each benchmark on each engine, taken in turns on this runner; benchstat compares the native engine with librdmacm's, the base. rxe is a software device: only the relative differences mean anything."
-          echo
-          echo "| | |"
-          echo "| --- | --- |"
-          echo "| CPU | $(lscpu | sed -n 's/^Model name: *//p'), $(nproc) CPUs |"
-          echo "| Kernel | $(uname -r) |"
-          echo "| Go | $(go version) |"
-          echo "| rdma-core | $RDMA_CORE_VERSION, $(basename "$(readlink -f "/usr/local/lib/$arch/librdmacm.so.1")") |"
-          echo "| Load average before | $(cat "$RUNNER_TEMP/load-before") |"
-          echo "| Load average after | $(cat "$RUNNER_TEMP/load-after") |"
-          echo
-          echo '```'
-          go tool benchstat -col /engine "$RUNNER_TEMP/bench.txt"
-          echo '```'
-        } | tee -a "$GITHUB_STEP_SUMMARY"
+        base=$(git merge-base HEAD origin/master) why="the merge base with master"
+        if git cat-file -e "$PREVIOUS_TIP^{commit}" 2>/dev/null; then base=$PREVIOUS_TIP why="the tip of the branch before the push"; fi
+        echo "baseline: $base, $why"
+        hack/benchcompare.sh -base "$base" -out "$RUNNER_TEMP/benchmarks"
+        cat "$RUNNER_TEMP/benchmarks/summary.md" >> "$GITHUB_STEP_SUMMARY"
 
     - name: Keep the benchmark output
       uses: actions/upload-artifact@v7
       with:
-        name: engine-benchmarks
-        path: ${{ runner.temp }}/bench.txt
+        name: benchmark-comparison
+        path: ${{ runner.temp }}/benchmarks
         if-no-files-found: error

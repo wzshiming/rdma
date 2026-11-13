@@ -72,7 +72,7 @@ func testOnEachPair(t *testing.T, cfg Config, exchange func(t *testing.T, client
 // manyConnectionsVerdict decides: on the librdmacm engine a skip before 53, a
 // failure under RDMA_TEST_REQUIRE=1, and a run under RDMA_TEST_MANY_CONNS=1
 // regardless; a run on the native engine.
-func manyConnections(t *testing.T, e Engine) {
+func manyConnections(t testing.TB, e Engine) {
 	t.Helper()
 	rdmatest.Device(t)
 	release := rdmaCoreRelease()

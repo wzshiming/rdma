@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/wzshiming/rdma/internal/rsproto"
@@ -17,7 +18,8 @@ var nativeOnMemLink = engineUnderTest{name: "native", new: newMemEngine, addr: "
 
 // memEngine connects native streams over memory links of rsproto, each end
 // on a memTransport. It fails the test when the memory of a stream is never
-// released.
+// released, or when its transport is processed after the release or by two
+// goroutines at once.
 type memEngine struct {
 	fail func(format string, args ...any)
 
@@ -47,6 +49,9 @@ func (e *memEngine) checkReleased() {
 	for _, t := range ends {
 		if !t.isReleased() {
 			e.fail("the memory of a stream was never released")
+		}
+		if misuse := t.misuseSeen(); misuse != "" {
+			e.fail("the transport of a stream was %s", misuse)
 		}
 	}
 }
@@ -87,6 +92,8 @@ func (e *memEngine) connect(cc, sc Config, caddr, saddr netip.AddrPort) (client,
 	if server, err = newNativeStream(tb, tb.mem, saddr, caddr); err != nil {
 		return nil, nil, err
 	}
+	client.pollFor(cc.PollTime)
+	server.pollFor(sc.PollTime)
 	client.connect(e.handshake(server))
 	server.connect(e.handshake(client))
 	return client, server, nil
@@ -198,34 +205,68 @@ func (a *memAcceptor) close() error {
 var errTakenDown = errors.New("memory link taken down")
 
 // memTransport is the transport of a native stream on one end of a memory
-// link of rsproto. A goroutine of its own feeds the stream what happens at
-// its end, as a completion queue would; posts at either end poke it.
+// link of rsproto. A goroutine of its own plays the device of a queue pair:
+// poked by the posts at either end, it takes in what reaches this end, the
+// messages the peer sent, into the memory of the stream, and the completions
+// of the sends the peer took, into two queues, one for each kind, and raises
+// the event of a queue armed for what it took, which spends the arm. The
+// stream gets what the queues hold only as it is processed: at its calls,
+// after such an event, and at once on the loss of the link, as the real
+// transport has it learned through the watcher.
 type memTransport struct {
 	end  *rsproto.MemEnd
 	peer *memTransport
 	mem  rsproto.Config
 	kick chan struct{} // holds a poke not yet taken
 	stop chan struct{} // closed by down
-	done chan struct{} // closed when the pump returns
+	done chan struct{} // closed when the device returns
 
-	ev   linkEvents // set by start, for the pump
-	lost bool       // the pump has fed the loss of the link
+	ev   linkEvents // set by start
+	proc processor
 
-	silence sync.Mutex // held, it keeps the pump from taking anything, as a peer gone silent
+	processes atomic.Int64                    // calls of process
+	expected  [anyCompletion + 1]atomic.Int64 // calls of expect, by the kinds expected
 
-	mu       sync.Mutex
-	started  bool
-	released bool
+	silence sync.Mutex // held, it keeps the device from taking anything, as a peer gone silent
+
+	mu        sync.Mutex
+	arrived   []rsproto.Msg // the messages taken in and not yet processed
+	completed []memDone     // the completions taken in and not yet processed
+	loss      error         // the loss of the link, once taken in
+	lossFed   bool
+	acks      int      // how many completions of sends the device may take in yet, -1 for all
+	armed     interest // the queues that raise an event for the next completion they take
+	arms      int      // how many times the queues were armed
+	beforeArm func()   // run as the queues are next armed
+	draining  bool
+	misuse    string // what the transport was made to do that it never must
+	started   bool
+	released  bool
+
+	feedArrived   []rsproto.Msg // the drain's
+	feedCompleted []memDone     // the drain's
+}
+
+// memDone is the completion of a send as the device takes it in.
+type memDone struct {
+	id  uint64
+	err error
 }
 
 func newMemTransport(end *rsproto.MemEnd, mem rsproto.Config) *memTransport {
 	for _, r := range []rsproto.Region{mem.SendBuffer, mem.ReceiveBuffer, mem.GrantTable, mem.ControlBuffer} {
 		end.Register(r)
 	}
-	return &memTransport{end: end, mem: mem, kick: make(chan struct{}, 1), stop: make(chan struct{}), done: make(chan struct{})}
+	// The queues hold no more than the receives and the sends posted.
+	return &memTransport{
+		end: end, mem: mem, acks: -1,
+		kick: make(chan struct{}, 1), stop: make(chan struct{}), done: make(chan struct{}),
+		arrived: make([]rsproto.Msg, 0, mem.ReceiveQueueSize), feedArrived: make([]rsproto.Msg, 0, mem.ReceiveQueueSize),
+		completed: make([]memDone, 0, mem.SendQueueSize), feedCompleted: make([]memDone, 0, mem.SendQueueSize),
+	}
 }
 
-// poke makes the pump look at the end again.
+// poke makes the device look at the end again.
 func (t *memTransport) poke() {
 	select {
 	case t.kick <- struct{}{}:
@@ -263,10 +304,21 @@ func (t *memTransport) start(ev linkEvents) {
 	t.started = true
 	t.mu.Unlock()
 	t.ev = ev
-	go t.pump()
+	t.proc.start(t, ev)
+	go t.device()
 }
 
-func (t *memTransport) pump() {
+func (t *memTransport) process() {
+	t.processes.Add(1)
+	t.proc.process()
+}
+
+func (t *memTransport) expect(k interest) {
+	t.expected[k].Add(1)
+	t.proc.expect(k)
+}
+
+func (t *memTransport) device() {
 	defer close(t.done)
 	for {
 		select {
@@ -274,40 +326,125 @@ func (t *memTransport) pump() {
 		case <-t.stop:
 			return
 		}
-		t.silence.Lock()
-		for t.step() {
-		}
-		t.silence.Unlock()
+		t.takeIn()
 	}
 }
 
-// step feeds the stream, under its lock, the messages that reach this end,
-// the completions of its sends and, once they are all taken, the loss of the
-// link, and reports whether there was any. Deliver writes the memory of the
-// stream, so the lock covers it.
-func (t *memTransport) step() bool {
+// takeIn has the device take in what reached this end, raises the events of
+// the queues armed for it and has the loss of the link processed at once.
+func (t *memTransport) takeIn() {
+	t.silence.Lock()
+	fire, lost := t.land()
+	t.silence.Unlock()
+	if fire != 0 {
+		t.proc.spent(fire)
+	}
+	if lost {
+		t.proc.process()
+	}
+}
+
+// land takes in what reached this end: the messages the peer sent, as many as
+// there are receives, into the memory of the stream, which Deliver writes
+// under the stream's lock, the completions of the sends the peer took, and
+// the loss of the link once they are all in. It returns the kinds of what it
+// took whose queues were armed, which it disarms, and whether the loss came.
+func (t *memTransport) land() (fire interest, lost bool) {
 	t.ev.lock()
 	defer t.ev.unlock()
-	moved := false
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var took interest
 	for msg, ok := t.end.Deliver(); ok; msg, ok = t.end.Deliver() {
-		t.ev.received(msg)
+		t.arrived = append(t.arrived, msg)
 		t.peer.poke()
-		moved = true
+		took |= arrivals
 	}
-	for id, err, ok := t.end.Completion(); ok; id, err, ok = t.end.Completion() {
-		t.ev.sent(id, err)
-		moved = true
+	for t.acks != 0 {
+		id, err, ok := t.end.Completion()
+		if !ok {
+			break
+		}
+		t.completed = append(t.completed, memDone{id, err})
+		took |= sendCompletions
+		if t.acks > 0 {
+			t.acks--
+		}
 	}
-	if err := t.end.Down(); err != nil && !t.lost {
-		t.lost = true
-		t.ev.lost(err)
-		moved = true
+	if t.loss == nil {
+		t.loss = t.end.Down()
+		lost = t.loss != nil
 	}
-	return moved
+	fire = took & t.armed
+	t.armed &^= fire
+	return fire, lost
 }
 
-// down breaks the link, which both ends learn as its loss, and stops the
-// pump.
+// drain hands ev what the queues hold, in the order the device took it in,
+// and the loss of the link after it, as a processor drains a completion
+// queue: taken from the queue first, then fed under ev's lock.
+func (t *memTransport) drain(ev linkEvents) (interest, bool) {
+	t.mu.Lock()
+	t.check("drained")
+	t.draining = true
+	t.feedArrived, t.arrived = t.arrived, t.feedArrived[:0]
+	t.feedCompleted, t.completed = t.completed, t.feedCompleted[:0]
+	var loss error
+	if t.loss != nil && !t.lossFed {
+		loss, t.lossFed = t.loss, true
+	}
+	t.mu.Unlock()
+	ev.lock()
+	for _, msg := range t.feedArrived {
+		ev.received(msg)
+	}
+	for _, d := range t.feedCompleted {
+		ev.sent(d.id, d.err)
+	}
+	if loss != nil {
+		ev.lost(loss)
+	}
+	k := ev.waitsFor()
+	ev.unlock()
+	t.mu.Lock()
+	t.draining = false
+	t.mu.Unlock()
+	return k, true
+}
+
+// arm has the queues of the kinds k raise an event for the next completion
+// they take, each queue on its own.
+func (t *memTransport) arm(ev linkEvents, k interest) interest {
+	t.mu.Lock()
+	hook := t.beforeArm
+	t.beforeArm = nil
+	t.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.check("armed")
+	t.armed |= k
+	t.arms++
+	return k
+}
+
+// check records the first time the queues are drained or armed when they
+// never must be: after release, or while a drain goes on. The caller holds
+// mu.
+func (t *memTransport) check(what string) {
+	switch {
+	case t.misuse != "":
+	case t.released:
+		t.misuse = what + " after its release"
+	case t.draining:
+		t.misuse = what + " while another goroutine drained it"
+	}
+}
+
+// down breaks the link, which both ends learn as its loss, stops the device
+// and ends the processing.
 func (t *memTransport) down() {
 	t.end.Break(errTakenDown)
 	t.peer.poke()
@@ -318,6 +455,7 @@ func (t *memTransport) down() {
 	if started {
 		<-t.done
 	}
+	t.proc.stop()
 }
 
 // release poisons the memory, as freeing it would let it be reused, so that
@@ -345,6 +483,64 @@ func (t *memTransport) isReleased() bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.released
+}
+
+func (t *memTransport) misuseSeen() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.misuse
+}
+
+// holdAcks keeps the device from taking in the completions of sends, as if
+// the acknowledgements of the peer were slow to come; ack then lets n more
+// in, and releaseAcks all of them.
+func (t *memTransport) holdAcks() { t.setAcks(0) }
+
+func (t *memTransport) ack(n int) {
+	t.mu.Lock()
+	if t.acks >= 0 {
+		t.acks += n
+	}
+	t.mu.Unlock()
+	t.poke()
+}
+
+func (t *memTransport) releaseAcks() { t.setAcks(-1) }
+
+func (t *memTransport) setAcks(n int) {
+	t.mu.Lock()
+	t.acks = n
+	t.mu.Unlock()
+	t.poke()
+}
+
+// isArmed reports whether the queues of the kinds k raise an event for the
+// next completion they take.
+func (t *memTransport) isArmed(k interest) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.armed&k == k
+}
+
+// armCount returns how many times the queues were armed.
+func (t *memTransport) armCount() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.arms
+}
+
+// processCount returns how many times the stream had the transport process.
+func (t *memTransport) processCount() int64 { return t.processes.Load() }
+
+// expectCount returns how many times the stream declared that it waits for
+// the completions of the kinds k, exactly those.
+func (t *memTransport) expectCount(k interest) int64 { return t.expected[k].Load() }
+
+// beforeNextArm has f run as the queues are next armed, before the arm.
+func (t *memTransport) beforeNextArm(f func()) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.beforeArm = f
 }
 
 // memTransportOf returns the transport under c, a connection of a

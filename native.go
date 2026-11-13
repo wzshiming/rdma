@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/wzshiming/rdma/internal/rsproto"
@@ -14,18 +15,73 @@ import (
 // of the connection to reach the peer.
 const closeTimeout = time.Second
 
+// clockZero is where the clock of the polls starts.
+var clockZero = time.Now()
+
+// monotonic reads the clock of the polls, the monotonic one.
+func monotonic() time.Duration { return time.Since(clockZero) }
+
+// The polls of the waits in one direction back off while they find nothing:
+// after pollMisses misses in a row the next pollPause waits do not poll, and
+// each further miss in a row doubles that pause, pollDoublings times at
+// most; a poll that finds the stream ready ends the back-off.
+const (
+	pollMisses    = 2
+	pollPause     = 16
+	pollDoublings = 6
+)
+
+// pollPace paces the polls of the waits in one direction.
+type pollPace struct {
+	misses int // polls in a row that found nothing
+	skip   int // waits left that do not poll
+}
+
+// due reports whether the wait about to come polls, and counts it against
+// the pause when it does not.
+func (p *pollPace) due() bool {
+	if p.skip > 0 {
+		p.skip--
+		return false
+	}
+	return true
+}
+
+// found ends the back-off: a poll found the stream ready.
+func (p *pollPace) found() { p.misses = 0 }
+
+// missed counts a poll that found nothing, which pauses the polls after
+// pollMisses in a row.
+func (p *pollPace) missed() {
+	if p.misses++; p.misses >= pollMisses {
+		p.skip = pollPause << min(p.misses-pollMisses, pollDoublings)
+	}
+}
+
 // transport carries a native stream: the queue pair of a connection, or a
 // link held in memory in tests. The stream posts through its rsproto.Link,
-// from inside its own calls; the transport feeds the stream what becomes of
-// the posts and what arrives through the linkEvents start hands it.
+// from inside its own calls, and has the transport process the completions
+// of its queue: feed the stream what has become of the posts and what has
+// arrived, through the linkEvents start hands it.
 type transport interface {
 	rsproto.Link
 	// start has the transport feed ev the events of the link from then on,
-	// from a goroutine of its own, in the order package rsproto asks for:
-	// sent for the completion of each send, received for each message word
-	// that arrives, and lost once, for the loss of the link, after the
-	// completions before it. Each batch of events comes with ev's lock held.
+	// in the order package rsproto asks for: sent for the completion of each
+	// send, received for each message word that arrives, and lost once, for
+	// the loss of the link, after the completions before it. Each batch of
+	// events comes with ev's lock held. The loss comes in the background, a
+	// completion as the transport processes it.
 	start(ev linkEvents)
+	// process feeds ev the completions that are ready, without waiting for
+	// any. Its caller holds no lock of the stream; while another goroutine
+	// processes, the call leaves the work to it.
+	process()
+	// expect arms the transport for the completions of the kinds k, which ev
+	// has come to wait for, unless it is armed for them, and then processes,
+	// as what came before the arm raises nothing: those that come later are
+	// processed in the background, and the transport arms again after them
+	// for as long as ev waits for any. Its caller holds no lock of the stream.
+	expect(k interest)
 	// down takes the link down, which the peer learns as its loss, and
 	// returns once the transport feeds the stream nothing more and touches
 	// its memory no more. It may come without start.
@@ -36,18 +92,147 @@ type transport interface {
 
 // linkEvents is the native stream as the transport under it sees it. The
 // transport takes the lock, feeds the events and lets the lock go, which
-// wakes whoever the events let go on; it calls nothing else in between.
+// wakes whoever the events let go on; it calls nothing else in between but
+// waitsFor.
 type linkEvents interface {
 	lock()
 	unlock()
 	sent(id uint64, err error)
 	received(msg rsproto.Msg)
 	lost(err error)
+	// waitsFor returns the kinds of completions the stream waits for, which
+	// the transport keeps processing in the background.
+	waitsFor() interest
 }
 
-// nativeStream is a stream of the native engine: one rsproto.Stream that
-// its transport drives in the background and the front end through the
-// calls of the stream interface.
+// interest names the kinds of completions a native stream waits for, which
+// a transport may keep apart.
+type interest uint8
+
+const (
+	arrivals        interest = 1 << iota // of receives: what the peer sent
+	sendCompletions                      // of sends: the stream's own posts
+
+	anyCompletion = arrivals | sendCompletions
+)
+
+// waitsOn names the completions a wait in each direction waits for: data
+// arrives, and room comes back as sends complete and as credits and grants
+// arrive.
+var waitsOn = [...]interest{readable: arrivals, writable: arrivals | sendCompletions}
+
+// completionQueue is the queue of completions of a transport as its
+// processor drains and arms it.
+type completionQueue interface {
+	// drain feeds ev, a batch at a time under its lock, what the queue holds,
+	// and the loss of the link after it once the link is lost, and returns
+	// what ev waits for at the last batch; known is false when it fed none.
+	drain(ev linkEvents) (k interest, known bool)
+	// arm has the queue raise an event for its next completion of the kinds
+	// k and returns the kinds it armed, none when it failed.
+	arm(ev linkEvents, k interest) interest
+}
+
+// processor processes the completion queue of a transport for its stream,
+// one goroutine at a time, whichever goroutines ask: it drains the queue
+// into the stream and arms it for what the stream waits for. A goroutine
+// that asks while another processes leaves its ask to that one, which serves
+// it before it stops, so that no ask blocks.
+type processor struct {
+	queued atomic.Int32  // asks not yet served: the ask that raises it from zero serves them all
+	asks   atomic.Uint32 // what they ask for: askDrain, the kinds to arm for, the kinds spent
+
+	mu      sync.Mutex // held while serving; stop takes it
+	q       completionQueue
+	ev      linkEvents // nil until start
+	armed   interest   // the kinds the queue raises an event for
+	stopped bool
+}
+
+const (
+	askDrain   = 1 << 8 // a drain
+	spentShift = 4      // where the kinds an event of the queue spent sit, above those to arm for
+)
+
+// start has p process q for ev from then on.
+func (p *processor) start(q completionQueue, ev linkEvents) {
+	p.mu.Lock()
+	p.q, p.ev = q, ev
+	p.mu.Unlock()
+}
+
+// process drains the queue.
+func (p *processor) process() { p.ask(askDrain) }
+
+// expect arms the queue for the kinds k unless it is armed for them, and
+// then drains it.
+func (p *processor) expect(k interest) { p.ask(uint32(k)) }
+
+// spent takes the event the queue raised for the kinds k, which disarmed it
+// for them: it drains the queue and arms it again for what the stream still
+// waits for.
+func (p *processor) spent(k interest) { p.ask(uint32(k) << spentShift) }
+
+// stop ends the processing: once it returns, the queue is drained and armed
+// no more.
+func (p *processor) stop() {
+	p.mu.Lock()
+	p.stopped = true
+	p.mu.Unlock()
+}
+
+func (p *processor) ask(a uint32) {
+	p.asks.Or(a)
+	if p.queued.Add(1) != 1 {
+		return
+	}
+	for {
+		n := p.queued.Load()
+		p.serve(p.asks.Swap(0))
+		if p.queued.Add(-n) == 0 {
+			return
+		}
+	}
+}
+
+// serve does what the asks summed up in a want: a drain, asked for or after
+// an event, and an arm for the kinds expected and for those the stream waits
+// for once a drain fed it, each arm followed by a drain.
+func (p *processor) serve(a uint32) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.ev == nil || p.stopped {
+		return
+	}
+	expect, spent := interest(a)&anyCompletion, interest(a>>spentShift)&anyCompletion
+	p.armed &^= spent
+	var want interest
+	if a&askDrain != 0 || spent != 0 {
+		var known bool
+		if want, known = p.q.drain(p.ev); !known && spent != 0 {
+			p.ev.lock()
+			want = p.ev.waitsFor()
+			p.ev.unlock()
+		}
+	}
+	for need := (want | expect) &^ p.armed; need != 0; need = want &^ p.armed {
+		armed := p.q.arm(p.ev, need)
+		if armed == 0 {
+			return
+		}
+		p.armed |= armed
+		// What came before the arm raises no event.
+		var known bool
+		if want, known = p.q.drain(p.ev); !known {
+			return
+		}
+	}
+}
+
+// nativeStream is a stream of the native engine: one rsproto.Stream that the
+// front end drives through the calls of the stream interface and its
+// transport with the completions it processes, at a wait and in the
+// background while the stream waits for them.
 type nativeStream struct {
 	t             transport
 	local, remote netip.AddrPort
@@ -58,12 +243,22 @@ type nativeStream struct {
 	st        *rsproto.Stream
 	link      sendCounter
 	waiting   [2]bool // by direction, a wait sleeps on wake
+	fed       bool    // events came since the lock was taken
 	rview     bool    // a read view is out
 	wview     bool    // a write view is out
 	writeShut bool    // closeWrite was called
 	closed    bool
 	settled   chan struct{} // closed once the sends of a closing stream are done
 	unfreed   bool          // the link is down and the memory awaits the views out
+
+	poller *streamPoller // the polls of the waits, nil when they do not poll; set before connect
+}
+
+// streamPoller holds what the polls of the waits of a stream go by.
+type streamPoller struct {
+	time  time.Duration        // how long a wait polls before it declares
+	now   func() time.Duration // the clock the polls go by
+	paces [2]pollPace          // by direction, the waits', which come one at a time
 }
 
 // sendCounter is the Link a native stream posts through: its transport's,
@@ -108,6 +303,14 @@ func newNativeStream(t transport, mem rsproto.Config, local, remote netip.AddrPo
 	return s, nil
 }
 
+// pollFor has the waits of s poll for d before they declare, and not at all
+// for zero. It is called before connect.
+func (s *nativeStream) pollFor(d time.Duration) {
+	if d > 0 {
+		s.poller = &streamPoller{time: d, now: monotonic}
+	}
+}
+
 // connData returns the connection data to send the peer in the private data
 // of the connection request or reply.
 func (s *nativeStream) connData() rsproto.ConnData { return s.st.ConnData() }
@@ -125,18 +328,45 @@ func (s *nativeStream) connect(peer rsproto.ConnData) {
 func (s *nativeStream) lock() { s.mu.Lock() }
 
 func (s *nativeStream) unlock() {
-	s.notify()
+	if s.fed {
+		s.fed = false
+		s.notify()
+	}
 	s.mu.Unlock()
 }
 
 func (s *nativeStream) sent(id uint64, err error) {
+	s.fed = true
 	s.link.pending--
 	s.st.Sent(id, err)
 }
 
-func (s *nativeStream) received(msg rsproto.Msg) { s.st.Received(msg) }
+func (s *nativeStream) received(msg rsproto.Msg) {
+	s.fed = true
+	s.st.Received(msg)
+}
 
-func (s *nativeStream) lost(err error) { s.st.LinkDown(err) }
+func (s *nativeStream) lost(err error) {
+	s.fed = true
+	s.st.LinkDown(err)
+}
+
+// waitsFor returns what the waits declared, the completions of the sends a
+// closing stream waits for, and those of the control messages in flight
+// while another is held for a slot, which has to go out whether or not a
+// call comes. The caller holds mu.
+func (s *nativeStream) waitsFor() interest {
+	var k interest
+	for dir, waiting := range s.waiting {
+		if waiting {
+			k |= waitsOn[dir]
+		}
+	}
+	if s.settled != nil || s.st.ControlHeld() {
+		k |= sendCompletions
+	}
+	return k
+}
 
 // notify wakes the waits that may go on and a close waiting for the sends.
 // The caller holds mu.
@@ -230,13 +460,18 @@ func (s *nativeStream) lendRead() ([]byte, error) {
 
 func (s *nativeStream) returnRead(n int) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.rview = false
 	if s.closed {
 		s.freeIdle()
+		s.mu.Unlock()
 		return net.ErrClosed
 	}
 	s.st.Consume(n)
+	held := s.st.ControlHeld()
+	s.mu.Unlock()
+	if held {
+		s.t.expect(sendCompletions)
+	}
 	return nil
 }
 
@@ -268,7 +503,19 @@ func (s *nativeStream) commitWrite(n int) error {
 	return nil
 }
 
+// wait polls the stream for up to the poll time, as rs_get_comp polls
+// before it blocks, or, when the stream does not poll or while the polls in
+// dir back off, has the transport process what is ready once, and unless
+// that makes the stream ready in dir, declares what it waits for and sleeps
+// until the transport, processing in the background, wakes it.
 func (s *nativeStream) wait(dir direction, cancel <-chan struct{}) error {
+	if p := s.poller; p != nil && p.paces[dir].due() {
+		if over, err := s.poll(dir, cancel); over {
+			return err
+		}
+	} else {
+		s.t.process()
+	}
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
@@ -280,6 +527,7 @@ func (s *nativeStream) wait(dir direction, cancel <-chan struct{}) error {
 	}
 	s.waiting[dir] = true
 	s.mu.Unlock()
+	s.t.expect(waitsOn[dir])
 	// A token left by a wait that returned otherwise lets this one go on
 	// early, and the caller asks again.
 	select {
@@ -292,14 +540,54 @@ func (s *nativeStream) wait(dir direction, cancel <-chan struct{}) error {
 	}
 }
 
+// poll has the transport process what is ready and looks again and again,
+// for up to the poll time, until the stream is ready in dir, closed or
+// cancel is closed: it reports whether one of them ended the wait, with
+// net.ErrClosed for the stream closed. Ready at the first look, the stream
+// is no find of the poll's.
+func (s *nativeStream) poll(dir direction, cancel <-chan struct{}) (over bool, err error) {
+	p := s.poller
+	end := p.now() + p.time
+	for looked := false; ; looked = true {
+		s.t.process()
+		s.mu.Lock()
+		if s.closed {
+			s.mu.Unlock()
+			return true, net.ErrClosed
+		}
+		ready := s.ready(dir)
+		s.mu.Unlock()
+		if ready {
+			if looked {
+				p.paces[dir].found()
+			}
+			return true, nil
+		}
+		select {
+		case <-cancel:
+			return true, nil
+		default:
+		}
+		if p.now() >= end {
+			p.paces[dir].missed()
+			return false, nil
+		}
+	}
+}
+
 func (s *nativeStream) closeWrite() error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.closed {
+		s.mu.Unlock()
 		return net.ErrClosed
 	}
 	s.writeShut = true
 	s.st.CloseWrite()
+	held := s.st.ControlHeld()
+	s.mu.Unlock()
+	if held {
+		s.t.expect(sendCompletions)
+	}
 	return nil
 }
 
@@ -316,12 +604,16 @@ func (s *nativeStream) close() error {
 	close(s.closing)
 	s.st.Disconnect()
 	settled := make(chan struct{})
-	if s.sendsDone() {
+	done := s.sendsDone()
+	if done {
 		close(settled)
 	} else {
 		s.settled = settled
 	}
 	s.mu.Unlock()
+	if !done {
+		s.t.expect(sendCompletions)
+	}
 	select {
 	case <-settled:
 	case <-time.After(closeTimeout):
