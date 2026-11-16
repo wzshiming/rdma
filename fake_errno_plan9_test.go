@@ -12,3 +12,7 @@ var (
 	errInvalid   error = syscall.NewError("invalid argument")
 	errNotConn   error = syscall.NewError("socket is not connected")
 )
+
+// errInProgress reports a connect that goes on in the background, as rsockets
+// and the fake network do.
+var errInProgress error = syscall.NewError("operation now in progress")

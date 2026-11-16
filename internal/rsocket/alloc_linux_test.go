@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wzshiming/rdma/rsocket"
+	"github.com/wzshiming/rdma/internal/rsocket"
 )
 
 // Under the race detector sync.Pool, which dynlib draws the argument block

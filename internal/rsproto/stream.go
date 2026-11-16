@@ -196,12 +196,14 @@ func (s *Stream) SendsDone() bool {
 }
 
 // Reserve lends the room of the send buffer that one message can carry now,
-// nil when there is none.
+// nil when there is none: the free bytes that run on from ssgl[0], within
+// what the current grant leaves and the 29 bits of the message word, not cut
+// at RS_MAX_TRANSFER as rsend cuts its messages.
 func (s *Stream) Reserve() []byte {
 	if !s.CanSend() {
 		return nil
 	}
-	n := min(s.sbufAvail, len(s.c.SendBuffer.Buf)-s.sbufPos, int(s.grant(s.targetSGE).Length), MaxTransfer)
+	n := min(s.sbufAvail, len(s.c.SendBuffer.Buf)-s.sbufPos, int(s.grant(s.targetSGE).Length), maxData)
 	return s.c.SendBuffer.Buf[s.sbufPos : s.sbufPos+n : s.sbufPos+n]
 }
 
@@ -415,6 +417,19 @@ func (s *Stream) postCtrl(ctrl uint32) {
 	s.ctrlSeqNo++
 	msg := MakeMsg(OpCtrl, ctrl)
 	s.checkPost(s.link.PostMsg(uint64(msg), msg))
+}
+
+// ControlHeld reports whether a control message is due that only the
+// completion of one in flight lets go out: the credits or a grant the peer
+// is due, which go out one a call and wait for every slot in flight, or an
+// end CloseWrite or Disconnect holds for a slot. rsockets posts it at the
+// next call that processes completions; an engine need not wait for a call.
+func (s *Stream) ControlHeld() bool {
+	connected := s.state&StateConnected != 0
+	if (s.shutdownHeld || s.disconnectHeld) && (connected || s.endOwed) {
+		return true
+	}
+	return connected && (s.rbufAvail >= len(s.c.ReceiveBuffer.Buf)/2 || int16(s.rseqNo-s.rseqComp) >= 0)
 }
 
 // checkPost breaks the stream on err, the refusal of a post it made, unless

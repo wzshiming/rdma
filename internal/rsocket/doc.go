@@ -1,5 +1,9 @@
 // Package rsocket is a Go binding of rsockets, the socket API of librdmacm
-// that carries a byte stream over an RDMA queue pair (rsocket(7)).
+// that carries a byte stream over an RDMA queue pair (rsocket(7)). It is
+// kept as the control of the tests and benchmarks of package rdma, the Go
+// implementation of rsockets: they run the C implementation through it, as
+// the peer of their interoperability tests and as the engine=librdmacm
+// column of the benchmarks.
 //
 // A Socket follows the shape of a BSD stream socket: New creates it, Bind,
 // Listen and Accept take the passive side, Connect the active one, Read and

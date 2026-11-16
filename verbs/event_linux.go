@@ -5,7 +5,6 @@ package verbs
 import (
 	"context"
 	"encoding/binary"
-	"errors"
 	"os"
 	"sync"
 	"syscall"
@@ -28,7 +27,19 @@ type fdWaiter struct {
 	err  error
 	file *os.File
 	raw  syscall.RawConn
-	sem  chan struct{} // held by the one goroutine using file; taken cancellably
+	sem  chan struct{}      // held by the one goroutine using file; taken cancellably
+	read func(uintptr) bool // runs try for raw.Read; made once, as waits must not allocate
+
+	// The holder of sem's.
+	try    func() (bool, error)
+	tryErr error
+
+	// The end of the context of the last wait expires reads until a wait on
+	// another context, so that waits on one context register it only once.
+	mu     sync.Mutex
+	until  <-chan struct{} // Done of that context
+	stop   func() bool     // stops its context.AfterFunc
+	closed bool
 }
 
 var errWaiterClosed = &OpError{Op: "wait", Err: os.ErrClosed}
@@ -36,6 +47,11 @@ var errWaiterClosed = &OpError{Op: "wait", Err: os.ErrClosed}
 func (w *fdWaiter) init(fd int) {
 	w.once.Do(func() {
 		w.sem = make(chan struct{}, 1)
+		w.read = func(uintptr) bool {
+			var done bool
+			done, w.tryErr = w.try()
+			return done || w.tryErr != nil
+		}
 		dup, _, errno := syscall.Syscall(syscall.SYS_FCNTL, uintptr(fd), syscall.F_DUPFD_CLOEXEC, 0)
 		if errno != 0 {
 			w.err = &OpError{Op: "fcntl", Err: errno}
@@ -57,10 +73,9 @@ func (w *fdWaiter) init(fd int) {
 	})
 }
 
-// wait runs try, which consumes one event or reports (false, nil) on EAGAIN,
-// whenever the descriptor is readable, until it succeeds, ctx ends or the
-// waiter closes.
-func (w *fdWaiter) wait(ctx context.Context, op string, try func() (done bool, err error)) error {
+// lock takes the waiter for the calling goroutine, unless ctx ends first. Until
+// unlock, the caller may wait and read what try left.
+func (w *fdWaiter) lock(ctx context.Context) error {
 	if w.err != nil {
 		return w.err
 	}
@@ -69,38 +84,70 @@ func (w *fdWaiter) wait(ctx context.Context, op string, try func() (done bool, e
 	}
 	select {
 	case w.sem <- struct{}{}:
+		return nil
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-	defer func() { <-w.sem }()
-	stop := context.AfterFunc(ctx, func() { w.file.SetReadDeadline(aLongTimeAgo) })
-	defer stop()
-	for {
-		var done bool
-		var tryErr error
-		err := w.raw.Read(func(uintptr) bool {
-			done, tryErr = try()
-			return done || tryErr != nil
-		})
-		if err == nil {
-			return tryErr
-		}
+}
+
+func (w *fdWaiter) unlock() { <-w.sem }
+
+// wait runs try, which consumes one event or reports (false, nil) on EAGAIN,
+// whenever the descriptor is readable, until it succeeds, ctx ends or the
+// waiter closes. The caller holds the waiter, and try is made once: waits on
+// one context then do not allocate.
+func (w *fdWaiter) wait(ctx context.Context, op string, try func() (done bool, err error)) error {
+	w.watch(ctx)
+	w.try = try
+	if err := w.raw.Read(w.read); err != nil {
 		if cerr := ctx.Err(); cerr != nil {
-			w.file.SetReadDeadline(time.Time{})
 			return cerr
-		}
-		if errors.Is(err, os.ErrDeadlineExceeded) {
-			// An earlier cancelled wait left its deadline behind.
-			w.file.SetReadDeadline(time.Time{})
-			continue
 		}
 		return &OpError{Op: op, Err: os.ErrClosed}
 	}
+	return w.tryErr
+}
+
+// watch has the end of ctx expire reads from now until a wait on another
+// context. Only the context of the last wait can expire them: watch clears
+// the deadline an earlier context left, and an AfterFunc that runs late leaves
+// it alone. The caller holds the waiter.
+func (w *fdWaiter) watch(ctx context.Context) {
+	done := ctx.Done()
+	if done == w.until {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.stop != nil {
+		w.stop()
+		w.stop = nil
+	}
+	w.until = done
+	w.file.SetReadDeadline(time.Time{})
+	if done == nil || w.closed {
+		return
+	}
+	w.stop = context.AfterFunc(ctx, func() {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		if w.until == done {
+			w.file.SetReadDeadline(aLongTimeAgo)
+		}
+	})
 }
 
 // close wakes the current waiter with an error and makes later waits fail.
+// No context keeps the waiter from then on.
 func (w *fdWaiter) close() {
 	w.once.Do(func() { w.err = errWaiterClosed })
+	w.mu.Lock()
+	w.closed = true
+	if w.stop != nil {
+		w.stop()
+		w.stop = nil
+	}
+	w.mu.Unlock()
 	if w.file != nil {
 		w.file.Close()
 	}
@@ -119,30 +166,41 @@ func (c *CompChannel) Wait(ctx context.Context) (*CQ, error) {
 		return nil, err
 	}
 	c.waiter.init(int(c.ch.Fd))
-	var cq *CQ
-	err = c.waiter.wait(ctx, "ibv_get_cq_event", func() (bool, error) {
-		var out struct{ cq, cqContext uint64 } // struct ibv_cq *, void *
-		for {
-			rc, errno := f.getCQEvent.Int(caddr(c.ch), uintptr(unsafe.Pointer(&out.cq)), uintptr(unsafe.Pointer(&out.cqContext)), 0, 0, 0)
-			if rc == 0 {
-				break
-			}
-			if errno == syscall.EINTR {
-				continue
-			}
-			if errno == syscall.EAGAIN {
-				return false, nil
-			}
-			return false, opError("ibv_get_cq_event", errno)
-		}
-		f.ackCQEvents.Int(uintptr(out.cq), cint(1), 0, 0, 0, 0)
-		cq = lookupCQ(uintptr(out.cq))
-		return true, nil
-	})
-	if err != nil {
+	if err := c.waiter.lock(ctx); err != nil {
 		return nil, err
 	}
-	return cq, nil
+	defer c.waiter.unlock()
+	if err := c.waiter.wait(ctx, "ibv_get_cq_event", c.next); err != nil {
+		return nil, err
+	}
+	addr := uintptr(c.event.cq)
+	q := lookupCQ(addr)
+	if n := q.tookEvent(); n > 0 {
+		f.ackCQEvents.Int(addr, uintptr(n), 0, 0, 0, 0)
+	}
+	return q, nil
+}
+
+// nextEvent takes the next event off the channel into c.event, or reports
+// (false, nil) when there is none yet.
+func (c *CompChannel) nextEvent() (bool, error) {
+	f, err := load("ibv_get_cq_event")
+	if err != nil {
+		return false, err
+	}
+	for {
+		rc, errno := f.getCQEvent.Int(caddr(c.ch), uintptr(unsafe.Pointer(&c.event.cq)), uintptr(unsafe.Pointer(&c.event.cqContext)), 0, 0, 0)
+		if rc == 0 {
+			return true, nil
+		}
+		if errno == syscall.EINTR {
+			continue
+		}
+		if errno == syscall.EAGAIN {
+			return false, nil
+		}
+		return false, opError("ibv_get_cq_event", errno)
+	}
 }
 
 // WaitAsyncEvent waits for the next asynchronous event of the device,
@@ -157,6 +215,10 @@ func (c *Context) WaitAsyncEvent(ctx context.Context) (*AsyncEvent, error) {
 		return nil, err
 	}
 	c.async.init(int(c.ctx.Async_fd))
+	if err := c.async.lock(ctx); err != nil {
+		return nil, err
+	}
+	defer c.async.unlock()
 	var ev AsyncEvent
 	err = c.async.wait(ctx, "ibv_get_async_event", func() (bool, error) {
 		var cev rdmaabi.IbvAsyncEvent

@@ -82,7 +82,7 @@ func TestNativeListenRefusesBuffersBeyond32Bits(t *testing.T) {
 
 // The native engine refuses a device of the iWARP transport, whose mode of
 // rsockets it leaves out, with an error matching errors.ErrUnsupported that
-// points at the librdmacm engine, and takes every other one, as rs_create_ep
+// points at no other engine, and takes every other one, as rs_create_ep
 // sets up only iWARP differently.
 func TestNativeEngineRefusesIWARPDevices(t *testing.T) {
 	for _, tt := range []struct {
@@ -102,8 +102,8 @@ func TestNativeEngineRefusesIWARPDevices(t *testing.T) {
 			switch {
 			case !tt.refused && err != nil:
 				t.Errorf("checkDevice on %v = %v, want nil", tt.transport, err)
-			case tt.refused && (!errors.Is(err, errors.ErrUnsupported) || !strings.Contains(fmt.Sprint(err), "librdmacm engine")):
-				t.Errorf("checkDevice on %v = %v, want an error matching errors.ErrUnsupported that names the librdmacm engine", tt.transport, err)
+			case tt.refused && (!errors.Is(err, errors.ErrUnsupported) || strings.Contains(fmt.Sprint(err), "librdmacm")):
+				t.Errorf("checkDevice on %v = %v, want an error matching errors.ErrUnsupported that names no other engine", tt.transport, err)
 			}
 		})
 	}
@@ -111,7 +111,7 @@ func TestNativeEngineRefusesIWARPDevices(t *testing.T) {
 
 // A native listener admits a connection request as rs_accept does, only
 // with connection data of version 1, and on no iWARP device, refusing it
-// with an error that points at the librdmacm engine: the rest it rejects.
+// with the error of checkDevice: the rest it rejects.
 func TestNativeListenerRejectsRequests(t *testing.T) {
 	// rdma_cm hands out the private data of a request zero padded.
 	request := func(version byte) []byte {

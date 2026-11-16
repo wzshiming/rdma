@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -87,17 +88,17 @@ func TestREADMEUsageMatchesExamples(t *testing.T) {
 }
 
 // TestREADMEDescribesTheRsocketsStream checks that the README names the
-// rsockets knobs and their flags, and no longer the credit protocol's.
+// rsockets knobs and their flags, and no longer the credit protocol's nor
+// the binding of rsockets, which is internal.
 func TestREADMEDescribesTheRsocketsStream(t *testing.T) {
 	readme := readREADME(t)
-	for _, stale := range []string{"MessageSize", "ReceiveDepth", "SendDepth", "msgsize", "-depth"} {
+	for _, stale := range []string{"MessageSize", "ReceiveDepth", "SendDepth", "msgsize", "-depth", "github.com/wzshiming/rdma/rsocket"} {
 		if strings.Contains(readme, stale) {
 			t.Errorf("README still mentions %q", stale)
 		}
 	}
 	for _, want := range []string{
 		"rsockets", "rstream", "librspreload", "/etc/rdma/rsocket",
-		"https://pkg.go.dev/github.com/wzshiming/rdma/rsocket",
 		"`-sndbuf`", "`-rcvbuf`", "`-sqsize`", "`-rqsize`", "`-inline`",
 		"`Config.SendBufferSize`", "`Config.ReceiveBufferSize`", "`Config.SendQueueSize`", "`Config.ReceiveQueueSize`", "`Config.MaxInline`",
 	} {
@@ -107,17 +108,23 @@ func TestREADMEDescribesTheRsocketsStream(t *testing.T) {
 	}
 }
 
-// TestREADMEDescribesTheEngines checks that the introduction presents the
-// native engine as the default and the librdmacm engine as the choice, both
-// on the rsockets protocol, that the command line names the flag of the
-// choice, and that no sentence still makes the connections librdmacm's
-// rsockets.
-func TestREADMEDescribesTheEngines(t *testing.T) {
+// TestREADMEDescribesTheGoImplementation checks that the introduction
+// presents the package as a Go implementation of rsockets on verbs and cm,
+// that no text offers an engine to choose or makes the connections
+// librdmacm's rsockets, that only the Benchmarks section, whose columns are
+// the tests' engines, names an engine, and that /etc/rdma/rsocket is said to
+// be left unread.
+func TestREADMEDescribesTheGoImplementation(t *testing.T) {
 	readme := readREADME(t)
 	intro, _, _ := strings.Cut(readme, "\n## ")
-	for _, want := range []string{"rsockets protocol", "native engine, the default", "librdmacm engine", "`Config.Engine`"} {
+	for _, want := range []string{"Go implementation", "rsockets", "`verbs`", "`cm`"} {
 		if !strings.Contains(intro, want) {
 			t.Errorf("the introduction lacks %q", want)
+		}
+	}
+	for _, choice := range []string{"Config.Engine", "EngineNative", "EngineLibrdmacm", "`-engine`"} {
+		if strings.Contains(readme, choice) {
+			t.Errorf("README still offers the engine choice %q", choice)
 		}
 	}
 	for _, stale := range []string{"backed by rsockets", "the stream sockets of librdmacm", "the stream above is built on"} {
@@ -125,29 +132,45 @@ func TestREADMEDescribesTheEngines(t *testing.T) {
 			t.Errorf("README still makes the connections librdmacm's rsockets: %q", stale)
 		}
 	}
-	for _, s := range sentencesWith(readme, "/etc/rdma/rsocket") {
-		if !strings.Contains(s, "librdmacm engine") {
-			t.Errorf("README applies /etc/rdma/rsocket to every engine: %q", s)
+	engine := regexp.MustCompile(`(?i)\bengines?\b`)
+	for _, line := range strings.Split(strings.Replace(readme, section(readme, "## Benchmarks"), "", 1), "\n") {
+		for _, s := range strings.SplitAfter(line, ". ") {
+			if engine.MatchString(s) {
+				t.Errorf("README names an engine outside the Benchmarks section: %q", s)
+			}
 		}
 	}
-	commandLine := section(readme, "## Command line")
-	for _, want := range []string{"`-engine`", "`native`", "`librdmacm`", "`Config.Engine`"} {
-		if !strings.Contains(commandLine, want) {
-			t.Errorf("the Command line section lacks %q", want)
+	for _, s := range sentencesWith(readme, "/etc/rdma/rsocket") {
+		if !strings.Contains(s, "does not read") {
+			t.Errorf("README does not say that /etc/rdma/rsocket is left unread: %q", s)
 		}
 	}
 }
 
+// TestREADMEDescribesThePoll checks that the Command line section names the
+// flag of the poll before a wait, its Config field and the form that polls
+// as rsockets do, for their polling_time, and no longer a negative form.
+func TestREADMEDescribesThePoll(t *testing.T) {
+	commandLine := section(readREADME(t), "## Command line")
+	for _, want := range []string{"`-poll`", "`Config.PollTime`", "`-poll 10us`", "`polling_time`"} {
+		if !strings.Contains(commandLine, want) {
+			t.Errorf("the Command line section lacks %q", want)
+		}
+	}
+	if strings.Contains(commandLine, "`-poll=-1ns`") {
+		t.Error("the Command line section still turns polling off with `-poll=-1ns`")
+	}
+}
+
 // TestREADMEExplainsTheCopy checks that Usage tells what io.Copy saves in
-// each direction and when it does: on the native engine, for a connection
-// io.Copy sees as such.
+// each direction and when it does: for a connection io.Copy sees as such.
 func TestREADMEExplainsTheCopy(t *testing.T) {
 	usage := section(readREADME(t), "## Usage")
 	for _, want := range []string{
 		"`io.ReaderFrom`", "`io.WriterTo`",
 		"`io.Copy(conn, src)`", "registered send buffer",
 		"`io.Copy(dst, conn)`", "registered receive buffer",
-		"native engine", "librdmacm engine", "wrapper",
+		"wrapper",
 	} {
 		if !strings.Contains(usage, want) {
 			t.Errorf("the Usage section lacks %q", want)
@@ -157,8 +180,8 @@ func TestREADMEExplainsTheCopy(t *testing.T) {
 
 // TestREADMERequirements checks that Requirements asks for the rdma-core
 // libraries at run time, no longer for the development packages and C
-// compiler a cgo build needed, and confines the caveats of librdmacm's
-// rsockets, the release and the configuration file, to the librdmacm engine.
+// compiler a cgo build needed, and confines the release that librdmacm's
+// rsockets need to the tests and benchmarks, which run them.
 func TestREADMERequirements(t *testing.T) {
 	requirements := section(readREADME(t), "## Requirements")
 	if requirements == "" {
@@ -172,21 +195,18 @@ func TestREADMERequirements(t *testing.T) {
 	for _, want := range []string{
 		"`libibverbs1`", "`librdmacm1t64`", "`ibverbs-providers`", "`librdmacm1`",
 		"neither the headers nor a C compiler",
-		"native engine",
 	} {
 		if !strings.Contains(requirements, want) {
 			t.Errorf("the Requirements section lacks %q", want)
 		}
 	}
-	for _, caveat := range []string{"rdma-core 53 or later", "`/etc/rdma/rsocket`"} {
-		said := sentencesWith(requirements, caveat)
-		if len(said) == 0 {
-			t.Errorf("the Requirements section lacks %q", caveat)
-		}
-		for _, s := range said {
-			if !strings.Contains(s, "librdmacm engine") {
-				t.Errorf("the Requirements section does not confine %q to the librdmacm engine: %q", caveat, s)
-			}
+	said := sentencesWith(requirements, "rdma-core 53 or later")
+	if len(said) == 0 {
+		t.Error(`the Requirements section lacks "rdma-core 53 or later"`)
+	}
+	for _, s := range said {
+		if !strings.Contains(s, "tests") {
+			t.Errorf("the Requirements section does not confine rdma-core 53 to the tests: %q", s)
 		}
 	}
 }
@@ -194,7 +214,7 @@ func TestREADMERequirements(t *testing.T) {
 // TestREADMEPlatforms checks that Platforms names the six supported Linux
 // architectures and how each is verified, the independence from cgo, the
 // error a host without the libraries gets, the libc the no-cgo build
-// targets, and the engine iWARP devices take.
+// targets, and that iWARP devices are refused.
 func TestREADMEPlatforms(t *testing.T) {
 	platforms := section(readREADME(t), "## Platforms")
 	if platforms == "" {
@@ -218,15 +238,16 @@ func TestREADMEPlatforms(t *testing.T) {
 		t.Error("the Platforms section does not mention iWARP")
 	}
 	for _, s := range iwarp {
-		if !strings.Contains(s, "librdmacm engine") {
-			t.Errorf("the Platforms section mentions iWARP without the librdmacm engine: %q", s)
+		if !strings.Contains(s, "errors.ErrUnsupported") {
+			t.Errorf("the Platforms section mentions iWARP without refusing it: %q", s)
 		}
 	}
 }
 
 // TestREADMEBenchmarks checks that the Benchmarks section names the device
-// benchmarks of the root package, exactly those, and quotes what the Go
-// workflow runs and where it shows the comparison.
+// benchmarks of the root package, exactly those, runs the comparison script
+// with flags its usage line lists, as the Go workflow does, and names the
+// tables and files the script writes and where the workflow shows them.
 func TestREADMEBenchmarks(t *testing.T) {
 	bench := section(readREADME(t), "## Benchmarks")
 	if bench == "" {
@@ -247,27 +268,127 @@ func TestREADMEBenchmarks(t *testing.T) {
 			t.Errorf("the Benchmarks section names %s, which the root package does not declare", name)
 		}
 	}
-	workflow, err := os.ReadFile(filepath.Join(repoRoot, ".github", "workflows", "go.yml"))
-	if err != nil {
-		t.Fatal(err)
+	workflow := readRepoFile(t, ".github", "workflows", "go.yml")
+	script := readRepoFile(t, "hack", "benchcompare.sh")
+	usage := regexp.MustCompile(`usage: hack/benchcompare\.sh .*`).FindString(script)
+	if usage == "" {
+		t.Fatal("hack/benchcompare.sh has no usage line")
 	}
-	for _, quote := range []string{
-		"go test -run '^$' -bench '^BenchmarkRXE' -benchtime 500ms -count 1 .",
-		"go tool benchstat -col /engine",
-		"Engines on rxe0",
-		"Summarize the benchmarks",
-		"engine-benchmarks",
+	flags := regexp.MustCompile(`\[(-\w+)`).FindAllStringSubmatch(usage, -1)
+	for what, lines := range map[string][]string{
+		"the Benchmarks section": strings.Split(strings.Join(codeBlocks(bench, "sh"), ""), "\n"),
+		"the Go workflow":        strings.Split(workflow, "\n"),
 	} {
-		if !strings.Contains(bench, quote) {
-			t.Errorf("the Benchmarks section lacks %q", quote)
+		runs := 0
+		for _, line := range lines {
+			_, args, ok := strings.Cut(line, "hack/benchcompare.sh")
+			if !ok {
+				continue
+			}
+			runs++
+			for _, flag := range regexp.MustCompile(`(?:^|\s)(-\w+)`).FindAllStringSubmatch(args, -1) {
+				if !slices.ContainsFunc(flags, func(f []string) bool { return f[1] == flag[1] }) {
+					t.Errorf("%s runs hack/benchcompare.sh with %s, which is not in its %q", what, flag[1], usage)
+				}
+			}
 		}
-		if !strings.Contains(string(workflow), quote) {
+		if runs == 0 {
+			t.Errorf("%s does not run hack/benchcompare.sh", what)
+		}
+	}
+	for _, quote := range []string{"Compare the benchmarks", "benchmark-comparison", "RDMA_TEST_DEVICE: rxe0"} {
+		if !strings.Contains(workflow, quote) {
 			t.Errorf("the Go workflow lacks %q, which the Benchmarks section quotes", quote)
 		}
 	}
-	for _, want := range []string{"`RDMA_TEST_DEVICE`", "Summary", "base", "relative"} {
+	for _, quote := range []string{`"Compare the benchmarks"`, "`benchmark-comparison`", `"Benchmarks on rxe0"`} {
+		if !strings.Contains(bench, quote) {
+			t.Errorf("the Benchmarks section lacks %s", quote)
+		}
+	}
+	if !strings.Contains(script, "## Benchmarks on $RDMA_TEST_DEVICE") {
+		t.Error(`hack/benchcompare.sh does not head the summary with "Benchmarks on" the device`)
+	}
+	for _, table := range []string{"Implementations", "Noise", "Change"} {
+		if !strings.Contains(script, "table "+table+" ") {
+			t.Errorf("hack/benchcompare.sh makes no table %q", table)
+		}
+		if !strings.Contains(bench, `"`+table+`"`) {
+			t.Errorf("the Benchmarks section does not name the table %q", table)
+		}
+	}
+	for _, file := range []string{"summary.md", "engines.txt", "base-1.txt", "test.txt", "base-2.txt", "profile.txt", "cpu.pprof"} {
+		if !strings.Contains(script, `$out/`+file+`"`) {
+			t.Errorf("hack/benchcompare.sh does not write %s", file)
+		}
+		if !strings.Contains(bench, "`"+file+"`") {
+			t.Errorf("the Benchmarks section does not name %s", file)
+		}
+	}
+	for _, want := range []string{"`RDMA_TEST_DEVICE`", "Summary", "baseline", "relative", "rstream"} {
 		if !strings.Contains(bench, want) {
 			t.Errorf("the Benchmarks section lacks %q", want)
+		}
+	}
+}
+
+// readRepoFile returns the content of a file of the repository.
+func readRepoFile(t *testing.T, elem ...string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(append([]string{repoRoot}, elem...)...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// TestREADMEComparesTheImplementations checks that the table of the
+// Benchmarks section has a column for each implementation the benchmarks
+// run, rstream, librdmacm and native, and that the section links the run of
+// the Go workflow its figures come from.
+func TestREADMEComparesTheImplementations(t *testing.T) {
+	bench := section(readREADME(t), "## Benchmarks")
+	var columns []string
+	for _, line := range strings.Split(bench, "\n") {
+		if strings.HasPrefix(line, "|") {
+			for _, cell := range strings.Split(strings.Trim(line, "|"), "|")[1:] {
+				columns = append(columns, strings.TrimSpace(cell))
+			}
+			break
+		}
+	}
+	if want := []string{"rstream", "librdmacm", "native"}; !slices.Equal(columns, want) {
+		t.Errorf("the Benchmarks table has the columns %q, want %q", columns, want)
+	}
+	if !regexp.MustCompile(`\(https://github\.com/wzshiming/rdma/actions/runs/\d+\)`).MatchString(bench) {
+		t.Error("the Benchmarks section does not link the run of the Go workflow its figures come from")
+	}
+}
+
+// TestREADMEBenchmarksOnTwoHosts checks that the Benchmarks section gives
+// the commands of a comparison between two hosts: the server and the client
+// of pingpong and bw, which take the flags it gives them, and of rstream,
+// blocking.
+func TestREADMEBenchmarksOnTwoHosts(t *testing.T) {
+	lines := strings.Split(strings.Join(codeBlocks(section(readREADME(t), "## Benchmarks"), "sh"), ""), "\n")
+	for _, want := range []string{"rdma pingpong -listen ", "rdma pingpong -connect ", "rdma bw -listen ", "rdma bw -connect ", "rstream -b ", "rstream -s "} {
+		if !slices.ContainsFunc(lines, func(line string) bool { return strings.HasPrefix(line, want) }) {
+			t.Errorf("the Benchmarks section lacks a command %q", want+"…")
+		}
+	}
+	for _, line := range lines {
+		args := strings.Fields(line)
+		var err error
+		switch {
+		case len(args) > 2 && args[0] == "rdma" && args[1] == "pingpong":
+			_, _, err = parsePingpong(args[2:])
+		case len(args) > 2 && args[0] == "rdma" && args[1] == "bw":
+			_, _, err = parseBW(args[2:])
+		case len(args) > 0 && args[0] == "rstream" && !strings.Contains(line, " -T b"):
+			err = errors.New("rstream does not block without -T b")
+		}
+		if err != nil {
+			t.Errorf("the Benchmarks section runs %q: %v", line, err)
 		}
 	}
 }

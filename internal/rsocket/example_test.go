@@ -8,7 +8,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/wzshiming/rdma/rsocket"
+	"github.com/wzshiming/rdma/internal/rsocket"
 )
 
 // Example connects to a server, sends a request and reads the reply with

@@ -19,8 +19,7 @@ type Dialer struct {
 	// LocalAddr is the local address, an *Addr, to dial from; its IP picks
 	// the device and a non-zero port the local port. nil lets rdma_cm pick.
 	LocalAddr net.Addr
-	// Config selects the engine of the connection and sets its rsockets
-	// options.
+	// Config sets the rsockets options of the connection.
 	Config Config
 
 	eng engine // tests inject an engine; nil selects the platform's
@@ -35,7 +34,7 @@ type Dialer struct {
 // *net.OpError values: errors.Is reports syscall.ECONNREFUSED when nobody
 // listens on the port, the context's error when it ends first, and
 // errors.ErrUnsupported on platforms without rdma-core, when its libraries
-// cannot be loaded, and on an iWARP device with the native engine.
+// cannot be loaded, and on an iWARP device.
 func Dial(network, address string) (*Conn, error) {
 	var d Dialer
 	return d.DialContext(context.Background(), network, address)
@@ -107,5 +106,5 @@ func (d *Dialer) engine() engine {
 	if d.eng != nil {
 		return d.eng
 	}
-	return platformEngine(d.Config)
+	return platformEngine()
 }

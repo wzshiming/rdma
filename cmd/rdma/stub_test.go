@@ -9,11 +9,10 @@ import (
 
 // TestStubUnsupported checks that on a platform without the bindings every
 // command that needs a device reports the unsupported error and fails: that
-// of verbs for devices, that of the native engine, which loads no library
-// here, for the stream commands, and that of rsocket for them on the
-// librdmacm engine.
+// of verbs for devices and that of the native engine, which loads no library
+// here, for the stream commands.
 func TestStubUnsupported(t *testing.T) {
-	const noVerbs, noLibrary, noRsocket = "unsupported operation", "shared libraries cannot be called", "rsocket: unsupported operation"
+	const noVerbs, noLibrary = "unsupported operation", "shared libraries cannot be called"
 	tests := []struct {
 		name string
 		args []string
@@ -24,9 +23,6 @@ func TestStubUnsupported(t *testing.T) {
 		{"pingpong client", []string{"pingpong", "-connect", "10.200.0.1:4791"}, noLibrary},
 		{"bw server", []string{"bw", "-listen", "10.200.0.1:0"}, noLibrary},
 		{"bw client", []string{"bw", "-connect", "10.200.0.1:4791", "-duration", "1s"}, noLibrary},
-		{"pingpong client on the native engine", []string{"pingpong", "-connect", "10.200.0.1:4791", "-engine", "native"}, noLibrary},
-		{"pingpong server on the librdmacm engine", []string{"pingpong", "-listen", "10.200.0.1:0", "-engine", "librdmacm"}, noRsocket},
-		{"bw client on the librdmacm engine", []string{"bw", "-connect", "10.200.0.1:4791", "-duration", "1s", "-engine", "librdmacm"}, noRsocket},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

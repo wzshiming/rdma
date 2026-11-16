@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/wzshiming/rdma/rsocket"
+	"github.com/wzshiming/rdma/internal/rsocket"
 )
 
 // childEnv marks the child process runInChild starts.
@@ -83,18 +83,18 @@ func TestMissingLibraryIsUnsupported(t *testing.T) {
 		runInChild(t, "TestMissingLibraryIsUnsupported", "LD_LIBRARY_PATH="+dir)
 		return
 	}
-	forEachEngine(t, func(t *testing.T, e Engine) {
+	forEachEngine(t, func(t *testing.T, e engineName) {
 		for _, tt := range []struct {
 			name, op string
 			call     func() error
 		}{
 			{"Dial", "dial", func() error {
-				d := Dialer{Config: Config{Engine: e}}
+				d := Dialer{eng: e.engine()}
 				_, err := d.Dial("rdma", "10.200.0.1:4791")
 				return err
 			}},
 			{"Listen", "listen", func() error {
-				lc := ListenConfig{Config: Config{Engine: e}}
+				lc := ListenConfig{eng: e.engine()}
 				_, err := lc.Listen(context.Background(), "rdma", "10.200.0.1:0")
 				return err
 			}},

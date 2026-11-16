@@ -43,4 +43,19 @@
 // message and is dropped, as rs_poll_cq drops it. The MemEnd of a link
 // NewMemLink holds in memory yields the events in that order: Deliver for
 // Received, Completion for Sent and Down for LinkDown.
+//
+// # Departures from rsocket.c
+//
+// The stream sizes its data messages otherwise than rsend. A message is as
+// long as the room Reserve lends: the free bytes that run on in the send
+// buffer, within what the current grant leaves and the 29 bits of the
+// message word. rsend starts each call at RS_OLAP_START_SIZE, 2 KiB, doubles
+// the size from message to message and cuts at RS_MAX_TRANSFER, 64 KiB, and
+// posts a message that wraps the send buffer in two pieces. With the stock
+// buffers the grants, half the peer's receive buffer, cut a bulk transfer
+// into messages of 64 KiB all the same; with larger buffers a message can
+// fill a grant, and a bulk transfer takes fewer posts, completions and
+// receives. The wire carries any length the message word holds, and a stock
+// receiver takes it: rs_poll_cq records all 29 bits, and rrecv copies a
+// message, which lies within a grant, as it copies any other.
 package rsproto

@@ -23,8 +23,10 @@
 //
 // Waiting for completion events (CompChannel.Wait) and asynchronous events
 // (Context.WaitAsyncEvent) happens on the Go runtime poller: no OS thread is
-// blocked inside C, cancellation and timeouts come from the context, and every
-// event is acknowledged before Wait returns.
+// blocked inside C, cancellation and timeouts come from the context, and the
+// waits acknowledge the events they return: at once, but for the completion
+// events of a CQ of CreateCQ, which are acknowledged in batches and by
+// CQ.Close.
 //
 // Memory registered with PD.RegisterMemory is pinned with runtime.Pinner until
 // MR.Close; PD.AllocMemory returns page-aligned memory outside the Go heap.

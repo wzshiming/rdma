@@ -22,9 +22,11 @@ var bigEndian = binary.NativeEndian.Uint16([]byte{0, 1}) == 1
 // connection that cm makes, with the memory of the stream registered on the
 // device of the connection, as rs_create_ep and rs_init_bufs set an rsocket
 // up: one completion queue for both directions, on a completion channel of
-// its own. Two goroutines drive it, parked on the runtime poller while idle:
-// the pump feeds the stream the work completions and the watcher waits for
-// the connection to end. Only Linux has the verbs and cm to run it; elsewhere
+// its own. The calls of the stream process the queue, and two goroutines,
+// parked on the runtime poller while idle, drive the rest: the pump wakes
+// for the events of the channel, which the queue raises only once armed for
+// what the stream waits for, and for the end of the connection, which the
+// watcher waits for. Only Linux has the verbs and cm to run it; elsewhere
 // they report errors.ErrUnsupported.
 type qpTransport struct {
 	id     *cm.ID
@@ -48,8 +50,10 @@ type qpTransport struct {
 	pumped  chan struct{} // closed as the pump returns
 	watched chan struct{} // closed as the watcher returns
 
-	wcs     [32]verbs.WC // the pump's
-	lossFed bool         // the pump's: the loss of the link went to the stream
+	proc    processor
+	wcs     [32]verbs.WC // the processor's
+	lossFed bool         // the processor's: the loss of the link went to the stream
+	failed  bool         // the processor's: the queue failed and is left alone
 }
 
 // newQPTransport sets a connection up on id, whose route is resolved, for a
@@ -166,63 +170,64 @@ func (t *qpTransport) PostRecv(id uint64) error {
 func (t *qpTransport) start(ev linkEvents) {
 	t.started = true
 	t.pumped, t.watched = make(chan struct{}), make(chan struct{})
-	go t.pump(ev)
+	t.proc.start(t, ev)
+	// The first poll of a queue sets up what verbs polls it with, an
+	// allocation the calls of the stream are spared.
+	t.proc.process()
+	go t.pump()
 	go t.watch()
 }
 
-// pump feeds ev the work completions until down, and the loss of the link
-// once the watcher has seen the connection end and the completions before
-// that are fed.
-func (t *qpTransport) pump(ev linkEvents) {
+func (t *qpTransport) process() { t.proc.process() }
+
+func (t *qpTransport) expect(k interest) { t.proc.expect(k) }
+
+// pump has the queue processed as its events come, which arms it again for
+// what the stream still waits for, and once the watcher has seen the
+// connection end, so that its loss goes to the stream after the completions
+// before it, until down.
+func (t *qpTransport) pump() {
 	defer close(t.pumped)
-	for t.ctx.Err() == nil {
-		if err := t.step(ev); err != nil {
-			t.fail(ev, err)
+	sleep := t.lossCtx
+	for {
+		_, err := t.ch.Wait(sleep)
+		switch {
+		case t.ctx.Err() != nil:
+			return
+		case err == nil:
+			// The one queue raised it, whatever it was armed for.
+			t.proc.spent(anyCompletion)
+		case sleep.Err() != nil:
+			sleep = t.ctx
+			t.proc.process()
+		default:
+			// The channel failed: the link is lost to that.
+			t.lose(err)
+			t.proc.process()
+			<-t.ctx.Done()
 			return
 		}
 	}
 }
 
-// step feeds ev what the completion queue holds, arms the completion channel
-// and polls once more, a completion before the arm raising no event, and
-// sleeps on the channel when that finds nothing: until the connection ends,
-// while its loss is yet to be fed, and until down after that.
-func (t *qpTransport) step(ev linkEvents) error {
-	if _, err := t.drain(ev); err != nil {
-		return err
-	}
-	if err := t.cq.RequestNotify(false); err != nil {
-		return err
-	}
-	if n, err := t.drain(ev); n > 0 || err != nil {
-		return err
-	}
-	sleep := t.lossCtx
-	if t.lossFed {
-		sleep = t.ctx
-	}
-	if _, err := t.ch.Wait(sleep); err != nil && sleep.Err() == nil {
-		return err
-	}
-	return nil
-}
-
 // drain feeds ev every completion in the queue, a batch at a time under ev's
-// lock, and returns how many there were. Once the watcher has seen the
-// connection end, the first drain to empty the queue feeds the loss of the
-// link after them: what the queue held then came before the end.
-func (t *qpTransport) drain(ev linkEvents) (int, error) {
+// lock. Once the watcher has seen the connection end, the first drain to
+// empty the queue feeds the loss of the link after them: what the queue held
+// then came before the end.
+func (t *qpTransport) drain(ev linkEvents) (k interest, known bool) {
+	if t.failed {
+		return 0, false
+	}
 	var loss error
 	if !t.lossFed && t.ctx.Err() == nil && t.lossCtx.Err() != nil {
 		loss = context.Cause(t.lossCtx)
 	}
-	total := 0
 	for {
 		n, err := t.cq.Poll(t.wcs[:])
 		if err != nil {
-			return total, err
+			t.fail(ev, err)
+			return 0, false
 		}
-		total += n
 		empty := n < len(t.wcs)
 		if n > 0 || empty && loss != nil {
 			ev.lock()
@@ -233,12 +238,26 @@ func (t *qpTransport) drain(ev linkEvents) (int, error) {
 				ev.lost(loss)
 				t.lossFed = true
 			}
+			k, known = ev.waitsFor(), true
 			ev.unlock()
 		}
 		if empty {
-			return total, nil
+			return k, known
 		}
 	}
+}
+
+// arm has the queue raise an event for its next completion, of either kind:
+// both go to the one queue.
+func (t *qpTransport) arm(ev linkEvents, _ interest) interest {
+	if t.failed {
+		return 0
+	}
+	if err := t.cq.RequestNotify(false); err != nil {
+		t.fail(ev, err)
+		return 0
+	}
+	return anyCompletion
 }
 
 // feed hands ev what wc reports: the end of a send, or the message word of a
@@ -254,16 +273,16 @@ func (t *qpTransport) feed(ev linkEvents, wc *verbs.WC) {
 	}
 }
 
-// fail loses the link to err, a failure of the completion queue or its
-// channel, unless it is lost already, and waits for down.
+// fail leaves the queue alone for err, a failure of the queue, which the
+// stream learns as the loss of the link unless it learned of one before.
 func (t *qpTransport) fail(ev linkEvents, err error) {
+	t.failed = true
 	if !t.lossFed {
 		ev.lock()
 		ev.lost(err)
 		ev.unlock()
 		t.lossFed = true
 	}
-	<-t.ctx.Done()
 }
 
 // watch waits for the end of the connection, which rdma_cm reports as the
@@ -286,8 +305,9 @@ func (t *qpTransport) watch() {
 	}
 }
 
-// down stops the goroutines, disconnects, which moves the queue pair to the
-// error state and tells the peer, and destroys the queue pair and id.
+// down stops the goroutines and the processing, disconnects, which moves the
+// queue pair to the error state and tells the peer, and destroys the queue
+// pair and id.
 func (t *qpTransport) down() {
 	t.cancel()
 	if t.started {
@@ -298,6 +318,7 @@ func (t *qpTransport) down() {
 	if t.started {
 		<-t.pumped
 	}
+	t.proc.stop()
 	t.id.Close()
 }
 
