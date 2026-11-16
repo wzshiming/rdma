@@ -1,5 +1,8 @@
 // Package rdmaabi mirrors the rdma-core structures the bindings exchange
-// with libibverbs and librdmacm.
+// with libibverbs and librdmacm, and the commands package internal/ucma
+// writes to the kernel's rdma_cm device: the UcmaAbi types of
+// rdma/rdma_cma_abi.h and the IbUverbs types of rdma/ib_user_verbs.h they
+// nest.
 //
 // Each type reproduces the layout of its C counterpart field by field: the
 // same offsets and sizes on every supported Linux architecture (amd64,

@@ -24,8 +24,11 @@ var compilers = map[string]string{
 }
 
 // includeDirs are searched in order for the rdma-core headers
-// infiniband/verbs.h and rdma/rdma_cma.h.
+// infiniband/verbs.h, rdma/rdma_cma.h and rdma/rdma_cma_abi.h.
 var includeDirs = []string{"/usr/local/include", "/usr/include"}
+
+// headers are the rdma-core headers the check compiles against.
+var headers = []string{"infiniband/verbs.h", "rdma/rdma_cma.h", "rdma/rdma_cma_abi.h"}
 
 // errToolchain reports a missing compiler or missing headers, which skips
 // the check unless RDMA_TEST_LAYOUT_ARCHES demands the architecture.
@@ -121,17 +124,18 @@ func checkAgainstC(dir, arch string) (string, error) {
 	return fmt.Sprintf("%s: %s confirms the layout against %s", arch, cc, headers), nil
 }
 
-// findHeaders returns the first include directory holding both rdma-core
-// headers.
+// findHeaders returns the first include directory holding every rdma-core
+// header.
 func findHeaders() (string, error) {
 	for _, dir := range includeDirs {
-		_, errVerbs := os.Stat(filepath.Join(dir, "infiniband", "verbs.h"))
-		_, errCma := os.Stat(filepath.Join(dir, "rdma", "rdma_cma.h"))
-		if errVerbs == nil && errCma == nil {
+		if !slices.ContainsFunc(headers, func(h string) bool {
+			_, err := os.Stat(filepath.Join(dir, h))
+			return err != nil
+		}) {
 			return dir, nil
 		}
 	}
-	return "", fmt.Errorf("%w: infiniband/verbs.h and rdma/rdma_cma.h not under %s", errToolchain, strings.Join(includeDirs, " or "))
+	return "", fmt.Errorf("%w: %s not under %s", errToolchain, strings.Join(headers, ", "), strings.Join(includeDirs, " or "))
 }
 
 // headerPaths picks the rdma-core headers out of the line markers of
@@ -147,7 +151,7 @@ func headerPaths(preprocessed string) []string {
 			continue
 		}
 		p := line[first+1 : last]
-		if (strings.HasSuffix(p, "/infiniband/verbs.h") || strings.HasSuffix(p, "/rdma/rdma_cma.h")) && !slices.Contains(paths, p) {
+		if slices.ContainsFunc(headers, func(h string) bool { return strings.HasSuffix(p, "/"+h) }) && !slices.Contains(paths, p) {
 			paths = append(paths, p)
 		}
 	}
@@ -158,7 +162,11 @@ func headerPaths(preprocessed string) []string {
 // mirror has the layout of its C type.
 func assertions() string {
 	var b strings.Builder
-	b.WriteString("#include <stddef.h>\n#include <infiniband/verbs.h>\n#include <rdma/rdma_cma.h>\n\n")
+	b.WriteString("#include <stddef.h>\n")
+	for _, h := range headers {
+		fmt.Fprintf(&b, "#include <%s>\n", h)
+	}
+	b.WriteString("\n")
 	b.WriteString("#define FIELD(type, member, offset, size) \\\n")
 	b.WriteString("\t_Static_assert(offsetof(type, member) == offset, #type \".\" #member \": offset\"); \\\n")
 	b.WriteString("\t_Static_assert(sizeof(((type *)0)->member) == size, #type \".\" #member \": size\")\n\n")
