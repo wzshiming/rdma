@@ -73,3 +73,31 @@ func TestLibraryLoadsAfterAFailedAttempt(t *testing.T) {
 		}
 	}
 }
+
+// ibv_get_device_index is optional: a library without it loads, and its
+// devices report an unknown index.
+func TestLibraryWithoutDeviceIndexLoads(t *testing.T) {
+	useLibrary(t, "libibverbs.so.1")
+	libMu.Lock()
+	name := deviceIndexName
+	deviceIndexName = "ibv_get_device_index_of_a_newer_library"
+	libMu.Unlock()
+	t.Cleanup(func() {
+		libMu.Lock()
+		defer libMu.Unlock()
+		deviceIndexName = name
+	})
+	devs, err := Devices()
+	if err != nil {
+		var errno syscall.Errno
+		if !errors.As(err, &errno) {
+			t.Fatalf("Devices() from a library without %s: %v, want nil or an errno", name, err)
+		}
+	}
+	for _, d := range devs {
+		if i := d.Index(); i != -1 {
+			t.Errorf("Device(%s).Index() from a library without %s = %d, want -1", d.Name(), name, i)
+		}
+	}
+	t.Logf("%d devices report -1", len(devs))
+}

@@ -78,6 +78,18 @@ func TestStubUnsupported(t *testing.T) {
 	}
 }
 
+func TestStubDeviceIndexIsUnknown(t *testing.T) {
+	if got := new(verbs.Device).Index(); got != -1 {
+		t.Errorf("Device.Index() = %d, want -1", got)
+	}
+}
+
+func TestStubQPContextIsEmpty(t *testing.T) {
+	if ctx := verbs.QPFromPointer(nil).Context(); ctx == nil || ctx.Pointer() != nil {
+		t.Errorf("QP.Context() = %v, want a context with a nil pointer", ctx)
+	}
+}
+
 func TestStubTransportTypeIsUnknown(t *testing.T) {
 	if got := new(verbs.Device).TransportType(); got != verbs.TransportUnknown {
 		t.Errorf("Device.TransportType() = %v, want %v", got, verbs.TransportUnknown)

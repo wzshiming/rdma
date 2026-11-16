@@ -22,6 +22,9 @@ func (d *Device) Name() string { return "" }
 // GUID returns the node GUID of the device.
 func (d *Device) GUID() uint64 { return 0 }
 
+// Index returns the kernel's index of the device: -1, as it is unknown.
+func (d *Device) Index() int { return -1 }
+
 // TransportType returns the transport of the device.
 func (d *Device) TransportType() TransportType { return TransportUnknown }
 
@@ -176,6 +179,9 @@ func (q *QP) Num() uint32 { return 0 }
 
 // Type returns the transport service type.
 func (q *QP) Type() QPType { return 0 }
+
+// Context returns the device context the queue pair was created on.
+func (q *QP) Context() *Context { return &Context{} }
 
 // Modify applies the attr fields selected by mask.
 func (q *QP) Modify(attr *QPAttr, mask QPAttrMask) error { return unsupported("ibv_modify_qp") }

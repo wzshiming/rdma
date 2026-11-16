@@ -4,9 +4,11 @@ package verbs_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"net/netip"
 	"os"
+	"os/exec"
 	"syscall"
 	"testing"
 	"unsafe"
@@ -171,6 +173,66 @@ func TestDeviceReportsItsTransportType(t *testing.T) {
 		t.Errorf("ContextFromPointer(...).TransportType() = %v, want %v", got, want)
 	}
 	t.Logf("%s reports transport %v (%d)", dev.Name, got, got)
+}
+
+// libibverbs learns the kernel's index of each device over netlink, where
+// the rdma tool of iproute2 reads it too.
+func TestDeviceIndexIsTheKernels(t *testing.T) {
+	rdmatest.Device(t)
+	devs, err := verbs.Devices()
+	if err != nil {
+		t.Fatalf("Devices() error: %v", err)
+	}
+	kernel := rdmaToolIndexes(t)
+	names := make(map[int]string)
+	for _, d := range devs {
+		i := d.Index()
+		t.Logf("%s: index %d", d.Name(), i)
+		if i < 0 {
+			t.Errorf("Device(%s).Index() = %d, want 0 or more", d.Name(), i)
+			continue
+		}
+		if other, ok := names[i]; ok {
+			t.Errorf("Device(%s).Index() = %d, the index of %s too", d.Name(), i, other)
+		}
+		names[i] = d.Name()
+		if want, ok := kernel[d.Name()]; kernel != nil && (!ok || i != want) {
+			t.Errorf("Device(%s).Index() = %d, the rdma tool reports %v", d.Name(), i, kernel)
+		}
+	}
+}
+
+// rdmaToolIndexes returns the kernel's index of each RDMA device as the rdma
+// tool of iproute2 prints it, or nil when the tool is not installed.
+func rdmaToolIndexes(t *testing.T) map[string]int {
+	t.Helper()
+	tool, err := exec.LookPath("rdma")
+	if err != nil {
+		t.Logf("no second source for the kernel's device indexes: %v", err)
+		return nil
+	}
+	cmd := exec.Command(tool, "-j", "dev", "show")
+	out, err := cmd.Output()
+	if err != nil {
+		var exit *exec.ExitError
+		if errors.As(err, &exit) {
+			t.Fatalf("%s: %v: %s", cmd, err, exit.Stderr)
+		}
+		t.Fatalf("%s: %v", cmd, err)
+	}
+	var devs []struct {
+		Index int    `json:"ifindex"`
+		Name  string `json:"ifname"`
+	}
+	if err := json.Unmarshal(out, &devs); err != nil {
+		t.Fatalf("%s printed %q: %v", cmd, out, err)
+	}
+	t.Logf("%s: %s", cmd, bytes.TrimSpace(out))
+	indexes := make(map[string]int, len(devs))
+	for _, d := range devs {
+		indexes[d.Name] = d.Index
+	}
+	return indexes
 }
 
 func allocPD(t *testing.T, ctx *verbs.Context) *verbs.PD {

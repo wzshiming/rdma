@@ -421,6 +421,43 @@ func TestRCLoopback(t *testing.T) {
 	})
 }
 
+// A queue pair reports the context it was created on, which stays its
+// creator's: closing the reported one leaves the device and the queue pair
+// working.
+func TestQPReportsItsContext(t *testing.T) {
+	p := newRCPair(t)
+	reported := p.a.Context()
+	if reported.Pointer() != p.ctx.Pointer() {
+		t.Fatalf("QP.Context().Pointer() = %p, want the context the queue pair was created on, %p", reported.Pointer(), p.ctx.Pointer())
+	}
+	if got := verbs.QPFromPointer(p.a.Pointer()).Context().Pointer(); got != p.ctx.Pointer() {
+		t.Errorf("QPFromPointer(...).Context().Pointer() = %p, want %p", got, p.ctx.Pointer())
+	}
+	if err := reported.Close(); err != nil {
+		t.Fatalf("Close() of the reported context error: %v", err)
+	}
+
+	if _, err := p.ctx.QueryDevice(); err != nil {
+		t.Errorf("QueryDevice() after closing the reported context error: %v", err)
+	}
+	mrA, mrB := allocMR(t, p.pd, 4096), allocMR(t, p.pd, 4096)
+	msg := []byte("still connected")
+	if err := p.b.PostRecv(verbs.RecvWR{ID: 1, SGE: []verbs.SGE{mrB.SGE(mrB.Bytes()[:64])}}); err != nil {
+		t.Fatalf("PostRecv() error: %v", err)
+	}
+	copy(mrA.Bytes(), msg)
+	if err := p.a.PostSend(verbs.SendWR{ID: 2, Op: verbs.WRSend, SGE: []verbs.SGE{mrA.SGE(mrA.Bytes()[:len(msg)])}, Flags: verbs.SendSignaled}); err != nil {
+		t.Fatalf("PostSend() error: %v", err)
+	}
+	if recv := pollOne(t, p.cqB); recv.ID != 1 || int(recv.Len) != len(msg) {
+		t.Errorf("receive completion = %+v, want id 1, %d bytes", recv, len(msg))
+	}
+	pollOne(t, p.cqA)
+	if got := mrB.Bytes()[:len(msg)]; !bytes.Equal(got, msg) {
+		t.Errorf("received %q, want %q", got, msg)
+	}
+}
+
 func TestCompChannelWaitCancel(t *testing.T) {
 	_, ctx := openDevice(t)
 	ch, err := ctx.CreateCompChannel()

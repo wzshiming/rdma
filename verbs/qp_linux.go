@@ -112,6 +112,12 @@ func (q *QP) Num() uint32 { return q.qp.Qp_num }
 // Type returns the transport service type.
 func (q *QP) Type() QPType { return QPType(q.qp.Qp_type) }
 
+// Context returns the device context the queue pair was created on. As with
+// ContextFromPointer, its Close does not close the device.
+func (q *QP) Context() *Context {
+	return &Context{ctx: dynlib.Pointer[rdmaabi.IbvContext](uintptr(q.qp.Context))}
+}
+
 // Modify applies the attr fields selected by mask, as ibv_modify_qp does.
 func (q *QP) Modify(attr *QPAttr, mask QPAttrMask) error {
 	f, err := load("ibv_modify_qp")

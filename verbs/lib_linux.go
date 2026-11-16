@@ -17,11 +17,16 @@ import (
 // libName is the SONAME the first use opens; only a test points it elsewhere.
 var libName = "libibverbs.so.1"
 
+// deviceIndexName is the one function a library may lack: without it, every
+// device reports index -1. Only a test points it elsewhere.
+var deviceIndexName = "ibv_get_device_index"
+
 // funcs holds the exported functions of libibverbs the package calls. The
 // four verbs the header inlines (post_send, post_recv, poll_cq and
 // req_notify_cq) come from the ops table of each device context instead.
 type funcs struct {
 	getDeviceList, freeDeviceList, getDeviceName, getDeviceGUID    dynlib.Func
+	getDeviceIndex                                                 dynlib.Func // zero when the library lacks it
 	openDevice, closeDevice, forkInit                              dynlib.Func
 	queryDevice, queryPort, queryGIDTable                          dynlib.Func
 	createCompChannel, destroyCompChannel, getCQEvent, ackCQEvents dynlib.Func
@@ -89,6 +94,7 @@ func load(op string) (*funcs, error) {
 			return nil, &OpError{Op: op, Err: err}
 		}
 	}
+	f.getDeviceIndex, _ = l.Lookup(deviceIndexName)
 	lib.Store(f)
 	return f, nil
 }
