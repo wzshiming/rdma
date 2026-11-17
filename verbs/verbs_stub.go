@@ -195,5 +195,26 @@ func (q *QP) PostSend(wrs ...SendWR) error { return unsupported("ibv_post_send")
 // PostRecv posts receive work requests.
 func (q *QP) PostRecv(wrs ...RecvWR) error { return unsupported("ibv_post_recv") }
 
+// AttachMulticast attaches the queue pair to a multicast group.
+func (q *QP) AttachMulticast(gid GID, lid uint16) error { return unsupported("ibv_attach_mcast") }
+
+// DetachMulticast detaches the queue pair from a multicast group.
+func (q *QP) DetachMulticast(gid GID, lid uint16) error { return unsupported("ibv_detach_mcast") }
+
 // Close destroys the queue pair.
 func (q *QP) Close() error { return nil }
+
+// AH is an address handle; libibverbs is unavailable on this platform.
+type AH struct{}
+
+// CreateAH creates an address handle.
+func (p *PD) CreateAH(attr *AHAttr) (*AH, error) { return nil, unsupported("ibv_create_ah") }
+
+// AHFromPointer wraps a struct ibv_ah pointer without owning it.
+func AHFromPointer(p unsafe.Pointer) *AH { return &AH{} }
+
+// Pointer returns the underlying struct ibv_ah pointer.
+func (a *AH) Pointer() unsafe.Pointer { return nil }
+
+// Close destroys the address handle.
+func (a *AH) Close() error { return nil }

@@ -101,3 +101,46 @@ func TestLibraryWithoutDeviceIndexLoads(t *testing.T) {
 	}
 	t.Logf("%d devices report -1", len(devs))
 }
+
+func TestCreateAHWithoutLibrary(t *testing.T) {
+	useLibrary(t, missingLibrary)
+	_, err := PDFromPointer(nil).CreateAH(&AHAttr{})
+	var opErr *OpError
+	if !errors.As(err, &opErr) || opErr.Op != "ibv_create_ah" {
+		t.Fatalf("CreateAH() error = %v, want an *OpError of ibv_create_ah", err)
+	}
+	if !errors.Is(err, errors.ErrUnsupported) || !strings.Contains(err.Error(), "libibverbs.so.1") {
+		t.Errorf("CreateAH() error = %v, want errors.ErrUnsupported naming libibverbs.so.1", err)
+	}
+}
+
+func TestMulticastWithoutLibrary(t *testing.T) {
+	useLibrary(t, missingLibrary)
+	qp := QPFromPointer(nil)
+	for op, call := range map[string]func(GID, uint16) error{
+		"ibv_attach_mcast": qp.AttachMulticast,
+		"ibv_detach_mcast": qp.DetachMulticast,
+	} {
+		err := call(GID{0: 0xff}, 0)
+		var opErr *OpError
+		if !errors.As(err, &opErr) || opErr.Op != op || !errors.Is(err, errors.ErrUnsupported) {
+			t.Errorf("%s: error = %v, want an *OpError of %s matching errors.ErrUnsupported", op, err, op)
+		}
+	}
+}
+
+// A wrapper of an address handle made elsewhere destroys nothing: its Close
+// does not even need the library.
+func TestAHFromPointerCloseDestroysNothing(t *testing.T) {
+	useLibrary(t, missingLibrary)
+	ah := AHFromPointer(cMemory(t, 64))
+	if err := ah.Close(); err != nil {
+		t.Errorf("Close() error = %v, want nil", err)
+	}
+	if ah.Pointer() != nil {
+		t.Errorf("Pointer() after Close() = %p, want nil", ah.Pointer())
+	}
+	if err := ah.Close(); err != nil {
+		t.Errorf("second Close() error = %v, want nil", err)
+	}
+}

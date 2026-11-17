@@ -198,6 +198,10 @@ struct ibv_send_wr.send_flags 32 4
 struct ibv_send_wr.imm_data 36 4
 struct ibv_send_wr.wr.rdma.remote_addr 40 8
 struct ibv_send_wr.wr.rdma.rkey 48 4
+struct ibv_send_wr.wr.ud 40 16
+struct ibv_send_wr.wr.ud.ah 40 8
+struct ibv_send_wr.wr.ud.remote_qpn 48 4
+struct ibv_send_wr.wr.ud.remote_qkey 52 4
 struct ibv_recv_wr 32
 struct ibv_recv_wr.wr_id 0 8
 struct ibv_recv_wr.next 8 8

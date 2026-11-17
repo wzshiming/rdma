@@ -33,6 +33,7 @@ type funcs struct {
 	createCQ, destroyCQ, getAsyncEvent, ackAsyncEvent              dynlib.Func
 	allocPD, deallocPD, regMR, deregMR                             dynlib.Func
 	createQP, destroyQP, modifyQP, queryQP                         dynlib.Func
+	createAH, destroyAH, attachMcast, detachMcast                  dynlib.Func
 	wcStatusStr                                                    dynlib.Func
 }
 
@@ -88,6 +89,10 @@ func load(op string) (*funcs, error) {
 		{"ibv_destroy_qp", &f.destroyQP},
 		{"ibv_modify_qp", &f.modifyQP},
 		{"ibv_query_qp", &f.queryQP},
+		{"ibv_create_ah", &f.createAH},
+		{"ibv_destroy_ah", &f.destroyAH},
+		{"ibv_attach_mcast", &f.attachMcast},
+		{"ibv_detach_mcast", &f.detachMcast},
 		{"ibv_wc_status_str", &f.wcStatusStr},
 	} {
 		if *s.fn, err = l.Lookup(s.name); err != nil {

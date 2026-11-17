@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unsafe"
 )
 
 var update = flag.Bool("update", false, "rewrite testdata/layout.txt from the Go types")
@@ -20,6 +21,10 @@ type mirror struct {
 	// prefix marks a type that mirrors the leading fields of its C type
 	// only; the library allocates these, never Go code.
 	prefix bool
+	// member designates the member of c that t mirrors instead, one with no
+	// C type of its own, such as "wr.ud"; at is its offset in c.
+	member string
+	at     uintptr
 }
 
 var mirrors = []mirror{
@@ -42,6 +47,7 @@ var mirrors = []mirror{
 	{c: "struct ibv_ah_attr", t: reflect.TypeFor[IbvAhAttr]()},
 	{c: "struct ibv_global_route", t: reflect.TypeFor[IbvGlobalRoute]()},
 	{c: "struct ibv_send_wr", t: reflect.TypeFor[IbvSendWr]()},
+	{c: "struct ibv_send_wr", member: "wr.ud", at: unsafe.Offsetof(IbvSendWr{}.Wr), t: reflect.TypeFor[IbvSendWrUd]()},
 	{c: "struct ibv_recv_wr", t: reflect.TypeFor[IbvRecvWr]()},
 	{c: "struct ibv_sge", t: reflect.TypeFor[IbvSge]()},
 	{c: "struct rdma_event_channel", t: reflect.TypeFor[RdmaEventChannel]()},
@@ -87,9 +93,10 @@ type field struct {
 	size   uintptr
 }
 
-// fields lists the named fields of t in declaration order, anonymous nested
-// structs flattened into their members and padding (_) left out.
-func fields(t reflect.Type) []field {
+// fields lists the named fields of m.t in declaration order under their
+// member designators in m.c, anonymous nested structs flattened into their
+// members and padding (_) left out.
+func fields(m mirror) []field {
 	var out []field
 	var walk func(t reflect.Type, prefix string, base uintptr)
 	walk = func(t reflect.Type, prefix string, base uintptr) {
@@ -106,8 +113,12 @@ func fields(t reflect.Type) []field {
 			out = append(out, field{name, base + f.Offset, f.Type.Size()})
 		}
 	}
-	if t.Kind() == reflect.Struct {
-		walk(t, "", 0)
+	prefix := ""
+	if m.member != "" {
+		prefix = m.member + "."
+	}
+	if m.t.Kind() == reflect.Struct {
+		walk(m.t, prefix, m.at)
 	}
 	return out
 }
@@ -125,8 +136,12 @@ func layoutText() string {
 	b.WriteString("# \"<C type>.<member> <offset> <size>\". Regenerate with go test -update\n")
 	b.WriteString("# once TestLayoutsMatchC passes.\n")
 	for _, m := range mirrors {
-		fmt.Fprintf(&b, "%s %d\n", m.c, m.t.Size())
-		for _, f := range fields(m.t) {
+		if m.member != "" {
+			fmt.Fprintf(&b, "%s.%s %d %d\n", m.c, m.member, m.at, m.t.Size())
+		} else {
+			fmt.Fprintf(&b, "%s %d\n", m.c, m.t.Size())
+		}
+		for _, f := range fields(m) {
 			fmt.Fprintf(&b, "%s.%s %d %d\n", m.c, f.name, f.offset, f.size)
 		}
 	}

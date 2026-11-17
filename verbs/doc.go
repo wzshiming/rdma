@@ -21,6 +21,18 @@
 // __be32 of the C API does: a C peer reads a value sent from Go with ntohl
 // and sends one for Go with htonl.
 //
+// An unreliable-datagram (UD) queue pair addresses each send on its own: the
+// SendWR names an address handle (PD.CreateAH), the receiving queue pair and
+// its qkey. QP.AttachMulticast has it receive the datagrams of a multicast
+// group as well. Every receive buffer of a UD queue pair begins with 40 bytes
+// for the global routing header (GRH) of the datagram, which the device
+// writes when the completion has the WCGRH flag (on RoCE v2 over IPv4 the
+// last 20 of them hold the IPv4 header); the payload follows, and WC.Len
+// counts both. The completion names the sender: WC.SrcQP is the number of its
+// queue pair, WC.SLID and WC.SL its LID and service level on InfiniBand, and
+// the source GID of the header, or on RoCE v2 over IPv4 the source address,
+// its port.
+//
 // Waiting for completion events (CompChannel.Wait) and asynchronous events
 // (Context.WaitAsyncEvent) happens on the Go runtime poller: no OS thread is
 // blocked inside C, cancellation and timeouts come from the context, and the

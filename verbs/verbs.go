@@ -657,9 +657,12 @@ type SGE struct {
 	LKey   uint32
 }
 
-// SendWR is a send work request (struct ibv_send_wr) for an RC or UC queue
-// pair. Imm travels in network byte order and arrives as WC.Imm on the remote
-// side; RemoteAddr and RKey are used by the RDMA operations.
+// SendWR is a send work request (struct ibv_send_wr). Imm travels in network
+// byte order and arrives as WC.Imm on the remote side; RemoteAddr and RKey are
+// used by the RDMA operations of RC and UC queue pairs. AH, RemoteQPN and
+// RemoteQKey are the destination of a datagram: a send of a UD queue pair
+// names its address handle, the receiving queue pair and that queue pair's
+// qkey, and other queue pairs ignore them.
 type SendWR struct {
 	ID         uint64
 	Op         WROpcode
@@ -668,9 +671,14 @@ type SendWR struct {
 	Imm        uint32
 	RemoteAddr uint64
 	RKey       uint32
+	AH         *AH
+	RemoteQPN  uint32
+	RemoteQKey uint32
 }
 
-// RecvWR is a receive work request (struct ibv_recv_wr).
+// RecvWR is a receive work request (struct ibv_recv_wr). On a UD queue pair
+// the buffer begins with 40 bytes for the global routing header, which the
+// package documentation describes.
 type RecvWR struct {
 	ID  uint64
 	SGE []SGE

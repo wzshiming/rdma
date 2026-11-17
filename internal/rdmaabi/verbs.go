@@ -264,7 +264,8 @@ type IbvSge struct {
 }
 
 // IbvSendWr is struct ibv_send_wr. Of the wr union only the rdma member is
-// named; the qp_type union and the bind_mw/tso union at the end are padding.
+// named; IbvSendWrUd is its ud member. The qp_type union and the bind_mw/tso
+// union at the end are padding.
 type IbvSendWr struct {
 	Wr_id      uint64
 	Next       uint64
@@ -282,6 +283,14 @@ type IbvSendWr struct {
 		_ [16]byte
 	}
 	_ [56]byte
+}
+
+// IbvSendWrUd is the ud member of the wr union of struct ibv_send_wr, the
+// destination of a datagram: it starts at the first byte of IbvSendWr.Wr.
+type IbvSendWrUd struct {
+	Ah          uint64
+	Remote_qpn  uint32
+	Remote_qkey uint32
 }
 
 // IbvRecvWr is struct ibv_recv_wr.

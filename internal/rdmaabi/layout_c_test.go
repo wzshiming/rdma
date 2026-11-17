@@ -37,7 +37,8 @@ var errToolchain = errors.New("rdmaabi: C toolchain missing")
 // TestLayoutsMatchC has the C compiler of each architecture confirm against
 // the installed rdma-core headers that every mirrored field has the offset
 // and size of its C member and that every mirror has the size of its C type,
-// or at most that size for the leading-fields mirrors. The architectures
+// or at most that size for the leading-fields mirrors, or the offset and size
+// of its member for the mirrors of a member. The architectures
 // RDMA_TEST_LAYOUT_ARCHES lists must all be checked; unset, the host's own
 // is checked when its toolchain is found and skipped otherwise.
 func TestLayoutsMatchC(t *testing.T) {
@@ -171,12 +172,15 @@ func assertions() string {
 	b.WriteString("\t_Static_assert(offsetof(type, member) == offset, #type \".\" #member \": offset\"); \\\n")
 	b.WriteString("\t_Static_assert(sizeof(((type *)0)->member) == size, #type \".\" #member \": size\")\n\n")
 	for _, m := range mirrors {
-		for _, f := range fields(m.t) {
+		for _, f := range fields(m) {
 			fmt.Fprintf(&b, "FIELD(%s, %s, %d, %d);\n", m.c, f.name, f.offset, f.size)
 		}
-		if m.prefix {
+		switch {
+		case m.member != "":
+			fmt.Fprintf(&b, "FIELD(%s, %s, %d, %d);\n\n", m.c, m.member, m.at, m.t.Size())
+		case m.prefix:
 			fmt.Fprintf(&b, "_Static_assert(sizeof(%s) >= %d, \"%s: shorter than its mirror\");\n\n", m.c, m.t.Size(), m.c)
-		} else {
+		default:
 			fmt.Fprintf(&b, "_Static_assert(sizeof(%s) == %d, \"%s: size\");\n\n", m.c, m.t.Size(), m.c)
 		}
 	}

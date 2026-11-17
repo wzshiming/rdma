@@ -78,6 +78,35 @@ func TestStubUnsupported(t *testing.T) {
 	}
 }
 
+func TestStubAddressHandlesAreUnsupported(t *testing.T) {
+	_, err := verbs.PDFromPointer(nil).CreateAH(&verbs.AHAttr{})
+	var opErr *verbs.OpError
+	if !errors.As(err, &opErr) || !errors.Is(err, errors.ErrUnsupported) {
+		t.Errorf("PD.CreateAH() error = %v, want an *OpError matching errors.ErrUnsupported", err)
+	}
+	ah := verbs.AHFromPointer(nil)
+	if ah.Pointer() != nil {
+		t.Errorf("AH.Pointer() = %v, want nil", ah.Pointer())
+	}
+	if err := ah.Close(); err != nil {
+		t.Errorf("AH.Close() = %v, want nil", err)
+	}
+}
+
+func TestStubMulticastIsUnsupported(t *testing.T) {
+	qp := verbs.QPFromPointer(nil)
+	for name, call := range map[string]func(verbs.GID, uint16) error{
+		"QP.AttachMulticast": qp.AttachMulticast,
+		"QP.DetachMulticast": qp.DetachMulticast,
+	} {
+		err := call(verbs.GID{0: 0xff}, 0)
+		var opErr *verbs.OpError
+		if !errors.As(err, &opErr) || !errors.Is(err, errors.ErrUnsupported) {
+			t.Errorf("%s() error = %v, want an *OpError matching errors.ErrUnsupported", name, err)
+		}
+	}
+}
+
 func TestStubDeviceIndexIsUnknown(t *testing.T) {
 	if got := new(verbs.Device).Index(); got != -1 {
 		t.Errorf("Device.Index() = %d, want -1", got)

@@ -4,7 +4,9 @@ package verbs
 
 import (
 	"encoding/binary"
+	"os"
 	"sync"
+	"syscall"
 	"unsafe"
 
 	"github.com/wzshiming/rdma/internal/dynlib"
@@ -19,6 +21,7 @@ var qps sync.Map
 type QP struct {
 	qp       *rdmaabi.IbvQp
 	owned    bool
+	ud       bool        // its sends are datagrams
 	postSend dynlib.Func // post_send of the device context
 	postRecv dynlib.Func // post_recv of the device context
 	send     postBuf[rdmaabi.IbvSendWr]
@@ -58,6 +61,7 @@ func newQP(qp *rdmaabi.IbvQp, owned bool) *QP {
 		ops := contextOps(qp.Context)
 		q.postSend = dynlib.FuncAt(uintptr(ops.Post_send))
 		q.postRecv = dynlib.FuncAt(uintptr(ops.Post_recv))
+		q.ud = QPType(qp.Qp_type) == QPTypeUD
 	}
 	return q
 }
@@ -163,7 +167,9 @@ func (q *QP) PostSend(wrs ...SendWR) error {
 	cwrs, sges := q.send.reserve(len(wrs), nsge)
 	for i := range wrs {
 		w, cw := &wrs[i], &cwrs[i]
-		sendWRToC(cw, w)
+		if err := q.requestToC(cw, w); err != nil {
+			return err
+		}
 		if i+1 < len(wrs) {
 			cw.Next = uint64(uintptr(unsafe.Pointer(&cwrs[i+1])))
 		}
@@ -190,6 +196,28 @@ func sendWRToC(cw *rdmaabi.IbvSendWr, w *SendWR) {
 	binary.BigEndian.PutUint32(cw.Imm_data[:], w.Imm)
 	cw.Wr.Rdma.Remote_addr = w.RemoteAddr
 	cw.Wr.Rdma.Rkey = w.RKey
+}
+
+// requestToC fills cw from w as a send of q: a datagram of a UD queue pair
+// carries its destination in place of the RDMA address. The provider follows
+// the address handle's pointer, so a missing or closed one is refused here.
+func (q *QP) requestToC(cw *rdmaabi.IbvSendWr, w *SendWR) error {
+	sendWRToC(cw, w)
+	if !q.ud {
+		return nil
+	}
+	if w.AH == nil {
+		return &OpError{Op: "ibv_post_send", Err: syscall.EINVAL}
+	}
+	if w.AH.ah == nil {
+		return &OpError{Op: "ibv_post_send", Err: os.ErrClosed}
+	}
+	*(*rdmaabi.IbvSendWrUd)(unsafe.Pointer(&cw.Wr)) = rdmaabi.IbvSendWrUd{
+		Ah:          uint64(uintptr(w.AH.ah)),
+		Remote_qpn:  w.RemoteQPN,
+		Remote_qkey: w.RemoteQKey,
+	}
+	return nil
 }
 
 // PostRecv posts receive work requests as one chain, built in the queue
@@ -230,6 +258,37 @@ func fillSGEs(dst []rdmaabi.IbvSge, src []SGE) []rdmaabi.IbvSge {
 		dst[i] = rdmaabi.IbvSge{Addr: s.Addr, Length: s.Length, Lkey: s.LKey}
 	}
 	return dst[len(src):]
+}
+
+// AttachMulticast attaches the queue pair, a UD one, to the multicast group
+// gid, lid, so that it receives the datagrams sent to the group; joining the
+// group on the network, as rdma_cm does, is not part of it. On RoCE v2 gid
+// is the group's IP address, an IPv4 one mapped into IPv6, while RoCE v1
+// gives an IPv4 group a.b.c.d the GID ff0e::ffff:a.b.c.d; rdma_cm's join
+// reports the group's GID either way. On RoCE lid is not used.
+func (q *QP) AttachMulticast(gid GID, lid uint16) error {
+	f, err := load("ibv_attach_mcast")
+	if err != nil {
+		return err
+	}
+	g := rdmaabi.IbvGid(gid)
+	if rc, _ := f.attachMcast.Int(caddr(q.qp), uintptr(unsafe.Pointer(&g)), uintptr(lid), 0, 0, 0); rc != 0 {
+		return opErrorRC("ibv_attach_mcast", rc)
+	}
+	return nil
+}
+
+// DetachMulticast detaches the queue pair from the multicast group gid, lid.
+func (q *QP) DetachMulticast(gid GID, lid uint16) error {
+	f, err := load("ibv_detach_mcast")
+	if err != nil {
+		return err
+	}
+	g := rdmaabi.IbvGid(gid)
+	if rc, _ := f.detachMcast.Int(caddr(q.qp), uintptr(unsafe.Pointer(&g)), uintptr(lid), 0, 0, 0); rc != 0 {
+		return opErrorRC("ibv_detach_mcast", rc)
+	}
+	return nil
 }
 
 // Close destroys the queue pair. A second Close is a no-op.
