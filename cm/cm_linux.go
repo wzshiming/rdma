@@ -3,9 +3,7 @@
 package cm
 
 import (
-	"bytes"
 	"context"
-	"encoding/binary"
 	"errors"
 	"net"
 	"net/netip"
@@ -14,10 +12,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
-	"unsafe"
 
-	"github.com/wzshiming/rdma/internal/dynlib"
-	"github.com/wzshiming/rdma/internal/rdmaabi"
+	"github.com/wzshiming/rdma/internal/ucma"
 	"github.com/wzshiming/rdma/verbs"
 )
 
@@ -25,228 +21,115 @@ import (
 // when ctx carries no deadline.
 const defaultResolveTimeout = 2 * time.Second
 
-// ibCMRejConsumerDefined is the IB CM reject reason of an explicit
-// rdma_reject (IB_CM_REJ_CONSUMER_DEFINED).
-const ibCMRejConsumerDefined = 28
+// lastUID numbers the identifiers for the kernel, whose events of an
+// identifier carry its number: never 0, which the kernel's events of an
+// identifier not yet accepted carry, and never a Go pointer.
+var lastUID atomic.Uint64
 
-// rdmaPSTCP is the port space of every identifier (RDMA_PS_TCP).
-const rdmaPSTCP = 0x0106
+func newUID() uint64 { return lastUID.Add(1) }
 
-// createID creates an event channel and an RDMA_PS_TCP identifier on it.
-func createID(lib *funcs) (*rdmaabi.RdmaEventChannel, *rdmaabi.RdmaCmId, error) {
-	ch, errno := lib.createEventChannel.Ptr(0, 0, 0, 0, 0, 0)
-	if ch == 0 {
-		return nil, nil, opError("rdma_create_event_channel", errno)
-	}
-	var id uintptr // struct rdma_cm_id *, stored by the call
-	if rc, errno := lib.createID.Int(ch, uintptr(unsafe.Pointer(&id)), 0, rdmaPSTCP, 0, 0); rc != 0 {
-		lib.destroyEventChannel.Int(ch, 0, 0, 0, 0, 0)
-		return nil, nil, opError("rdma_create_id", errno)
-	}
-	return dynlib.Pointer[rdmaabi.RdmaEventChannel](ch), dynlib.Pointer[rdmaabi.RdmaCmId](id), nil
-}
+// opError reports an operation that failed with err, an errno of the
+// kernel's device or of verbs.
+func opError(op string, err error) error { return &verbs.OpError{Op: op, Err: err} }
 
-// destroyID destroys an identifier and its channel. Every event this package
-// reads is acknowledged at once and the kernel discards unread ones, so
-// rdma_destroy_id has nothing to wait for.
-func destroyID(lib *funcs, id *rdmaabi.RdmaCmId, ch *rdmaabi.RdmaEventChannel) error {
-	var err error
-	if rc, errno := lib.destroyID.Int(caddr(id), 0, 0, 0, 0, 0); rc != 0 {
-		err = opError("rdma_destroy_id", errno)
+func errClosed(op string) error { return &verbs.OpError{Op: op, Err: os.ErrClosed} }
+
+// cause returns the error a verbs call failed with, without the
+// *verbs.OpError naming the libibverbs function, for the operation of the
+// connection manager to report.
+func cause(err error) error {
+	var opErr *verbs.OpError
+	if errors.As(err, &opErr) {
+		return opErr.Err
 	}
-	lib.destroyEventChannel.Int(caddr(ch), 0, 0, 0, 0, 0)
 	return err
 }
 
-// sockaddrIn and sockaddrIn6 are struct sockaddr_in and struct sockaddr_in6:
-// the family an sa_family_t in the host's byte order, the port two bytes in
-// network order whatever the host's, then the address; sin6_flowinfo and
-// sin6_scope_id are neither set nor read.
-type sockaddrIn struct {
-	family uint16
-	port   [2]byte
-	addr   [4]byte
-	_      [8]byte
-}
-
-type sockaddrIn6 struct {
-	family   uint16
-	port     [2]byte
-	flowinfo uint32
-	addr     [16]byte
-	scopeID  uint32
-}
-
-// sockaddrStorage is struct sockaddr_storage, which holds either of them and
-// is aligned like it: the type of the two addresses in rdma_cm_id.route.addr
-// and of the address rdma_bind_addr and rdma_resolve_addr read.
-type sockaddrStorage struct {
-	family uint16
-	_      [6]byte
-	_      [15]uint64
-}
-
-// set stores ap in ss; a v4-mapped address becomes an IPv4 sockaddr.
-func (ss *sockaddrStorage) set(ap netip.AddrPort) {
-	*ss = sockaddrStorage{}
-	var port [2]byte
-	binary.BigEndian.PutUint16(port[:], ap.Port())
-	addr := ap.Addr().Unmap()
-	if addr.Is4() {
-		*(*sockaddrIn)(unsafe.Pointer(ss)) = sockaddrIn{family: syscall.AF_INET, port: port, addr: addr.As4()}
-		return
-	}
-	*(*sockaddrIn6)(unsafe.Pointer(ss)) = sockaddrIn6{family: syscall.AF_INET6, port: port, addr: addr.As16()}
-}
-
-// addrPort reads an IPv4 or IPv6 sockaddr; other families give the zero
-// value.
-func (ss *sockaddrStorage) addrPort() netip.AddrPort {
-	switch ss.family {
-	case syscall.AF_INET:
-		sin := (*sockaddrIn)(unsafe.Pointer(ss))
-		return netip.AddrPortFrom(netip.AddrFrom4(sin.addr), binary.BigEndian.Uint16(sin.port[:]))
-	case syscall.AF_INET6:
-		sin6 := (*sockaddrIn6)(unsafe.Pointer(ss))
-		return netip.AddrPortFrom(netip.AddrFrom16(sin6.addr), binary.BigEndian.Uint16(sin6.port[:]))
-	}
-	return netip.AddrPort{}
-}
-
-// addrs reads the local and peer addresses of id from its route, as the
-// header inlines rdma_get_local_addr and rdma_get_peer_addr do.
-func addrs(id *rdmaabi.RdmaCmId) (local, remote netip.AddrPort) {
-	local = (*sockaddrStorage)(unsafe.Pointer(&id.Route.Addr.Src_storage)).addrPort()
-	remote = (*sockaddrStorage)(unsafe.Pointer(&id.Route.Addr.Dst_storage)).addrPort()
-	return local, remote
-}
-
-// resolveTimeout is the rdma_cm timeout in milliseconds for one resolution
-// step: the time left until the deadline of ctx, or defaultResolveTimeout.
-func resolveTimeout(ctx context.Context) uintptr {
+// resolveTimeout is the timeout of one resolution step: the time left until
+// the deadline of ctx, or defaultResolveTimeout, in whole milliseconds.
+func resolveTimeout(ctx context.Context) time.Duration {
 	d := defaultResolveTimeout
 	if deadline, ok := ctx.Deadline(); ok {
 		d = time.Until(deadline)
 	}
-	return uintptr(min(max(d.Milliseconds(), 1), 1<<31-1))
+	return time.Duration(min(max(d.Milliseconds(), 1), 1<<31-1)) * time.Millisecond
 }
 
-// cmEvent is a copy of a struct rdma_cm_event, taken before the event is
-// acknowledged.
-type cmEvent struct {
-	typ                Event
-	status             int
-	id                 *rdmaabi.RdmaCmId
-	privateData        []byte
-	responderResources uint8
-	initiatorDepth     uint8
-}
-
-// getEvent takes the next event off ch, copies and acknowledges it. It returns
-// nil without an error when none is pending.
-func getEvent(lib *funcs, ch *rdmaabi.RdmaEventChannel) (*cmEvent, error) {
-	var cev uintptr // struct rdma_cm_event *, stored by the call
-	for {
-		rc, errno := lib.getCMEvent.Int(caddr(ch), uintptr(unsafe.Pointer(&cev)), 0, 0, 0, 0)
-		if rc == 0 {
-			break
-		}
-		if errno == syscall.EINTR {
-			continue
-		}
-		if errno == syscall.EAGAIN {
-			return nil, nil
-		}
-		return nil, opError("rdma_get_cm_event", errno)
+// createID opens an event channel and creates an identifier of the TCP port
+// space on it, as rdma_create_event_channel and rdma_create_id do.
+func createID() (*ucma.Channel, uint32, uint64, error) {
+	ch, err := ucma.Open()
+	if err != nil {
+		return nil, 0, 0, opError("rdma_create_event_channel", err)
 	}
-	ev := eventFromC(dynlib.Pointer[rdmaabi.RdmaCmEvent](cev))
-	lib.ackCMEvent.Int(cev, 0, 0, 0, 0, 0)
-	return ev, nil
+	uid := newUID()
+	handle, err := ch.CreateID(uid, ucma.PortSpaceTCP, ucma.QPTypeRC)
+	if err != nil {
+		ch.Close()
+		return nil, 0, 0, opError("rdma_create_id", err)
+	}
+	return ch, handle, uid, nil
 }
 
-// eventFromC copies the fields of a struct rdma_cm_event this package reads,
-// the private data included, so that the event can be acknowledged.
-func eventFromC(cev *rdmaabi.RdmaCmEvent) *cmEvent {
-	conn := &cev.Param.Conn
-	ev := &cmEvent{
-		typ:                Event(cev.Event),
-		status:             int(cev.Status),
-		id:                 dynlib.Pointer[rdmaabi.RdmaCmId](uintptr(cev.Id)),
-		responderResources: conn.Responder_resources,
-		initiatorDepth:     conn.Initiator_depth,
-	}
-	if conn.Private_data_len > 0 {
-		ev.privateData = bytes.Clone(unsafe.Slice(dynlib.Pointer[byte](uintptr(conn.Private_data)), int(conn.Private_data_len)))
-	}
-	return ev
-}
-
-// err translates an event that ends a connection attempt into the error op
-// reports; events that do not end it give nil.
-func (ev *cmEvent) err(op string) error {
-	switch ev.typ {
-	case EventRejected:
-		if ev.status == ibCMRejConsumerDefined {
-			return &RejectedError{PrivateData: ev.privateData, Reason: ev.status}
-		}
-		return &verbs.OpError{Op: op, Err: syscall.ECONNREFUSED}
-	case EventAddrError, EventRouteError:
-		return &verbs.OpError{Op: op, Err: ev.statusErrno(syscall.EHOSTUNREACH)}
-	case EventUnreachable, EventConnectError:
-		return &verbs.OpError{Op: op, Err: ev.statusErrno(syscall.ETIMEDOUT)}
-	case EventDisconnected:
-		return &verbs.OpError{Op: op, Err: syscall.ECONNRESET}
-	case EventDeviceRemoval:
-		return &verbs.OpError{Op: op, Err: syscall.ENODEV}
+// destroyID destroys an identifier and closes its channel.
+func destroyID(ch *ucma.Channel, handle uint32) error {
+	_, err := ch.DestroyID(handle)
+	ch.Close()
+	if err != nil {
+		return opError("rdma_destroy_id", err)
 	}
 	return nil
 }
 
-// statusErrno reads the errno of an error event: the kernel reports negative
-// errno values; def covers the rest, among them the -1 of a failure inside
-// librdmacm, whose errno a call that returned 0 does not hand back.
-func (ev *cmEvent) statusErrno(def syscall.Errno) syscall.Errno {
-	if ev.status < -1 {
-		return syscall.Errno(-ev.status)
+// waitError is the error of a wait of op that GetEvent ended with err: that
+// of ctx, os.ErrClosed once the channel is closed, or the GET_EVENT
+// command's.
+func waitError(ctx context.Context, op string, err error) error {
+	if errors.Is(err, os.ErrClosed) {
+		return errClosed(op)
 	}
-	return def
+	if cerr := ctx.Err(); cerr != nil && err == cerr {
+		return err
+	}
+	return opError("rdma_get_cm_event", err)
 }
 
-// ID is a communication identifier (struct rdma_cm_id) with an event channel
-// of its own.
+// ID is a communication identifier with an event channel of its own, an
+// open descriptor of the kernel's rdma_cm device.
 type ID struct {
-	lib    *funcs
-	id     *rdmaabi.RdmaCmId
-	ch     *rdmaabi.RdmaEventChannel
-	w      *fdWaiter
-	dev    *verbs.Context
+	ch     *ucma.Channel
+	handle uint32 // the kernel's number of the identifier
+	uid    uint64
+	turn   chan struct{} // held by the one wait taking events
+
+	// Known once the address is resolved, and from the start for a request.
+	dev    *device
+	ctx    *verbs.Context // dev's context, whose Close releases nothing
+	port   uint8
 	local  netip.AddrPort
 	remote netip.AddrPort
 
-	disconnected atomic.Bool // a DISCONNECTED event was read
+	disconnected atomic.Bool // a DISCONNECTED event was taken
 
-	mu     sync.Mutex // serialises the rdma_cm calls below with Close
+	mu     sync.Mutex // serialises the commands and the queue pair's transitions with Close
 	closed bool
-	qp     *verbs.QP
+	qp     *verbs.QP // as CreateQP returned it, whose Close destroys nothing
+	ownQP  *verbs.QP // the same queue pair, destroyed by Close
+	// The depths of the connection as rdma_connect and rdma_accept keep
+	// them; those of the request on an incoming connection.
+	initiatorDepth, responderResources uint8
+	// connectError is set when the connect response failed here; the peer's
+	// REJECTED and DISCONNECTED are not reported then.
+	connectError bool
 }
 
-// newID wraps id, whose address and device are known, with its channel ch.
-func newID(lib *funcs, id *rdmaabi.RdmaCmId, ch *rdmaabi.RdmaEventChannel) (*ID, error) {
-	w, err := newFDWaiter(int(ch.Fd))
-	if err != nil {
-		destroyID(lib, id, ch)
-		return nil, err
-	}
-	r := &ID{lib: lib, id: id, ch: ch, w: w}
-	r.readRoute()
-	return r, nil
+func newID(ch *ucma.Channel, handle uint32, uid uint64) *ID {
+	return &ID{ch: ch, handle: handle, uid: uid, turn: make(chan struct{}, 1)}
 }
 
-// readRoute records the device and the addresses of an identifier whose
-// route is known.
-func (id *ID) readRoute() {
-	id.dev = verbs.ContextFromPointer(cpointer(id.id.Verbs))
-	id.local, id.remote = addrs(id.id)
+// setDevice records the device and port of the identifier.
+func (id *ID) setDevice(dev *device, port uint8) {
+	id.dev, id.port, id.ctx = dev, port, verbs.ContextFromPointer(dev.ctx.Pointer())
 }
 
 // Resolve resolves the address and route to remote and returns an identifier
@@ -262,53 +145,39 @@ func Resolve(ctx context.Context, local, remote netip.AddrPort) (*ID, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	lib, err := load("rdma_resolve_addr")
+	if err := initialize("rdma_resolve_addr"); err != nil {
+		return nil, err
+	}
+	ch, handle, uid, err := createID()
 	if err != nil {
 		return nil, err
 	}
-	ch, id, err := createID(lib)
-	if err != nil {
+	id := newID(ch, handle, uid)
+	if err := ch.ResolveAddr(handle, local, remote, resolveTimeout(ctx)); err != nil {
+		id.Close()
+		return nil, opError("rdma_resolve_addr", err)
+	}
+	if _, err := id.awaitEvent(ctx, "rdma_resolve_addr", EventAddrResolved); err != nil {
+		id.Close()
 		return nil, err
 	}
-	w, err := newFDWaiter(int(ch.Fd))
-	if err != nil {
-		destroyID(lib, id, ch)
+	if err := ch.ResolveRoute(handle, resolveTimeout(ctx)); err != nil {
+		id.Close()
+		return nil, opError("rdma_resolve_route", err)
+	}
+	if _, err := id.awaitEvent(ctx, "rdma_resolve_route", EventRouteResolved); err != nil {
+		id.Close()
 		return nil, err
 	}
-	r := &ID{lib: lib, id: id, ch: ch, w: w}
-	var src *sockaddrStorage
-	var srcStorage, dstStorage sockaddrStorage
-	if local.Addr().IsValid() {
-		srcStorage.set(local)
-		src = &srcStorage
-	}
-	dstStorage.set(remote)
-	if rc, errno := lib.resolveAddr.Int(caddr(id), uintptr(unsafe.Pointer(src)), uintptr(unsafe.Pointer(&dstStorage)), resolveTimeout(ctx), 0, 0); rc != 0 {
-		r.Close()
-		return nil, opError("rdma_resolve_addr", errno)
-	}
-	if _, err := r.awaitEvent(ctx, "rdma_resolve_addr", EventAddrResolved); err != nil {
-		r.Close()
-		return nil, err
-	}
-	if rc, errno := lib.resolveRoute.Int(caddr(id), resolveTimeout(ctx), 0, 0, 0, 0); rc != 0 {
-		r.Close()
-		return nil, opError("rdma_resolve_route", errno)
-	}
-	if _, err := r.awaitEvent(ctx, "rdma_resolve_route", EventRouteResolved); err != nil {
-		r.Close()
-		return nil, err
-	}
-	r.readRoute()
-	return r, nil
+	return id, nil
 }
 
-// Device returns the device the connection uses. rdma_cm keeps it open for
-// the life of the process; Close on it releases nothing.
-func (id *ID) Device() *verbs.Context { return id.dev }
+// Device returns the device the connection uses. The package keeps it open
+// for the life of the process; Close on it releases nothing.
+func (id *ID) Device() *verbs.Context { return id.ctx }
 
 // Port returns the device port the connection uses.
-func (id *ID) Port() uint8 { return id.id.Port_num }
+func (id *ID) Port() uint8 { return id.port }
 
 // LocalAddr returns the local address of the connection.
 func (id *ID) LocalAddr() netip.AddrPort { return id.local }
@@ -317,49 +186,53 @@ func (id *ID) LocalAddr() netip.AddrPort { return id.local }
 func (id *ID) RemoteAddr() netip.AddrPort { return id.remote }
 
 // CreateQP creates the queue pair of the connection (rdma_create_qp) and
-// stores the granted capacities in attr.Cap. pd must belong to Device();
-// attr.SendCQ and attr.RecvCQ are required and must outlive the ID, which
-// destroys the queue pair when it closes.
+// stores the granted capacities in attr.Cap. pd must belong to Device(), nil
+// meaning the device's default protection domain; attr.SendCQ and
+// attr.RecvCQ are required and must outlive the ID, which destroys the queue
+// pair when it closes.
+//
+// The queue pair belongs to the ID: Close on the *verbs.QP that CreateQP and
+// QP return releases nothing. The QP of a verbs.AsyncEvent about the queue
+// pair is the owning verbs object instead, whose Close destroys the queue
+// pair under the ID.
 func (id *ID) CreateQP(pd *verbs.PD, attr *verbs.QPInitAttr) (*verbs.QP, error) {
+	const op = "rdma_create_qp"
 	if attr.SendCQ == nil || attr.RecvCQ == nil {
-		return nil, invalidArg("rdma_create_qp", "send and receive completion queues are required")
+		return nil, invalidArg(op, "send and receive completion queues are required")
 	}
 	id.mu.Lock()
 	defer id.mu.Unlock()
 	if id.closed {
-		return nil, errClosed("rdma_create_qp")
+		return nil, errClosed(op)
 	}
-	ia := rdmaabi.IbvQpInitAttr{
-		Send_cq: uint64(uintptr(attr.SendCQ.Pointer())),
-		Recv_cq: uint64(uintptr(attr.RecvCQ.Pointer())),
-		Cap: rdmaabi.IbvQpCap{
-			Max_send_wr:     attr.Cap.MaxSendWR,
-			Max_recv_wr:     attr.Cap.MaxRecvWR,
-			Max_send_sge:    attr.Cap.MaxSendSGE,
-			Max_recv_sge:    attr.Cap.MaxRecvSGE,
-			Max_inline_data: attr.Cap.MaxInlineData,
-		},
-		Qp_type: uint32(attr.Type),
+	if id.ownQP != nil {
+		return nil, opError(op, syscall.EINVAL)
 	}
-	if attr.SignalAll {
-		ia.Sq_sig_all = 1
+	if pd == nil {
+		pd = id.dev.pd
+	} else if pdContext(pd) != uintptr(id.dev.ctx.Pointer()) {
+		return nil, opError(op, syscall.EINVAL)
 	}
-	var cpd unsafe.Pointer
-	if pd != nil {
-		cpd = pd.Pointer()
+	qp, err := pd.CreateQP(attr)
+	if err != nil {
+		return nil, opError(op, cause(err))
 	}
-	if rc, errno := id.lib.createQP.Int(caddr(id.id), uintptr(cpd), uintptr(unsafe.Pointer(&ia)), 0, 0, 0); rc != 0 {
-		return nil, opError("rdma_create_qp", errno)
+	if err := id.modify(qp, verbs.QPStateInit, nil); err != nil {
+		qp.Close()
+		return nil, opError(op, err)
 	}
-	attr.Cap = verbs.QPCap{
-		MaxSendWR:     ia.Cap.Max_send_wr,
-		MaxRecvWR:     ia.Cap.Max_recv_wr,
-		MaxSendSGE:    ia.Cap.Max_send_sge,
-		MaxRecvSGE:    ia.Cap.Max_recv_sge,
-		MaxInlineData: ia.Cap.Max_inline_data,
-	}
-	id.qp = verbs.QPFromPointer(cpointer(id.id.Qp))
+	id.ownQP, id.qp = qp, verbs.QPFromPointer(qp.Pointer())
 	return id.qp, nil
+}
+
+// pdContext returns the address of the device context of pd, the first
+// field of struct ibv_pd.
+func pdContext(pd *verbs.PD) uintptr {
+	p := pd.Pointer()
+	if p == nil {
+		return 0
+	}
+	return *(*uintptr)(p)
 }
 
 // QP returns the queue pair created by CreateQP, or nil.
@@ -369,27 +242,54 @@ func (id *ID) QP() *verbs.QP {
 	return id.qp
 }
 
-// connParam is the memory of one rdma_connect or rdma_accept: the struct
-// rdma_conn_param and the copy of the private data it points to, in one
-// heap object that the call keeps alive.
-type connParam struct {
-	c    rdmaabi.RdmaConnParam
-	data [MaxAcceptPrivateData]byte
+// modify moves qp to state with the attributes the kernel has for the
+// identifier, as rdma_init_qp_attr and ibv_modify_qp do; adjust, if not nil,
+// changes them first.
+func (id *ID) modify(qp *verbs.QP, state verbs.QPState, adjust func(*verbs.QPAttr, *verbs.QPAttrMask)) error {
+	k, err := id.ch.InitQPAttr(id.handle, uint32(state))
+	if err != nil {
+		return err
+	}
+	attr, mask := qpAttrFromKernel(state, &k)
+	if adjust != nil {
+		adjust(attr, &mask)
+	}
+	return cause(qp.Modify(attr, mask))
 }
 
-// newConnParam fills a connParam from p, whose private data fits data.
-func newConnParam(p ConnParam) *connParam {
-	cp := &connParam{c: rdmaabi.RdmaConnParam{
-		Responder_resources: p.ResponderResources,
-		Initiator_depth:     p.InitiatorDepth,
-		Retry_count:         p.RetryCount,
-		Rnr_retry_count:     p.RNRRetryCount,
-	}}
-	if n := copy(cp.data[:], p.PrivateData); n > 0 {
-		cp.c.Private_data = uint64(uintptr(unsafe.Pointer(&cp.data)))
-		cp.c.Private_data_len = uint8(n)
+// modifyRTR moves the queue pair to RTR as ucma_modify_qp_rtr does: to INIT
+// again, which brings the kernel's attributes up to date, then to RTR with
+// the mask of the port's link layer and the responder resources.
+func (id *ID) modifyRTR(responderResources uint8) error {
+	if id.ownQP == nil {
+		return nil
 	}
-	return cp
+	if err := id.modify(id.ownQP, verbs.QPStateInit, nil); err != nil {
+		return err
+	}
+	return id.modify(id.ownQP, verbs.QPStateRTR, func(a *verbs.QPAttr, mask *verbs.QPAttrMask) {
+		*mask = rtrMask(*mask, id.dev.linkLayer(id.port))
+		overrideRTR(a, responderResources)
+	})
+}
+
+// modifyRTS moves the queue pair to RTS with the initiator depth, as
+// ucma_modify_qp_rts does.
+func (id *ID) modifyRTS(initiatorDepth uint8) error {
+	if id.ownQP == nil {
+		return nil
+	}
+	return id.modify(id.ownQP, verbs.QPStateRTS, func(a *verbs.QPAttr, _ *verbs.QPAttrMask) {
+		overrideRTS(a, initiatorDepth)
+	})
+}
+
+// moveTo moves the queue pair, if there is one, to state.
+func (id *ID) moveTo(state verbs.QPState) error {
+	if id.ownQP == nil {
+		return nil
+	}
+	return cause(id.ownQP.Modify(&verbs.QPAttr{State: state}, verbs.QPAttrState))
 }
 
 // Connect connects to the peer with the queue pair of CreateQP and waits until
@@ -400,19 +300,32 @@ func newConnParam(p ConnParam) *connParam {
 // out of reach, and ctx.Err() when ctx ends first, after which the only
 // sensible call on the ID is Close.
 func (id *ID) Connect(ctx context.Context, param *ConnParam) (*ConnInfo, error) {
-	ev, err := id.establish(ctx, "rdma_connect", param, MaxConnectPrivateData, func(cp *rdmaabi.RdmaConnParam) (int32, syscall.Errno) {
-		return id.lib.connect.Int(caddr(id.id), uintptr(unsafe.Pointer(cp)), 0, 0, 0, 0)
-	})
+	ev, err := id.establish(ctx, "rdma_connect", param, MaxConnectPrivateData, id.connect)
 	if err != nil {
 		return nil, err
 	}
-	return &ConnInfo{PrivateData: ev.privateData, ResponderResources: ev.responderResources, InitiatorDepth: ev.initiatorDepth}, nil
+	return &ConnInfo{PrivateData: ev.conn.PrivateData, ResponderResources: ev.conn.ResponderResources, InitiatorDepth: ev.conn.InitiatorDepth}, nil
 }
 
-// establish runs call, an rdma_connect or rdma_accept named op, with the
-// parameters of param, whose private data may have max bytes, and waits for
-// the ESTABLISHED event.
-func (id *ID) establish(ctx context.Context, op string, param *ConnParam, max int, call func(*rdmaabi.RdmaConnParam) (int32, syscall.Errno)) (*cmEvent, error) {
+// connect sends the connection request as rdma_connect does: the depths of p
+// are checked and kept for the connection. The caller holds mu.
+func (id *ID) connect(p ConnParam) error {
+	const op = "rdma_connect"
+	if err := checkDepths(p, id.dev.limits); err != nil {
+		return opError(op, err)
+	}
+	id.initiatorDepth, id.responderResources = connectDepths(p, id.dev.limits)
+	cp := kernelConnParam(p, id.ownQP.Num(), id.initiatorDepth, id.responderResources)
+	if err := id.ch.Connect(id.handle, cp, ucma.ECE{}); err != nil {
+		return opError(op, err)
+	}
+	return nil
+}
+
+// establish runs call, the connect or accept named op, with the parameters
+// of param, whose private data may have max bytes, and waits for the
+// ESTABLISHED event.
+func (id *ID) establish(ctx context.Context, op string, param *ConnParam, max int, call func(ConnParam) error) (*event, error) {
 	if err := checkConnParam(op, param, max); err != nil {
 		return nil, err
 	}
@@ -421,37 +334,31 @@ func (id *ID) establish(ctx context.Context, op string, param *ConnParam, max in
 		id.mu.Unlock()
 		return nil, errClosed(op)
 	}
-	if id.qp == nil {
+	if id.ownQP == nil {
 		id.mu.Unlock()
 		return nil, invalidArg(op, "no queue pair, call CreateQP first")
 	}
-	cp := newConnParam(param.withDefaults())
-	rc, errno := call(&cp.c)
+	err := call(param.withDefaults())
 	id.mu.Unlock()
-	if rc != 0 {
-		return nil, opError(op, errno)
+	if err != nil {
+		return nil, err
 	}
 	return id.awaitEvent(ctx, op, EventEstablished)
 }
 
-// awaitEvent reads events until want arrives and returns it; an event that
+// never is the condition of a wait that only events end.
+func never() bool { return false }
+
+// awaitEvent takes events until want arrives and returns it; an event that
 // ends the attempt returns its error instead, other events are skipped.
-func (id *ID) awaitEvent(ctx context.Context, op string, want Event) (*cmEvent, error) {
-	var got *cmEvent
-	err := id.w.wait(ctx, op, func() (bool, error) {
-		for {
-			ev, err := id.getEvent()
-			if err != nil || ev == nil {
-				return false, err
-			}
-			if ev.typ == want {
-				got = ev
-				return true, nil
-			}
-			if err := ev.err(op); err != nil {
-				return false, err
-			}
+func (id *ID) awaitEvent(ctx context.Context, op string, want Event) (*event, error) {
+	var got *event
+	err := id.wait(ctx, op, never, func(ev *event) (bool, error) {
+		if ev.typ == want {
+			got = ev
+			return true, nil
 		}
+		return false, ev.err(op)
 	})
 	if err != nil {
 		return nil, err
@@ -459,44 +366,162 @@ func (id *ID) awaitEvent(ctx context.Context, op string, want Event) (*cmEvent, 
 	return got, nil
 }
 
-// getEvent reads and acknowledges the next event of the ID, noting a
-// disconnect.
-func (id *ID) getEvent() (*cmEvent, error) {
-	ev, err := getEvent(id.lib, id.ch)
-	if ev != nil && ev.typ == EventDisconnected {
+// wait takes the events of the ID, one waiter at a time, and hands each to
+// take until take is done or fails, done reports true before an event, ctx
+// ends or the ID closes. The waits hold no OS thread.
+func (id *ID) wait(ctx context.Context, op string, done func() bool, take func(*event) (bool, error)) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case id.turn <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer func() { <-id.turn }()
+	for !done() {
+		ev, err := id.next(ctx, op)
+		if err != nil {
+			return err
+		}
+		if ok, err := take(ev); ok || err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// next fetches the next event of the ID and returns it as
+// rdma_get_cm_event hands it out, skipping those it discards.
+func (id *ID) next(ctx context.Context, op string) (*event, error) {
+	for {
+		uev, err := id.ch.GetEvent(ctx)
+		if err != nil {
+			return nil, waitError(ctx, op, err)
+		}
+		if !known(uev, id.uid, id.handle) {
+			continue
+		}
+		if ev, err := id.process(uev, op); err != nil || ev != nil {
+			return ev, err
+		}
+	}
+}
+
+// process does what rdma_get_cm_event does on an event of the ID and returns
+// the event it hands out, or nil for one it discards: the addresses and the
+// device once the address is resolved, the queue pair's way to RTS and the
+// ACCEPT that ends a connect response, the queue pair's move to ERR on a
+// reject.
+func (id *ID) process(uev ucma.Event, op string) (*event, error) {
+	ev := &event{typ: Event(uev.Type), status: int(uev.Status), conn: uev.Conn()}
+	id.mu.Lock()
+	defer id.mu.Unlock()
+	if id.closed {
+		return nil, errClosed(op)
+	}
+	switch ev.typ {
+	case EventAddrResolved:
+		if id.queryAddr() != nil {
+			ev.typ, ev.status = EventAddrError, -1
+		}
+	case EventConnectResponse:
+		if id.ownQP != nil {
+			if id.connectResponse() != nil {
+				ev.typ, ev.status = EventConnectError, -1
+				id.connectError = true
+			} else {
+				ev.typ = EventEstablished
+			}
+		}
+	case EventRejected:
+		if id.connectError {
+			return nil, nil
+		}
+		id.moveTo(verbs.QPStateErr)
+	case EventDisconnected:
+		if id.connectError {
+			return nil, nil
+		}
 		id.disconnected.Store(true)
 	}
-	return ev, err
+	return ev, nil
+}
+
+// queryAddr records the addresses, the device and the port of the
+// identifier, as ucma_query_addr does once the address is resolved; an
+// identifier without a device is ENODEV.
+func (id *ID) queryAddr() error {
+	info, err := id.ch.QueryAddr(id.handle)
+	if err != nil {
+		return err
+	}
+	id.local, id.remote = info.Src, info.Dst
+	if id.dev == nil && info.NodeGUID != 0 {
+		dev, err := lookupDevice(info.NodeGUID, info.DevIndex)
+		if err != nil {
+			return err
+		}
+		id.setDevice(dev, info.PortNum)
+	}
+	if id.dev == nil {
+		return syscall.ENODEV
+	}
+	return nil
+}
+
+// connectResponse completes the connection the peer accepted, as
+// ucma_process_conn_resp does: RTR and RTS with the kernel's attributes, then
+// the ACCEPT without parameters that tells the peer the queue pair is ready.
+// A failure moves the queue pair to ERR.
+func (id *ID) connectResponse() error {
+	err := id.modifyRTR(maxDepth)
+	if err == nil {
+		err = id.modifyRTS(maxDepth)
+	}
+	if err == nil {
+		err = id.ch.Accept(id.handle, 0, nil, ucma.ECE{})
+	}
+	if err != nil {
+		id.moveTo(verbs.QPStateErr)
+	}
+	return err
 }
 
 // Disconnect disconnects from the peer (rdma_disconnect) and waits for the
 // DISCONNECTED event, unless Wait or an earlier Disconnect already consumed
 // the peer's. The queue pair moves to the error state.
 func (id *ID) Disconnect(ctx context.Context) error {
+	const op = "rdma_disconnect"
 	id.mu.Lock()
 	if id.closed {
 		id.mu.Unlock()
-		return errClosed("rdma_disconnect")
+		return errClosed(op)
 	}
-	rc, errno := id.lib.disconnect.Int(caddr(id.id), 0, 0, 0, 0, 0)
+	err := id.disconnect()
 	id.mu.Unlock()
-	if rc != 0 {
-		return opError("rdma_disconnect", errno)
+	if err != nil {
+		return opError(op, err)
 	}
-	return id.w.wait(ctx, "rdma_disconnect", func() (bool, error) {
-		for {
-			if id.disconnected.Load() {
-				return true, nil
-			}
-			ev, err := id.getEvent()
-			if err != nil || ev == nil {
-				return false, err
-			}
-			if ev.typ == EventDeviceRemoval {
-				return false, ev.err("rdma_disconnect")
-			}
+	return id.wait(ctx, op, id.disconnected.Load, func(ev *event) (bool, error) {
+		if ev.typ == EventDeviceRemoval {
+			return false, ev.err(op)
 		}
+		return false, nil
 	})
+}
+
+// disconnect moves the queue pair to the state the transport takes and
+// disconnects, as rdma_disconnect does. The caller holds mu.
+func (id *ID) disconnect() error {
+	state, err := shutdownState(id.dev.transport)
+	if err != nil {
+		return err
+	}
+	if err := id.moveTo(state); err != nil {
+		return err
+	}
+	return id.ch.Disconnect(id.handle)
 }
 
 // Wait waits for the next event of the connection, such as EventDisconnected
@@ -504,18 +529,15 @@ func (id *ID) Disconnect(ctx context.Context) error {
 // EventAddrChange or EventDeviceRemoval. It returns ctx.Err() when ctx ends
 // first and an error wrapping os.ErrClosed once the ID is closed.
 func (id *ID) Wait(ctx context.Context) (Event, error) {
+	const op = "rdma_get_cm_event"
 	id.mu.Lock()
 	closed := id.closed
 	id.mu.Unlock()
 	if closed {
-		return 0, errClosed("rdma_get_cm_event")
+		return 0, errClosed(op)
 	}
 	var got Event
-	err := id.w.wait(ctx, "rdma_get_cm_event", func() (bool, error) {
-		ev, err := id.getEvent()
-		if err != nil || ev == nil {
-			return false, err
-		}
+	err := id.wait(ctx, op, never, func(ev *event) (bool, error) {
 		got = ev.typ
 		return true, nil
 	})
@@ -531,23 +553,21 @@ func (id *ID) Close() error {
 		return nil
 	}
 	id.closed = true
-	id.w.close()
-	id.qp = nil
-	if id.id.Qp != 0 {
-		id.lib.destroyQP.Int(caddr(id.id), 0, 0, 0, 0, 0)
+	if id.ownQP != nil {
+		id.ownQP.Close()
+		id.ownQP, id.qp = nil, nil
 	}
-	return destroyID(id.lib, id.id, id.ch)
+	return destroyID(id.ch, id.handle)
 }
 
 // Listener listens for connection requests on an address.
 type Listener struct {
-	lib  *funcs
-	id   *rdmaabi.RdmaCmId
-	ch   *rdmaabi.RdmaEventChannel
-	w    *fdWaiter
-	addr netip.AddrPort
+	ch     *ucma.Channel
+	handle uint32
+	uid    uint64
+	addr   netip.AddrPort
 
-	mu     sync.Mutex
+	mu     sync.Mutex // serialises taking a request with Close
 	closed bool
 }
 
@@ -558,31 +578,43 @@ func Listen(local netip.AddrPort, backlog int) (*Listener, error) {
 	if err := checkListenAddr(local); err != nil {
 		return nil, err
 	}
-	lib, err := load("rdma_listen")
+	if err := initialize("rdma_listen"); err != nil {
+		return nil, err
+	}
+	ch, handle, uid, err := createID()
 	if err != nil {
 		return nil, err
 	}
-	ch, id, err := createID(lib)
+	if err := bind(ch, handle, local); err != nil {
+		destroyID(ch, handle)
+		return nil, opError("rdma_bind_addr", err)
+	}
+	if err := ch.Listen(handle, backlog); err != nil {
+		destroyID(ch, handle)
+		return nil, opError("rdma_listen", err)
+	}
+	info, err := ch.QueryAddr(handle)
 	if err != nil {
-		return nil, err
+		destroyID(ch, handle)
+		return nil, opError("rdma_listen", err)
 	}
-	var ss sockaddrStorage
-	ss.set(local)
-	if rc, errno := lib.bindAddr.Int(caddr(id), uintptr(unsafe.Pointer(&ss)), 0, 0, 0, 0); rc != 0 {
-		destroyID(lib, id, ch)
-		return nil, opError("rdma_bind_addr", errno)
+	return &Listener{ch: ch, handle: handle, uid: uid, addr: info.Src}, nil
+}
+
+// bind binds an identifier to addr as rdma_bind_addr does, opening the
+// device that addr picks, if it picks one.
+func bind(ch *ucma.Channel, handle uint32, addr netip.AddrPort) error {
+	if err := ch.Bind(handle, addr); err != nil {
+		return err
 	}
-	if rc, errno := lib.listen.Int(caddr(id), uintptr(backlog), 0, 0, 0, 0); rc != 0 {
-		destroyID(lib, id, ch)
-		return nil, opError("rdma_listen", errno)
-	}
-	w, err := newFDWaiter(int(ch.Fd))
+	info, err := ch.QueryAddr(handle)
 	if err != nil {
-		destroyID(lib, id, ch)
-		return nil, err
+		return err
 	}
-	bound, _ := addrs(id)
-	return &Listener{lib: lib, id: id, ch: ch, w: w, addr: bound}, nil
+	if info.NodeGUID != 0 {
+		_, err = lookupDevice(info.NodeGUID, info.DevIndex)
+	}
+	return err
 }
 
 // Addr returns the bound address, with the port actually chosen for port 0.
@@ -593,55 +625,86 @@ func (l *Listener) Addr() netip.AddrPort { return l.addr }
 // own. It returns ctx.Err() when ctx ends first and an error wrapping
 // net.ErrClosed once the Listener is closed.
 func (l *Listener) Accept(ctx context.Context) (*Request, error) {
+	req, err := l.accept(ctx)
+	if errors.Is(err, os.ErrClosed) {
+		return nil, &verbs.OpError{Op: "rdma_get_cm_event", Err: net.ErrClosed}
+	}
+	return req, err
+}
+
+func (l *Listener) accept(ctx context.Context) (*Request, error) {
+	const op = "rdma_get_cm_event"
 	l.mu.Lock()
 	closed := l.closed
 	l.mu.Unlock()
 	if closed {
-		return nil, &verbs.OpError{Op: "rdma_get_cm_event", Err: net.ErrClosed}
+		return nil, os.ErrClosed
 	}
-	var req *Request
-	err := l.w.wait(ctx, "rdma_get_cm_event", func() (bool, error) {
-		for {
-			ev, err := getEvent(l.lib, l.ch)
-			if err != nil || ev == nil {
-				return false, err
-			}
-			switch ev.typ {
-			case EventConnectRequest:
-				id, err := migrate(l.lib, ev.id)
-				if err != nil {
-					return false, err
-				}
-				req = &Request{ID: id, PrivateData: ev.privateData, ResponderResources: ev.responderResources, InitiatorDepth: ev.initiatorDepth}
-				return true, nil
-			case EventDeviceRemoval:
-				return false, ev.err("rdma_get_cm_event")
-			}
+	for {
+		uev, err := l.ch.GetEvent(ctx)
+		if err != nil {
+			return nil, waitError(ctx, op, err)
 		}
-	})
-	if err != nil {
-		if errors.Is(err, os.ErrClosed) {
-			return nil, &verbs.OpError{Op: "rdma_get_cm_event", Err: net.ErrClosed}
+		if !known(uev, l.uid, l.handle) {
+			continue
 		}
-		return nil, err
+		switch Event(uev.Type) {
+		case EventConnectRequest:
+			if req, err := l.request(uev); err != nil || req != nil {
+				return req, err
+			}
+		case EventDeviceRemoval:
+			ev := event{typ: EventDeviceRemoval, status: int(uev.Status)}
+			return nil, ev.err(op)
+		}
 	}
-	return req, nil
 }
 
-// migrate moves an incoming identifier from the listener's event channel to
-// one of its own.
-func migrate(lib *funcs, id *rdmaabi.RdmaCmId) (*ID, error) {
-	ch, errno := lib.createEventChannel.Ptr(0, 0, 0, 0, 0, 0)
-	if ch == 0 {
-		lib.destroyID.Int(caddr(id), 0, 0, 0, 0, 0)
-		return nil, opError("rdma_create_event_channel", errno)
+// request turns a CONNECT_REQUEST event into a Request whose ID is on an
+// event channel of its own, as ucma_process_conn_req and rdma_migrate_id do.
+// A request whose identifier the query of its addresses and device fails on
+// is destroyed and skipped, which a nil Request reports.
+func (l *Listener) request(uev ucma.Event) (*Request, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closed {
+		return nil, os.ErrClosed
 	}
-	if rc, errno := lib.migrateID.Int(caddr(id), ch, 0, 0, 0, 0); rc != 0 {
-		lib.destroyID.Int(caddr(id), 0, 0, 0, 0, 0)
-		lib.destroyEventChannel.Int(ch, 0, 0, 0, 0, 0)
-		return nil, opError("rdma_migrate_id", errno)
+	info, dev, err := describe(l.ch, uev.ID)
+	if err != nil {
+		l.ch.DestroyID(uev.ID)
+		return nil, nil
 	}
-	return newID(lib, id, dynlib.Pointer[rdmaabi.RdmaEventChannel](ch))
+	ch, err := ucma.Open()
+	if err != nil {
+		l.ch.DestroyID(uev.ID)
+		return nil, opError("rdma_create_event_channel", err)
+	}
+	if _, err := ch.MigrateID(l.ch, uev.ID); err != nil {
+		l.ch.DestroyID(uev.ID)
+		ch.Close()
+		return nil, opError("rdma_migrate_id", err)
+	}
+	conn := uev.Conn()
+	id := newID(ch, uev.ID, newUID())
+	id.setDevice(dev, info.PortNum)
+	id.local, id.remote = info.Src, info.Dst
+	id.initiatorDepth, id.responderResources = conn.InitiatorDepth, conn.ResponderResources
+	return &Request{ID: id, PrivateData: conn.PrivateData, ResponderResources: conn.ResponderResources, InitiatorDepth: conn.InitiatorDepth}, nil
+}
+
+// describe queries the addresses and the device of the identifier of a
+// request, as ucma_query_req_info does; one without a device is ENODEV.
+func describe(ch *ucma.Channel, handle uint32) (ucma.AddrInfo, *device, error) {
+	info, err := ch.QueryAddr(handle)
+	if err != nil {
+		return info, nil, err
+	}
+	if info.NodeGUID == 0 {
+		return info, nil, syscall.ENODEV
+	}
+	dev, err := lookupDevice(info.NodeGUID, info.DevIndex)
+	return info, dev, err
 }
 
 // Close stops listening and wakes a pending Accept with net.ErrClosed.
@@ -654,8 +717,7 @@ func (l *Listener) Close() error {
 		return nil
 	}
 	l.closed = true
-	l.w.close()
-	return destroyID(l.lib, l.id, l.ch)
+	return destroyID(l.ch, l.handle)
 }
 
 // Accept accepts the request with the queue pair created on its ID and waits
@@ -663,32 +725,51 @@ func (l *Listener) Close() error {
 // The private data goes to the peer's Connect.
 func (r *Request) Accept(ctx context.Context, param *ConnParam) error {
 	id := r.ID
-	_, err := id.establish(ctx, "rdma_accept", param, MaxAcceptPrivateData, func(cp *rdmaabi.RdmaConnParam) (int32, syscall.Errno) {
-		return id.lib.accept.Int(caddr(id.id), uintptr(unsafe.Pointer(cp)), 0, 0, 0, 0)
-	})
+	_, err := id.establish(ctx, "rdma_accept", param, MaxAcceptPrivateData, id.accept)
 	return err
+}
+
+// accept accepts the request as rdma_accept does: the depths of p are
+// checked and kept, the queue pair moves to RTR and RTS, and the ACCEPT
+// gives the identifier its uid; a failed ACCEPT moves the queue pair to ERR.
+// The caller holds mu.
+func (id *ID) accept(p ConnParam) error {
+	const op = "rdma_accept"
+	if err := checkDepths(p, id.dev.limits); err != nil {
+		return opError(op, err)
+	}
+	id.initiatorDepth, id.responderResources = acceptDepths(p, id.initiatorDepth, id.responderResources, id.dev.limits)
+	if err := id.modifyRTR(id.responderResources); err != nil {
+		return opError(op, err)
+	}
+	if err := id.modifyRTS(id.initiatorDepth); err != nil {
+		return opError(op, err)
+	}
+	cp := kernelConnParam(p, id.ownQP.Num(), id.initiatorDepth, id.responderResources)
+	if err := id.ch.Accept(id.handle, id.uid, &cp, ucma.ECE{}); err != nil {
+		id.moveTo(verbs.QPStateErr)
+		return opError(op, err)
+	}
+	return nil
 }
 
 // Reject rejects the request, handing privateData to the peer's Connect as a
 // *RejectedError, and closes the request's ID.
 func (r *Request) Reject(privateData []byte) error {
-	if err := checkPrivateData("rdma_reject", privateData, MaxRejectPrivateData); err != nil {
+	const op = "rdma_reject"
+	if err := checkPrivateData(op, privateData, MaxRejectPrivateData); err != nil {
 		return err
 	}
 	id := r.ID
 	id.mu.Lock()
 	if id.closed {
 		id.mu.Unlock()
-		return errClosed("rdma_reject")
+		return errClosed(op)
 	}
-	var data *byte
-	if len(privateData) > 0 {
-		data = &privateData[0]
-	}
-	rc, errno := id.lib.reject.Int(caddr(id.id), uintptr(unsafe.Pointer(data)), uintptr(len(privateData)), 0, 0, 0)
+	err := id.ch.Reject(id.handle, 0, privateData)
 	id.mu.Unlock()
-	if rc != 0 {
-		return opError("rdma_reject", errno)
+	if err != nil {
+		return opError(op, err)
 	}
 	return id.Close()
 }

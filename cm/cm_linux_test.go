@@ -168,6 +168,12 @@ func qpState(t *testing.T, qp *verbs.QP) verbs.QPState {
 	return attr.State
 }
 
+// isOpError reports whether err is a *verbs.OpError of op matching target.
+func isOpError(err error, op string, target error) bool {
+	var opErr *verbs.OpError
+	return errors.As(err, &opErr) && opErr.Op == op && errors.Is(err, target)
+}
+
 func TestListenPortZero(t *testing.T) {
 	rdmatest.Device(t)
 	forEachImpl(t, func(t *testing.T, im impl) {
@@ -281,6 +287,103 @@ func TestRejectReturnsRejectedError(t *testing.T) {
 	})
 }
 
+// TestFailedConnectResponse parks the client's queue pair where the connect
+// response cannot take it to RTS, in ERR or already in RTR.
+func TestFailedConnectResponse(t *testing.T) {
+	rdmatest.Device(t)
+	forEachImpl(t, func(t *testing.T, im impl) {
+		t.Run("ERR", func(t *testing.T) {
+			respondToParked(t, im, &verbs.QPAttr{State: verbs.QPStateErr}, verbs.QPAttrState)
+		})
+		t.Run("RTR", func(t *testing.T) {
+			// RTR needs a peer: that of an established connection.
+			_, established, _ := pair(t, im, im)
+			const rtr = verbs.QPAttrAV | verbs.QPAttrPathMTU | verbs.QPAttrDestQPN | verbs.QPAttrRQPSN | verbs.QPAttrMaxDestRDAtomic | verbs.QPAttrMinRNRTimer
+			attr, err := established.QP().Query(rtr)
+			if err != nil {
+				t.Fatalf("QP.Query() error: %v", err)
+			}
+			attr.State = verbs.QPStateRTR
+			respondToParked(t, im, attr, verbs.QPAttrState|rtr)
+		})
+	})
+}
+
+// respondToParked moves the queue pair of a client of im with attr and mask
+// and connects it to a listener of im: Connect fails with ETIMEDOUT and
+// leaves the queue pair in ERR, no event follows, and closing the client
+// rejects the connection the server accepted, whose queue pair ends in ERR.
+func respondToParked(t *testing.T, im impl, attr *verbs.QPAttr, mask verbs.QPAttrMask) {
+	t.Helper()
+	dev, ln := listen(t, im)
+	client := resolve(t, im, dev, ln.Addr())
+	if err := client.QP().Modify(attr, mask); err != nil {
+		t.Fatalf("QP.Modify(%v) error: %v", attr.State, err)
+	}
+	res := connectAsync(client, []byte("ping"))
+	req := acceptRequest(t, ln)
+	createQP(t, req.ID)
+	accepted := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		accepted <- req.Accept(ctx, nil)
+	}()
+	r := <-res
+	if !isOpError(r.err, "rdma_connect", syscall.ETIMEDOUT) {
+		t.Errorf("Connect() = %v, %v; want a *verbs.OpError of rdma_connect with ETIMEDOUT", r.info, r.err)
+	}
+	if s := qpState(t, client.QP()); s != verbs.QPStateErr {
+		t.Errorf("client QP state after the failed Connect() = %v, want %v", s, verbs.QPStateErr)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	if ev, err := client.Wait(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("Wait() after the failed Connect() = %v, %v; want context.DeadlineExceeded", ev, err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatalf("Close() error: %v", err)
+	}
+	err := <-accepted
+	var rej *cm.RejectedError
+	if !errors.As(err, &rej) || rej.Reason != 28 {
+		t.Errorf("Request.Accept() error = %v, want a *RejectedError with reason 28", err)
+	}
+	if s := qpState(t, req.ID.QP()); s != verbs.QPStateErr {
+		t.Errorf("server QP state after the reject = %v, want %v", s, verbs.QPStateErr)
+	}
+}
+
+// TestAcceptAfterClientClose accepts a request whose client closed while it
+// was pending: Accept fails with EINVAL and leaves the queue pair in INIT.
+func TestAcceptAfterClientClose(t *testing.T) {
+	rdmatest.Device(t)
+	forEachImpl(t, func(t *testing.T, im impl) {
+		dev, ln := listen(t, im)
+		client := resolve(t, im, dev, ln.Addr())
+		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+		defer cancel()
+		if _, err := client.Connect(ctx, nil); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("pending Connect() error = %v, want context.DeadlineExceeded", err)
+		}
+		req := acceptRequest(t, ln)
+		createQP(t, req.ID)
+		if err := client.Close(); err != nil {
+			t.Fatalf("Close() error: %v", err)
+		}
+		// Give the client's reject time to reach the server.
+		time.Sleep(500 * time.Millisecond)
+		actx, acancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer acancel()
+		if err := req.Accept(actx, nil); !isOpError(err, "rdma_accept", syscall.EINVAL) {
+			t.Errorf("Request.Accept() error = %v, want a *verbs.OpError of rdma_accept with EINVAL", err)
+		}
+		if s := qpState(t, req.ID.QP()); s != verbs.QPStateInit {
+			t.Errorf("server QP state after the failed Accept() = %v, want %v", s, verbs.QPStateInit)
+		}
+	})
+}
+
 func TestDisconnectWakesPeerWait(t *testing.T) {
 	rdmatest.Device(t)
 	forEachPair(t, func(t *testing.T, active, passive impl) {
@@ -307,6 +410,24 @@ func TestDisconnectWakesPeerWait(t *testing.T) {
 		}
 		if s := qpState(t, client.QP()); s != verbs.QPStateErr {
 			t.Errorf("client QP state after Disconnect() = %v, want %v", s, verbs.QPStateErr)
+		}
+	})
+}
+
+// TestDisconnectBeforeConnect disconnects an ID that never connected: EINVAL,
+// with the queue pair already moved to ERR.
+func TestDisconnectBeforeConnect(t *testing.T) {
+	rdmatest.Device(t)
+	forEachImpl(t, func(t *testing.T, im impl) {
+		dev, ln := listen(t, im)
+		client := resolve(t, im, dev, ln.Addr())
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		if err := client.Disconnect(ctx); !isOpError(err, "rdma_disconnect", syscall.EINVAL) {
+			t.Errorf("Disconnect() before Connect() error = %v, want a *verbs.OpError of rdma_disconnect with EINVAL", err)
+		}
+		if s := qpState(t, client.QP()); s != verbs.QPStateErr {
+			t.Errorf("QP state after Disconnect() = %v, want %v", s, verbs.QPStateErr)
 		}
 	})
 }
@@ -387,6 +508,32 @@ func TestConnectCancelThenClose(t *testing.T) {
 	})
 }
 
+func TestCloseUnblocksConnect(t *testing.T) {
+	rdmatest.Device(t)
+	forEachImpl(t, func(t *testing.T, im impl) {
+		// The listener never accepts, so Connect waits.
+		dev, ln := listen(t, im)
+		client := resolve(t, im, dev, ln.Addr())
+		errc := make(chan error, 1)
+		go func() {
+			_, err := client.Connect(context.Background(), nil)
+			errc <- err
+		}()
+		time.Sleep(200 * time.Millisecond)
+		if err := client.Close(); err != nil {
+			t.Fatalf("Close() error: %v", err)
+		}
+		select {
+		case err := <-errc:
+			if !isOpError(err, "rdma_connect", os.ErrClosed) {
+				t.Errorf("Connect() error after Close() = %v, want a *verbs.OpError of rdma_connect with os.ErrClosed", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("Connect() did not return after Close()")
+		}
+	})
+}
+
 func TestListenerCloseUnblocksAccept(t *testing.T) {
 	rdmatest.Device(t)
 	forEachImpl(t, func(t *testing.T, im impl) {
@@ -407,6 +554,30 @@ func TestListenerCloseUnblocksAccept(t *testing.T) {
 			}
 		case <-time.After(5 * time.Second):
 			t.Fatal("Accept() did not return after Close()")
+		}
+	})
+}
+
+func TestCloseUnblocksWait(t *testing.T) {
+	rdmatest.Device(t)
+	forEachImpl(t, func(t *testing.T, im impl) {
+		_, client, _ := pair(t, im, im)
+		errc := make(chan error, 1)
+		go func() {
+			_, err := client.Wait(context.Background())
+			errc <- err
+		}()
+		time.Sleep(100 * time.Millisecond)
+		if err := client.Close(); err != nil {
+			t.Fatalf("Close() error: %v", err)
+		}
+		select {
+		case err := <-errc:
+			if !isOpError(err, "rdma_get_cm_event", os.ErrClosed) {
+				t.Errorf("Wait() error after Close() = %v, want a *verbs.OpError of rdma_get_cm_event with os.ErrClosed", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("Wait() did not return after Close()")
 		}
 	})
 }

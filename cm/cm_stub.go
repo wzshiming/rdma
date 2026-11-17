@@ -12,7 +12,8 @@ import (
 
 func unsupported(op string) error { return &verbs.OpError{Op: op, Err: errors.ErrUnsupported} }
 
-// ID is a communication identifier; librdmacm is unavailable on this platform.
+// ID is a communication identifier; the platform has no RDMA connection
+// manager.
 type ID struct{}
 
 // Resolve resolves the address and route to remote.
@@ -60,8 +61,8 @@ func (id *ID) Wait(ctx context.Context) (Event, error) { return 0, unsupported("
 // Close destroys the queue pair and the identifier.
 func (id *ID) Close() error { return nil }
 
-// Listener accepts connection requests; librdmacm is unavailable on this
-// platform.
+// Listener accepts connection requests; the platform has no RDMA connection
+// manager.
 type Listener struct{}
 
 // Listen listens for connection requests on local.
