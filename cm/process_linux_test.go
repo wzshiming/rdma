@@ -35,12 +35,16 @@ func runInChild(t *testing.T, name string, env ...string) {
 }
 
 // unloadable returns a library path whose dynamic loader finds an empty file
-// named soname first, which fails to load as a missing library would.
+// named soname first, which fails to load as a missing library would, and
+// then searches the directories of this process's LD_LIBRARY_PATH.
 func unloadable(t *testing.T, soname string) string {
 	t.Helper()
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, soname), nil, 0o644); err != nil {
 		t.Fatal(err)
+	}
+	if p := os.Getenv("LD_LIBRARY_PATH"); p != "" {
+		dir += ":" + p
 	}
 	return "LD_LIBRARY_PATH=" + dir
 }
@@ -102,5 +106,28 @@ func TestUnloadableLibibverbsIsUnsupported(t *testing.T) {
 			t.Errorf("%s() error = %v, want the text to name libibverbs.so.1", tt.name, err)
 		}
 		t.Logf("%s() without libibverbs: %v", tt.name, err)
+	}
+}
+
+// TestUnloadableKeepsTheInheritedPath checks that the child still searches
+// the inherited LD_LIBRARY_PATH, where a local build of rdma-core may hold
+// the host's only libibverbs.
+func TestUnloadableKeepsTheInheritedPath(t *testing.T) {
+	t.Setenv("LD_LIBRARY_PATH", "/opt/rdma-core/lib")
+	env := unloadable(t, "librdmacm.so.1")
+	dir, inherited, _ := strings.Cut(strings.TrimPrefix(env, "LD_LIBRARY_PATH="), ":")
+	if _, err := os.Stat(filepath.Join(dir, "librdmacm.so.1")); err != nil || inherited != "/opt/rdma-core/lib" {
+		t.Errorf("unloadable() = %q, want LD_LIBRARY_PATH=<the directory of librdmacm.so.1>:/opt/rdma-core/lib", env)
+	}
+}
+
+// TestUnloadableAddsNoEmptyEntry checks that the child gets no empty entry,
+// which the dynamic loader reads as the working directory.
+func TestUnloadableAddsNoEmptyEntry(t *testing.T) {
+	t.Setenv("LD_LIBRARY_PATH", "")
+	env := unloadable(t, "librdmacm.so.1")
+	dir := strings.TrimPrefix(env, "LD_LIBRARY_PATH=")
+	if _, err := os.Stat(filepath.Join(dir, "librdmacm.so.1")); err != nil {
+		t.Errorf("unloadable() = %q, want LD_LIBRARY_PATH=<the directory of librdmacm.so.1>", env)
 	}
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -82,6 +83,24 @@ func TestBWUsage(t *testing.T) {
 				t.Errorf("stderr = %q, want it to contain %q", stderr, tt.stderr)
 			}
 		})
+	}
+}
+
+// instantConn takes writes and confirms at once, so no drain masks a short run.
+type instantConn struct{}
+
+func (instantConn) Read([]byte) (int, error)    { return 0, io.EOF }
+func (instantConn) Write(p []byte) (int, error) { return len(p), nil }
+func (instantConn) CloseWrite() error           { return nil }
+
+func TestStreamDurationIsAtLeastTheRequestedTime(t *testing.T) {
+	const d = 10 * time.Millisecond
+	got, err := stream(instantConn{}, 64<<10, d)
+	if err != nil {
+		t.Fatalf("stream() error: %v", err)
+	}
+	if got.Duration < d {
+		t.Errorf("stream() duration = %v, want at least the %v it was asked to send for", got.Duration, d)
 	}
 }
 
