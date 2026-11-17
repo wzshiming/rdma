@@ -301,3 +301,106 @@ jobs:
         name: benchmark-comparison
         path: ${{ runner.temp }}/benchmarks
         if-no-files-found: error
+
+  # Package cm on soft-iWARP, where the kernel's iw_cm connects queue pairs
+  # over TCP and cma.c takes its iWARP branches. A job of its own: the
+  # integration job is near its time limit. The rdma-core build is the
+  # integration job's, under the same cache key.
+  siw:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      SIW_NETDEV: siw-dummy0
+      SIW_IP: 10.201.0.1
+      RDMA_CORE_VERSION: "66.0"
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Set up Go
+      uses: actions/setup-go@v7
+      with:
+        go-version: stable
+
+    - name: Install Ubuntu's rdma-core
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y rdma-core ibverbs-utils rdmacm-utils ibverbs-providers iproute2
+        sudo apt-get install -y "linux-modules-extra-$(uname -r)" || true
+
+    - name: Identify the runner image
+      id: image
+      run: echo "id=$ImageOS-$ImageVersion" | tee -a "$GITHUB_OUTPUT"
+
+    - name: Restore the rdma-core build
+      id: rdma-core-cache
+      uses: actions/cache/restore@v6
+      with:
+        path: ~/rdma-core-install
+        key: rdma-core-${{ env.RDMA_CORE_VERSION }}-${{ steps.image.outputs.id }}
+
+    - name: Build rdma-core
+      if: steps.rdma-core-cache.outputs.cache-hit != 'true'
+      run: |
+        sudo apt-get install -y build-essential cmake ninja-build pkg-config libnl-3-dev libnl-route-3-dev libudev-dev python3
+        curl -fsSL -o /tmp/rdma-core.tar.gz "https://github.com/linux-rdma/rdma-core/releases/download/v$RDMA_CORE_VERSION/rdma-core-$RDMA_CORE_VERSION.tar.gz"
+        tar -C /tmp -xzf /tmp/rdma-core.tar.gz
+        grep -q "^set(PACKAGE_VERSION \"$RDMA_CORE_VERSION\")" "/tmp/rdma-core-$RDMA_CORE_VERSION/CMakeLists.txt"
+        cmake -S "/tmp/rdma-core-$RDMA_CORE_VERSION" -B /tmp/rdma-core-build -GNinja \
+          -DCMAKE_BUILD_TYPE=Release -DNO_PYVERBS=1 -DNO_MAN_PAGES=1 \
+          -DCMAKE_INSTALL_PREFIX=/usr/local \
+          -DCMAKE_INSTALL_LIBDIR="lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH)"
+        ninja -C /tmp/rdma-core-build
+        DESTDIR="$HOME/rdma-core-install" ninja -C /tmp/rdma-core-build install
+
+    - name: Save the rdma-core build
+      if: steps.rdma-core-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v6
+      with:
+        path: ~/rdma-core-install
+        key: ${{ steps.rdma-core-cache.outputs.cache-primary-key }}
+
+    - name: Install the rdma-core build
+      run: |
+        sudo cp -a --no-preserve=ownership "$HOME/rdma-core-install/." /
+        sudo ldconfig
+        ldconfig -p | grep -E 'lib(ibverbs|rdmacm)\.so\.1 '
+
+    - name: Add siw0
+      id: add-siw0
+      run: |
+        sudo modprobe siw
+        sudo modprobe rdma_ucm || true
+        sudo ip link add "$SIW_NETDEV" type dummy
+        sudo ip addr add "$SIW_IP/24" dev "$SIW_NETDEV"
+        sudo ip link set "$SIW_NETDEV" up
+        sudo rdma link add siw0 type siw netdev "$SIW_NETDEV"
+        rdma link
+        ibv_devinfo -d siw0
+
+    # The integration job's two rounds, on package cm alone (the root package
+    # refuses iWARP devices); the second runs even when the first fails.
+    - name: Test cm on siw0
+      env:
+        RDMA_TEST_DEVICE: siw0
+        RDMA_TEST_REQUIRE: 1
+      run: |
+        sudo prlimit --pid $$ --memlock=unlimited:unlimited
+        go test -race -count=1 -v ./cm
+
+    - name: Test cm on siw0 without cgo
+      if: ${{ !cancelled() && steps.add-siw0.outcome == 'success' }}
+      env:
+        RDMA_TEST_DEVICE: siw0
+        RDMA_TEST_REQUIRE: 1
+        CGO_ENABLED: 0
+        GODEBUG: clobberfree=1
+      run: |
+        sudo prlimit --pid $$ --memlock=unlimited:unlimited
+        go test -count=1 -v ./cm
+
+    - name: Show siw0 and the kernel's messages
+      if: failure()
+      run: |
+        ls /sys/class/infiniband/siw0 /sys/class/infiniband/siw0/ports/1 || true
+        grep -H . /sys/class/infiniband/siw0/ports/1/gid_attrs/ndevs/* || true
+        sudo dmesg | grep -i -E 'siw|iw_cm|rdma|hung|blocked' | grep -v 'speed is unknown' | tail -n 60 || true

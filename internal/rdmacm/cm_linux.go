@@ -186,7 +186,9 @@ func eventFromC(cev *rdmaabi.RdmaCmEvent) *cmEvent {
 func (ev *cmEvent) err(op string) error {
 	switch ev.typ {
 	case EventRejected:
-		if ev.status == ibCMRejConsumerDefined {
+		// iWARP reports a REJECTED event with a negative errno and no reason;
+		// only the private data of an MPA reject tells it from a refusal.
+		if ev.status == ibCMRejConsumerDefined || ev.status < 0 && len(ev.privateData) > 0 {
 			return &RejectedError{PrivateData: ev.privateData, Reason: ev.status}
 		}
 		return &verbs.OpError{Op: op, Err: syscall.ECONNREFUSED}

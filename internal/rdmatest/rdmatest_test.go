@@ -62,6 +62,12 @@ func TestDeviceFromSysfs(t *testing.T) {
 			want:  Dev{Name: "siw0", Port: 1, Netdev: "eth0", IP: ip, GIDIndex: -1},
 		},
 		{
+			name:  "siw behind an alphabetically earlier hardware device",
+			root:  "testdata/iwarp",
+			addrs: map[string][]netip.Addr{"eth0": {ip}, "eth1": {netip.MustParseAddr("10.0.1.1")}},
+			want:  Dev{Name: "irdma0", Port: 1, Netdev: "eth1", IP: netip.MustParseAddr("10.0.1.1"), GIDIndex: -1},
+		},
+		{
 			name:  "hardware RoCE device",
 			root:  "testdata/hca",
 			addrs: map[string][]netip.Addr{"ens1f0np0": {ip}},

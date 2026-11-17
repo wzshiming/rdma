@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/wzshiming/rdma/cm"
-	"github.com/wzshiming/rdma/internal/rdmatest"
 )
 
 // TestDepthsSameAsReference compares the implementation under test with the
@@ -15,7 +14,7 @@ import (
 // the 0xFF that stands for the limits on both ends, and a connect whose
 // initiator depth exceeds the limit.
 func TestDepthsSameAsReference(t *testing.T) {
-	dev := rdmatest.Device(t)
+	dev := testDevice(t)
 	t.Run("the limits", func(t *testing.T) {
 		limits := &cm.ConnParam{ResponderResources: 0xFF, InitiatorDepth: 0xFF}
 		compare(t, dev, func(t *testing.T, im impl, at endpoints) connection {

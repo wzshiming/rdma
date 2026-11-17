@@ -210,7 +210,9 @@ type event struct {
 func (ev *event) err(op string) error {
 	switch ev.typ {
 	case EventRejected:
-		if ev.status == ibCMRejConsumerDefined {
+		// iWARP reports a REJECTED event with a negative errno and no reason;
+		// only the private data of an MPA reject tells it from a refusal.
+		if ev.status == ibCMRejConsumerDefined || ev.status < 0 && len(ev.conn.PrivateData) > 0 {
 			return &RejectedError{PrivateData: ev.conn.PrivateData, Reason: ev.status}
 		}
 		return &verbs.OpError{Op: op, Err: syscall.ECONNREFUSED}

@@ -67,7 +67,9 @@ func openDevice(t *testing.T, name string) *verbs.Context {
 
 // TestCreateQPTakesTheDefaultPD creates the queue pairs of two IDs on one
 // device without a protection domain: both take the device's default one,
-// and both are in INIT on the ID's port, as the kernel's attributes have it.
+// and both are in INIT on the ID's port, as the kernel's attributes have it;
+// siw's query fills in no port, which those attributes set on iWARP too, so
+// on iWARP the state alone is checked.
 func TestCreateQPTakesTheDefaultPD(t *testing.T) {
 	rdmatest.Device(t)
 	forEachImpl(t, func(t *testing.T, im impl) {
@@ -83,7 +85,7 @@ func TestCreateQPTakesTheDefaultPD(t *testing.T) {
 			if err != nil {
 				t.Fatalf("QP.Query() error: %v", err)
 			}
-			if a.State != verbs.QPStateInit || a.Port != id.Port() {
+			if a.State != verbs.QPStateInit || !onIWARP(id) && a.Port != id.Port() {
 				t.Errorf("queue pair in %v on port %d, want %v on port %d", a.State, a.Port, verbs.QPStateInit, id.Port())
 			}
 			pds[i] = (*rdmaabi.IbvQp)(qp.Pointer()).Pd

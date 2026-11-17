@@ -24,10 +24,19 @@ import (
 
 const timeout = 10 * time.Second
 
+// testDevice returns the rdmatest device and logs it, so that the log of a
+// scenario names the device it ran on.
+func testDevice(t *testing.T) rdmatest.Dev {
+	t.Helper()
+	dev := rdmatest.Device(t)
+	t.Logf("on %s port %d, %v", dev.Name, dev.Port, dev.IP)
+	return dev
+}
+
 // listen starts a Listener of im on port 0 of the rdmatest device's IP.
 func listen(t *testing.T, im impl) (rdmatest.Dev, listener) {
 	t.Helper()
-	dev := rdmatest.Device(t)
+	dev := testDevice(t)
 	return dev, listenOn(t, im, netip.AddrPortFrom(dev.IP, 0))
 }
 
@@ -174,6 +183,31 @@ func isOpError(err error, op string, target error) bool {
 	return errors.As(err, &opErr) && opErr.Op == op && errors.Is(err, target)
 }
 
+// onIWARP reports whether id's device is of the iWARP transport, where the
+// kernel's iw_cm connects the queue pairs over TCP and cma.c takes its iWARP
+// branches.
+func onIWARP(id conn) bool { return id.Device().TransportType() == verbs.TransportIWARP }
+
+// disconnectedState is the state Disconnect leaves a connected queue pair in,
+// that of cma.c's ucma_shutdown: SQD on iWARP, ERR on InfiniBand and RoCE.
+func disconnectedState(id conn) verbs.QPState {
+	if onIWARP(id) {
+		return verbs.QPStateSQD
+	}
+	return verbs.QPStateErr
+}
+
+// receivedLen is the length in which the peer of id receives n bytes of
+// private data sent in an IB CM field of size field: the whole field, zero
+// padded, on InfiniBand and RoCE, the n bytes alone on iWARP, whose MPA
+// frames carry the length of their private data.
+func receivedLen(id conn, n, field int) int {
+	if onIWARP(id) {
+		return n
+	}
+	return field
+}
+
 func TestListenPortZero(t *testing.T) {
 	rdmatest.Device(t)
 	forEachImpl(t, func(t *testing.T, im impl) {
@@ -205,8 +239,8 @@ func TestConnectAcceptExchangesPrivateData(t *testing.T) {
 
 		res := connectAsync(client, []byte("client hello"))
 		req := acceptRequest(t, ln)
-		if !bytes.HasPrefix(req.PrivateData, []byte("client hello")) || len(req.PrivateData) != cm.MaxConnectPrivateData {
-			t.Errorf("Request.PrivateData = %q (%d bytes), want %q padded to %d", req.PrivateData, len(req.PrivateData), "client hello", cm.MaxConnectPrivateData)
+		if n := receivedLen(client, len("client hello"), cm.MaxConnectPrivateData); !bytes.HasPrefix(req.PrivateData, []byte("client hello")) || len(req.PrivateData) != n {
+			t.Errorf("Request.PrivateData = %q (%d bytes), want %q in %d bytes", req.PrivateData, len(req.PrivateData), "client hello", n)
 		}
 		if req.ResponderResources != 1 || req.InitiatorDepth != 1 {
 			t.Errorf("Request parameters = %d/%d, want the defaults 1/1", req.ResponderResources, req.InitiatorDepth)
@@ -224,14 +258,16 @@ func TestConnectAcceptExchangesPrivateData(t *testing.T) {
 		if r.err != nil {
 			t.Fatalf("Connect() error: %v", r.err)
 		}
-		if !bytes.HasPrefix(r.info.PrivateData, []byte("server welcome")) || len(r.info.PrivateData) != cm.MaxAcceptPrivateData {
-			t.Errorf("ConnInfo.PrivateData = %q (%d bytes), want %q padded to %d", r.info.PrivateData, len(r.info.PrivateData), "server welcome", cm.MaxAcceptPrivateData)
+		if n := receivedLen(req.ID, len("server welcome"), cm.MaxAcceptPrivateData); !bytes.HasPrefix(r.info.PrivateData, []byte("server welcome")) || len(r.info.PrivateData) != n {
+			t.Errorf("ConnInfo.PrivateData = %q (%d bytes), want %q in %d bytes", r.info.PrivateData, len(r.info.PrivateData), "server welcome", n)
 		}
 		if r.info.ResponderResources != 1 || r.info.InitiatorDepth != 1 {
 			t.Errorf("ConnInfo parameters = %d/%d, want the defaults 1/1", r.info.ResponderResources, r.info.InitiatorDepth)
 		}
 
-		// Both queue pairs are ready to send and point at each other.
+		// Both queue pairs are ready to send and point at each other; siw's
+		// query fills in no destination queue pair, so on iWARP the states
+		// alone are checked.
 		a, err := client.QP().Query(verbs.QPAttrState | verbs.QPAttrDestQPN)
 		if err != nil {
 			t.Fatalf("client QP.Query() error: %v", err)
@@ -240,7 +276,7 @@ func TestConnectAcceptExchangesPrivateData(t *testing.T) {
 		if err != nil {
 			t.Fatalf("server QP.Query() error: %v", err)
 		}
-		if a.State != verbs.QPStateRTS || b.State != verbs.QPStateRTS || a.DestQPNum != req.ID.QP().Num() || b.DestQPNum != client.QP().Num() {
+		if a.State != verbs.QPStateRTS || b.State != verbs.QPStateRTS || !onIWARP(client) && (a.DestQPNum != req.ID.QP().Num() || b.DestQPNum != client.QP().Num()) {
 			t.Errorf("queue pairs: client %v -> %d, server %v -> %d; want RTS -> %d and RTS -> %d", a.State, a.DestQPNum, b.State, b.DestQPNum, req.ID.QP().Num(), client.QP().Num())
 		}
 
@@ -274,8 +310,15 @@ func TestRejectReturnsRejectedError(t *testing.T) {
 		if !errors.As(r.err, &rej) {
 			t.Fatalf("Connect() = %v, %v; want a *RejectedError", r.info, r.err)
 		}
-		if !bytes.HasPrefix(rej.PrivateData, []byte("no way")) || rej.Reason != 28 {
-			t.Errorf("RejectedError = {%q, %d}, want data %q and reason 28", rej.PrivateData, rej.Reason, "no way")
+		wantReason, reasonOK := "28", rej.Reason == 28
+		if onIWARP(client) {
+			// An MPA reject has no reason: the kernel's rdma_cm reports it in a
+			// REJECTED event whose status is one of these negative errno values.
+			wantReason, reasonOK = "-ECONNRESET or -ECONNREFUSED", rej.Reason == -int(syscall.ECONNRESET) || rej.Reason == -int(syscall.ECONNREFUSED)
+		}
+		n := receivedLen(client, len("no way"), cm.MaxRejectPrivateData)
+		if !bytes.HasPrefix(rej.PrivateData, []byte("no way")) || len(rej.PrivateData) != n || !reasonOK {
+			t.Errorf("RejectedError = {%q (%d bytes), %d}, want data %q in %d bytes and reason %s", rej.PrivateData, len(rej.PrivateData), rej.Reason, "no way", n, wantReason)
 		}
 		if !errors.Is(r.err, syscall.ECONNREFUSED) {
 			t.Errorf("errors.Is(err, ECONNREFUSED) = false, want true")
@@ -290,7 +333,10 @@ func TestRejectReturnsRejectedError(t *testing.T) {
 // TestFailedConnectResponse parks the client's queue pair where the connect
 // response cannot take it to RTS, in ERR or already in RTR.
 func TestFailedConnectResponse(t *testing.T) {
-	rdmatest.Device(t)
+	dev := rdmatest.Device(t)
+	if openDevice(t, dev.Name).TransportType() == verbs.TransportIWARP {
+		t.Skip("iWARP has no connect response: the kernel's iw_cm takes the queue pair to RTS and reports ESTABLISHED")
+	}
 	forEachImpl(t, func(t *testing.T, im impl) {
 		t.Run("ERR", func(t *testing.T) {
 			respondToParked(t, im, &verbs.QPAttr{State: verbs.QPStateErr}, verbs.QPAttrState)
@@ -355,7 +401,10 @@ func respondToParked(t *testing.T, im impl, attr *verbs.QPAttr, mask verbs.QPAtt
 }
 
 // TestAcceptAfterClientClose accepts a request whose client closed while it
-// was pending: Accept fails with EINVAL and leaves the queue pair in INIT.
+// was pending: Accept fails with EINVAL and leaves the queue pair in INIT. On
+// iWARP the kernel takes the ACCEPT and fails it with ECONNRESET, the
+// client's TCP connection being gone, and rdma_accept moves the queue pair to
+// ERR as after any failed ACCEPT.
 func TestAcceptAfterClientClose(t *testing.T) {
 	rdmatest.Device(t)
 	forEachImpl(t, func(t *testing.T, im impl) {
@@ -375,11 +424,15 @@ func TestAcceptAfterClientClose(t *testing.T) {
 		time.Sleep(500 * time.Millisecond)
 		actx, acancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer acancel()
-		if err := req.Accept(actx, nil); !isOpError(err, "rdma_accept", syscall.EINVAL) {
-			t.Errorf("Request.Accept() error = %v, want a *verbs.OpError of rdma_accept with EINVAL", err)
+		wantErr, wantState := syscall.EINVAL, verbs.QPStateInit
+		if onIWARP(req.ID) {
+			wantErr, wantState = syscall.ECONNRESET, verbs.QPStateErr
 		}
-		if s := qpState(t, req.ID.QP()); s != verbs.QPStateInit {
-			t.Errorf("server QP state after the failed Accept() = %v, want %v", s, verbs.QPStateInit)
+		if err := req.Accept(actx, nil); !isOpError(err, "rdma_accept", wantErr) {
+			t.Errorf("Request.Accept() error = %v, want a *verbs.OpError of rdma_accept with %v", err, wantErr)
+		}
+		if s := qpState(t, req.ID.QP()); s != wantState {
+			t.Errorf("server QP state after the failed Accept() = %v, want %v", s, wantState)
 		}
 	})
 }
@@ -408,14 +461,15 @@ func TestDisconnectWakesPeerWait(t *testing.T) {
 		if err := <-errc; err != nil {
 			t.Errorf("client Disconnect() error: %v", err)
 		}
-		if s := qpState(t, client.QP()); s != verbs.QPStateErr {
-			t.Errorf("client QP state after Disconnect() = %v, want %v", s, verbs.QPStateErr)
+		if s, want := qpState(t, client.QP()), disconnectedState(client); s != want {
+			t.Errorf("client QP state after Disconnect() = %v, want %v", s, want)
 		}
 	})
 }
 
 // TestDisconnectBeforeConnect disconnects an ID that never connected: EINVAL,
-// with the queue pair already moved to ERR.
+// with the queue pair already moved to ERR. On iWARP cma.c asks for SQD
+// instead, which is no transition from INIT, and the queue pair stays there.
 func TestDisconnectBeforeConnect(t *testing.T) {
 	rdmatest.Device(t)
 	forEachImpl(t, func(t *testing.T, im impl) {
@@ -426,8 +480,12 @@ func TestDisconnectBeforeConnect(t *testing.T) {
 		if err := client.Disconnect(ctx); !isOpError(err, "rdma_disconnect", syscall.EINVAL) {
 			t.Errorf("Disconnect() before Connect() error = %v, want a *verbs.OpError of rdma_disconnect with EINVAL", err)
 		}
-		if s := qpState(t, client.QP()); s != verbs.QPStateErr {
-			t.Errorf("QP state after Disconnect() = %v, want %v", s, verbs.QPStateErr)
+		want := verbs.QPStateErr
+		if onIWARP(client) {
+			want = verbs.QPStateInit
+		}
+		if s := qpState(t, client.QP()); s != want {
+			t.Errorf("QP state after Disconnect() = %v, want %v", s, want)
 		}
 	})
 }
@@ -498,11 +556,19 @@ func TestConnectCancelThenClose(t *testing.T) {
 		if elapsed := time.Since(start); elapsed > 2*time.Second {
 			t.Errorf("pending Connect() returned after %v, want about 300ms", elapsed)
 		}
+		// On iWARP the kernel tears a connecting identifier down only once the
+		// connect ends, which siw's MPA reply timeout of 10s bounds: Close waits.
+		iwarp := onIWARP(client)
 		start = time.Now()
 		if err := client.Close(); err != nil {
 			t.Fatalf("Close() error: %v", err)
 		}
-		if elapsed := time.Since(start); elapsed > time.Second {
+		switch elapsed := time.Since(start); {
+		case iwarp && elapsed > 15*time.Second:
+			t.Errorf("Close() took %v after the cancelled Connect, want at most 15s on iWARP", elapsed)
+		case iwarp:
+			t.Logf("Close() took %v after the cancelled Connect", elapsed)
+		case elapsed > time.Second:
 			t.Errorf("Close() took %v after the cancelled Connect, want immediate", elapsed)
 		}
 	})
@@ -602,7 +668,7 @@ func threadCount(t *testing.T) int {
 }
 
 func TestAcceptDoesNotHoldThreads(t *testing.T) {
-	dev := rdmatest.Device(t)
+	dev := testDevice(t)
 	forEachImpl(t, func(t *testing.T, im impl) {
 		const waiters = 100
 		lns := make([]listener, waiters)

@@ -194,6 +194,9 @@ func TestEventErr(t *testing.T) {
 	}{
 		{"rejected by Request.Reject", event{typ: EventRejected, status: ibCMRejConsumerDefined, conn: ucma.ConnParam{PrivateData: []byte("no")}}, &RejectedError{PrivateData: []byte("no"), Reason: 28}},
 		{"rejected by the CM", event{typ: EventRejected, status: 8}, syscall.ECONNREFUSED},
+		{"rejected on iWARP", event{typ: EventRejected, status: -int(syscall.ECONNRESET), conn: ucma.ConnParam{PrivateData: []byte("no way")}}, &RejectedError{PrivateData: []byte("no way"), Reason: -int(syscall.ECONNRESET)}},
+		{"rejected on iWARP without private data", event{typ: EventRejected, status: -int(syscall.ECONNRESET)}, syscall.ECONNREFUSED},
+		{"refused on iWARP", event{typ: EventRejected, status: -int(syscall.ECONNREFUSED)}, syscall.ECONNREFUSED},
 		{"address error from the kernel", event{typ: EventAddrError, status: -int(syscall.EADDRNOTAVAIL)}, syscall.EADDRNOTAVAIL},
 		{"address error of the connection manager", event{typ: EventAddrError, status: -1}, syscall.EHOSTUNREACH},
 		{"route error without a status", event{typ: EventRouteError}, syscall.EHOSTUNREACH},

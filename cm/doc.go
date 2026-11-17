@@ -24,7 +24,8 @@
 //
 // Each ID owns an event channel, a descriptor of the kernel's device that
 // waits on the Go runtime poller: no OS thread blocks, cancellation comes from
-// the context, and Close never blocks.
+// the context, and Close never blocks, save on iWARP, where it waits in the
+// kernel for a Connect under way to end.
 //
 // The IB CM carries private data in fixed-size fields: MaxConnectPrivateData
 // bytes in a request, MaxAcceptPrivateData in a reply, MaxRejectPrivateData in
@@ -62,6 +63,18 @@
 // its event channel, where librdmacm keeps it until the process exits; Close
 // stays required: the collector picks the moment, and only Close destroys
 // the queue pair.
+//
+// On iWARP, whose connection manager in the kernel connects queue pairs over
+// TCP, the package takes librdmacm's iWARP paths, which CI verifies on
+// soft-iWARP (siw) with the device tests it runs on Soft-RoCE: the kernel,
+// not the package, takes a queue pair to RTS, and Disconnect moves it to SQD
+// where it moves it to ERR elsewhere. MPA carries private data with its
+// length, so the peer receives what was sent, unpadded; an MPA reject carries
+// no reason, so the Reason of a *RejectedError is the kernel's negative errno,
+// and a reject without private data fails Connect as a refused connection
+// does; and Close of an ID whose Connect is under way waits until the kernel
+// ends the attempt, for up to 10 seconds on siw. Hardware iWARP devices and
+// the iWARP port mapper, which does not run in CI, are not verified.
 //
 // On Linux (amd64, arm64, loong64, ppc64le, riscv64 and s390x) the package
 // needs the kernel's rdma_cm device and libibverbs with a provider for the

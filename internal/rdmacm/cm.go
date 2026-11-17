@@ -72,9 +72,14 @@ type Request struct {
 // RejectedError is the error ID.Connect returns when the peer rejected the
 // connection explicitly with Request.Reject. It matches syscall.ECONNREFUSED
 // in errors.Is, like the error for a port nobody listens on.
+//
+// Reason is the status of the REJECTED event: the IB CM reject reason on
+// InfiniBand and RoCE. iWARP has no reject reasons; there Reason is the
+// negative errno the kernel reports the MPA reject with, -104 (ECONNRESET)
+// on siw, and a reject without private data cannot be told from a refusal.
 type RejectedError struct {
-	PrivateData []byte // MaxRejectPrivateData bytes, zero padded
-	Reason      int    // IB CM reject reason, 28 (consumer defined) for Request.Reject
+	PrivateData []byte // MaxRejectPrivateData bytes, zero padded; on iWARP as sent
+	Reason      int    // 28 (consumer defined) for Request.Reject; negative on iWARP
 }
 
 func (e *RejectedError) Error() string {

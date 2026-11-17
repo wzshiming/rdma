@@ -25,7 +25,7 @@ import (
 // states after Disconnect and after a failed Connect, and the errors of a
 // rejected and a refused Connect.
 func TestSameAsReference(t *testing.T) {
-	dev := rdmatest.Device(t)
+	dev := testDevice(t)
 	for _, tt := range []struct {
 		name            string
 		connect, accept *cm.ConnParam

@@ -129,6 +129,9 @@ func TestEventErrMapsStatus(t *testing.T) {
 	}{
 		{"rejected by Request.Reject", cmEvent{typ: EventRejected, status: ibCMRejConsumerDefined, privateData: []byte("no")}, &RejectedError{PrivateData: []byte("no"), Reason: 28}},
 		{"rejected by the CM", cmEvent{typ: EventRejected, status: 8}, syscall.ECONNREFUSED},
+		{"rejected on iWARP", cmEvent{typ: EventRejected, status: -int(syscall.ECONNRESET), privateData: []byte("no way")}, &RejectedError{PrivateData: []byte("no way"), Reason: -int(syscall.ECONNRESET)}},
+		{"rejected on iWARP without private data", cmEvent{typ: EventRejected, status: -int(syscall.ECONNRESET)}, syscall.ECONNREFUSED},
+		{"refused on iWARP", cmEvent{typ: EventRejected, status: -int(syscall.ECONNREFUSED)}, syscall.ECONNREFUSED},
 		{"address error from the kernel", cmEvent{typ: EventAddrError, status: -int(syscall.EADDRNOTAVAIL)}, syscall.EADDRNOTAVAIL},
 		{"route error without a status", cmEvent{typ: EventRouteError}, syscall.EHOSTUNREACH},
 		{"unreachable from the kernel", cmEvent{typ: EventUnreachable, status: -int(syscall.ETIMEDOUT)}, syscall.ETIMEDOUT},
