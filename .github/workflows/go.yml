@@ -107,7 +107,8 @@ jobs:
 
   integration:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # The benchmark comparison alone takes over 30 minutes on slow runners.
+    timeout-minutes: 60
     env:
       # Soft-RoCE gets a netdev of its own: some runners carry a hardware RDMA
       # device on eth0 (Microsoft MANA) that would share eth0's IP, and rdma_cm
