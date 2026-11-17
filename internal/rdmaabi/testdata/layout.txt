@@ -379,6 +379,22 @@ struct ucma_abi_init_qp_attr.out 6 2
 struct ucma_abi_init_qp_attr.response 8 8
 struct ucma_abi_init_qp_attr.id 16 4
 struct ucma_abi_init_qp_attr.qp_state 20 4
+struct ucma_abi_notify 16
+struct ucma_abi_notify.cmd 0 4
+struct ucma_abi_notify.in 4 2
+struct ucma_abi_notify.out 6 2
+struct ucma_abi_notify.id 8 4
+struct ucma_abi_notify.event 12 4
+struct ucma_abi_join_mcast 160
+struct ucma_abi_join_mcast.cmd 0 4
+struct ucma_abi_join_mcast.in 4 2
+struct ucma_abi_join_mcast.out 6 2
+struct ucma_abi_join_mcast.response 8 8
+struct ucma_abi_join_mcast.uid 16 8
+struct ucma_abi_join_mcast.id 24 4
+struct ucma_abi_join_mcast.addr_size 28 2
+struct ucma_abi_join_mcast.join_flags 30 2
+struct ucma_abi_join_mcast.addr 32 128
 struct ucma_abi_get_event 16
 struct ucma_abi_get_event.cmd 0 4
 struct ucma_abi_get_event.in 4 2
@@ -391,6 +407,15 @@ struct ucma_abi_event_resp.event 12 4
 struct ucma_abi_event_resp.status 16 4
 struct ucma_abi_event_resp.param.conn 20 272
 struct ucma_abi_event_resp.ece 328 8
+struct ucma_abi_set_option 32
+struct ucma_abi_set_option.cmd 0 4
+struct ucma_abi_set_option.in 4 2
+struct ucma_abi_set_option.out 6 2
+struct ucma_abi_set_option.optval 8 8
+struct ucma_abi_set_option.id 16 4
+struct ucma_abi_set_option.level 20 4
+struct ucma_abi_set_option.optname 24 4
+struct ucma_abi_set_option.optlen 28 4
 struct ucma_abi_migrate_id 24
 struct ucma_abi_migrate_id.cmd 0 4
 struct ucma_abi_migrate_id.in 4 2

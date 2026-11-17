@@ -58,7 +58,10 @@ type Event struct {
 	// Status is 0, a negative errno, or for EventRejected the reason.
 	Status int32
 	// UID and ID are the identifier's; for EventConnectRequest, UID is the
-	// listener's and ID the new identifier of the request.
+	// listener's and ID the new identifier of the request. For
+	// EventMulticastJoin and EventMulticastError they are the membership's:
+	// the uid given to JoinMulticast and the id it returned. Membership ids
+	// start at 0 as identifier ids do, so Type tells which one ID is.
 	UID uint64
 	ID  uint32
 	ECE ECE

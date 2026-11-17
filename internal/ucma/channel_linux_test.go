@@ -72,36 +72,41 @@ func fileID(t *testing.T, fd uintptr) [2]uint64 {
 // A command running while the channel closes completes on the channel's
 // descriptor, and Close returns after it.
 func TestCloseWaitsForARunningCommand(t *testing.T) {
-	d := newFakeDevice(t)
-	want := fileID(t, fdOf(t, d.ch))
-	entered, release := make(chan struct{}), make(chan struct{})
-	var got syscall.Stat_t
-	var statErr error
-	d.setReply(func(fd uintptr, cmd []byte) (int, syscall.Errno) {
-		close(entered)
-		<-release
-		statErr = syscall.Fstat(int(fd), &got)
-		return len(cmd), 0
-	})
-	cmdErr := make(chan error, 1)
-	go func() { cmdErr <- d.ch.Disconnect(7) }()
-	<-entered
-	closed := make(chan error, 1)
-	go func() { closed <- d.ch.Close() }()
-	select {
-	case err := <-closed:
-		t.Fatalf("Close() = %v while a command was running", err)
-	case <-time.After(100 * time.Millisecond):
-	}
-	close(release)
-	if err := <-cmdErr; err != nil {
-		t.Errorf("Disconnect() error: %v", err)
-	}
-	if err := <-closed; err != nil {
-		t.Errorf("Close() error: %v", err)
-	}
-	if id := [2]uint64{uint64(got.Dev), got.Ino}; statErr != nil || id != want {
-		t.Errorf("the command wrote to file %v (%v), want the channel's %v", id, statErr, want)
+	from := newFakeDevice(t)
+	for _, cc := range commandCalls(t, from.ch) {
+		t.Run(cc.name, func(t *testing.T) {
+			d := newFakeDevice(t)
+			want := fileID(t, fdOf(t, d.ch))
+			entered, release := make(chan struct{}), make(chan struct{})
+			var got syscall.Stat_t
+			var statErr error
+			d.setReply(func(fd uintptr, cmd []byte) (int, syscall.Errno) {
+				close(entered)
+				<-release
+				statErr = syscall.Fstat(int(fd), &got)
+				return len(cmd), 0
+			})
+			cmdErr := make(chan error, 1)
+			go func() { cmdErr <- cc.call(d.ch) }()
+			<-entered
+			closed := make(chan error, 1)
+			go func() { closed <- d.ch.Close() }()
+			select {
+			case err := <-closed:
+				t.Fatalf("Close() = %v while the command was running", err)
+			case <-time.After(100 * time.Millisecond):
+			}
+			close(release)
+			if err := <-cmdErr; err != nil {
+				t.Errorf("error: %v", err)
+			}
+			if err := <-closed; err != nil {
+				t.Errorf("Close() error: %v", err)
+			}
+			if id := [2]uint64{uint64(got.Dev), got.Ino}; statErr != nil || id != want {
+				t.Errorf("the command wrote to file %v (%v), want the channel's %v", id, statErr, want)
+			}
+		})
 	}
 }
 
@@ -109,54 +114,59 @@ func TestCloseWaitsForARunningCommand(t *testing.T) {
 // return os.ErrClosed: none writes to a file that takes the descriptor's
 // number once it is closed.
 func TestCommandsRacingCloseKeepToTheirDescriptor(t *testing.T) {
-	for range 20 {
-		d := newFakeDevice(t)
-		want := fileID(t, fdOf(t, d.ch))
-		var mu sync.Mutex
-		var wrong []error
-		d.setReply(func(fd uintptr, cmd []byte) (int, syscall.Errno) {
-			var st syscall.Stat_t
-			if err := syscall.Fstat(int(fd), &st); err != nil || [2]uint64{uint64(st.Dev), st.Ino} != want {
-				mu.Lock()
-				wrong = append(wrong, fmt.Errorf("descriptor %d: file %d/%d, %v", fd, st.Dev, st.Ino, err))
-				mu.Unlock()
-			}
-			return len(cmd), 0
-		})
-		var wg sync.WaitGroup
-		for range 4 {
-			wg.Go(func() {
-				for {
-					err := d.ch.Disconnect(7)
-					if err == os.ErrClosed {
-						return
+	from := newFakeDevice(t)
+	for _, cc := range commandCalls(t, from.ch) {
+		t.Run(cc.name, func(t *testing.T) {
+			for range 20 {
+				d := newFakeDevice(t)
+				want := fileID(t, fdOf(t, d.ch))
+				var mu sync.Mutex
+				var wrong []error
+				d.setReply(func(fd uintptr, cmd []byte) (int, syscall.Errno) {
+					var st syscall.Stat_t
+					if err := syscall.Fstat(int(fd), &st); err != nil || [2]uint64{uint64(st.Dev), st.Ino} != want {
+						mu.Lock()
+						wrong = append(wrong, fmt.Errorf("descriptor %d: file %d/%d, %v", fd, st.Dev, st.Ino, err))
+						mu.Unlock()
 					}
-					if err != nil {
-						t.Errorf("Disconnect() error: %v", err)
-						return
-					}
+					return len(cmd), 0
+				})
+				var wg sync.WaitGroup
+				for range 4 {
+					wg.Go(func() {
+						for {
+							err := cc.call(d.ch)
+							if err == os.ErrClosed {
+								return
+							}
+							if err != nil {
+								t.Errorf("error: %v", err)
+								return
+							}
+						}
+					})
 				}
-			})
-		}
-		time.Sleep(time.Millisecond)
-		if err := d.ch.Close(); err != nil {
-			t.Fatal(err)
-		}
-		// Take the freed descriptor numbers while the commands still run.
-		var files []*os.File
-		for range 8 {
-			r, w, err := os.Pipe()
-			if err != nil {
-				t.Fatal(err)
+				time.Sleep(time.Millisecond)
+				if err := d.ch.Close(); err != nil {
+					t.Fatal(err)
+				}
+				// Take the freed descriptor numbers while the commands still run.
+				var files []*os.File
+				for range 8 {
+					r, w, err := os.Pipe()
+					if err != nil {
+						t.Fatal(err)
+					}
+					files = append(files, r, w)
+				}
+				wg.Wait()
+				for _, f := range files {
+					f.Close()
+				}
+				for _, err := range wrong {
+					t.Error(err)
+				}
 			}
-			files = append(files, r, w)
-		}
-		wg.Wait()
-		for _, f := range files {
-			f.Close()
-		}
-		for _, err := range wrong {
-			t.Error(err)
-		}
+		})
 	}
 }

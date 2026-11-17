@@ -283,7 +283,10 @@ func (c *Channel) InitQPAttr(id uint32, state uint32) (rdmaabi.IbUverbsQpAttr, e
 }
 
 // MigrateID moves an identifier with its queued events from the channel
-// from to c and returns how many of its events from has handed out.
+// from to c and returns how many of its events from has handed out. The
+// kernel queues the moved events on c without a wake-up: a GetEvent already
+// waiting on c is not woken by them, while a wait started after MigrateID
+// returns sees them.
 func (c *Channel) MigrateID(from *Channel, id uint32) (eventsReported uint32, err error) {
 	var resp rdmaabi.UcmaAbiMigrateResp
 	var cmdErr error

@@ -56,7 +56,7 @@ func sockaddrIn6(addr string, port uint16) (ss [128]byte) {
 type commandCall struct {
 	name string
 	call func(c *Channel) error
-	want []byte // the request the call writes; a response address in it is 0
+	want []byte // the request the call writes; a response or value address in it is 0
 	min  int    // the kernel's least response size, 0 for no response
 }
 
@@ -108,6 +108,22 @@ func commandCalls(t *testing.T, from *Channel) []commandCall {
 			bytesOf(&rdmaabi.UcmaAbiInitQpAttr{Cmd: 11, In: 16, Out: 144, Id: 7, Qp_state: 3}), 144},
 		{"MigrateID", func(c *Channel) error { _, err := c.MigrateID(from, 7); return err },
 			bytesOf(&rdmaabi.UcmaAbiMigrateId{Cmd: 18, In: 16, Out: 4, Id: 7, Fd: fromFD}), 4},
+		{"SetOption", func(c *Channel) error { return c.SetOption(7, OptionLevelID, OptionIDTOS, []byte{1}) },
+			bytesOf(&rdmaabi.UcmaAbiSetOption{Cmd: 14, In: 24, Id: 7, Level: 0, Optname: 0, Optlen: 1}), 0},
+		{"SetTOS", func(c *Channel) error { return c.SetTOS(7, 1) },
+			bytesOf(&rdmaabi.UcmaAbiSetOption{Cmd: 14, In: 24, Id: 7, Level: 0, Optname: 0, Optlen: 1}), 0},
+		{"SetReuseAddr", func(c *Channel) error { return c.SetReuseAddr(7, true) },
+			bytesOf(&rdmaabi.UcmaAbiSetOption{Cmd: 14, In: 24, Id: 7, Level: 0, Optname: 1, Optlen: 4}), 0},
+		{"SetAFOnly", func(c *Channel) error { return c.SetAFOnly(7, true) },
+			bytesOf(&rdmaabi.UcmaAbiSetOption{Cmd: 14, In: 24, Id: 7, Level: 0, Optname: 2, Optlen: 4}), 0},
+		{"SetAckTimeout", func(c *Channel) error { return c.SetAckTimeout(7, 14) },
+			bytesOf(&rdmaabi.UcmaAbiSetOption{Cmd: 14, In: 24, Id: 7, Level: 0, Optname: 3, Optlen: 1}), 0},
+		{"Notify", func(c *Channel) error { return c.Notify(7, 4) },
+			bytesOf(&rdmaabi.UcmaAbiNotify{Cmd: 15, In: 8, Id: 7, Event: 4}), 0},
+		{"JoinMulticast", func(c *Channel) error { _, err := c.JoinMulticast(7, 1, testGroup, JoinFullMember); return err },
+			bytesOf(&rdmaabi.UcmaAbiJoinMcast{Cmd: 22, In: 152, Out: 4, Uid: 1, Id: 7, Addr_size: 16, Addr: sockaddrIn("239.1.1.1", 0)}), 4},
+		{"LeaveMulticast", func(c *Channel) error { _, err := c.LeaveMulticast(9); return err },
+			bytesOf(&rdmaabi.UcmaAbiDestroyId{Cmd: 17, In: 16, Out: 4, Id: 9}), 4},
 	}
 }
 
@@ -136,6 +152,9 @@ func TestCommandEncoding(t *testing.T) {
 					t.Error("response address 0")
 				}
 				clear(got[off : off+8])
+			}
+			if opOf(got) == cmdSetOption {
+				clear(got[8:16]) // the value's address, which TestSetOptionEncoding checks
 			}
 			if !bytes.Equal(got, cc.want) {
 				t.Errorf("wrote %d bytes\n% x\nwant %d bytes\n% x", len(got), got, len(cc.want), cc.want)

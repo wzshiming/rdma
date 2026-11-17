@@ -197,6 +197,29 @@ type UcmaAbiInitQpAttr struct {
 	Qp_state uint32
 }
 
+// UcmaAbiNotify is struct ucma_abi_notify.
+type UcmaAbiNotify struct {
+	Cmd   uint32
+	In    uint16
+	Out   uint16
+	Id    uint32
+	Event uint32
+}
+
+// UcmaAbiJoinMcast is struct ucma_abi_join_mcast, whose response is a
+// struct ucma_abi_create_id_resp; Addr is its struct sockaddr_storage.
+type UcmaAbiJoinMcast struct {
+	Cmd        uint32
+	In         uint16
+	Out        uint16
+	Response   uint64
+	Uid        uint64
+	Id         uint32
+	Addr_size  uint16
+	Join_flags uint16
+	Addr       [128]byte
+}
+
 // UcmaAbiGetEvent is struct ucma_abi_get_event.
 type UcmaAbiGetEvent struct {
 	Cmd      uint32
@@ -218,6 +241,19 @@ type UcmaAbiEventResp struct {
 		_    [36]byte
 	}
 	Ece UcmaAbiEce
+}
+
+// UcmaAbiSetOption is struct ucma_abi_set_option; Optval is the address
+// of the option's value.
+type UcmaAbiSetOption struct {
+	Cmd     uint32
+	In      uint16
+	Out     uint16
+	Optval  uint64
+	Id      uint32
+	Level   uint32
+	Optname uint32
+	Optlen  uint32
 }
 
 // UcmaAbiMigrateId is struct ucma_abi_migrate_id.
