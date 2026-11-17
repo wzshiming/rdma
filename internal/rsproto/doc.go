@@ -34,7 +34,8 @@
 //
 // The engine hands the stream what the transport reports, in this order:
 // each message word that arrives, the immediate data of a receive completion
-// in host byte order, to Received, in the order of arrival; each completion
+// in host byte order, to Received with the bytes the write placed, the
+// completion's byte_len, in the order of arrival; each completion
 // of a post, with the id it was posted with and its failure if it failed, to
 // Sent, in the order of the posts; and the loss of the link to LinkDown once
 // the completions before it have been handed over, so that an orderly end
@@ -58,4 +59,17 @@
 // receives. The wire carries any length the message word holds, and a stock
 // receiver takes it: rs_poll_cq records all 29 bits, and rrecv copies a
 // message, which lies within a grant, as it copies any other.
+//
+// The stream takes a grant only once the write that placed it has completed,
+// as the RS_OP_SGL message whose write placed bytes arrives. rs_can_send takes
+// a grant as soon as its length shows in target_sgl, and rs_write_data moves
+// the entry past each message in place while the device may still be storing
+// the grant there: a store after the move sets the entry back to the whole
+// grant, and the next message goes over the one before it. That rxe's memcpy,
+// on a CPU without FSRM, stores each 8-byte half of the 16 bytes twice is
+// inferred, not observed: from the kernel source, and from the CPUs of the
+// failed runs, all without FSRM where recorded. Where librdmacm sends, the
+// occasional "connection reset by peer", seen in 1 of 589 stress runs before
+// the stream waited for the completion of a grant's write and in 1 of 664
+// after, may come of the same flaw; that is unverified.
 package rsproto

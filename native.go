@@ -98,7 +98,7 @@ type linkEvents interface {
 	lock()
 	unlock()
 	sent(id uint64, err error)
-	received(msg rsproto.Msg)
+	received(msg rsproto.Msg, n int)
 	lost(err error)
 	// waitsFor returns the kinds of completions the stream waits for, which
 	// the transport keeps processing in the background.
@@ -341,9 +341,9 @@ func (s *nativeStream) sent(id uint64, err error) {
 	s.st.Sent(id, err)
 }
 
-func (s *nativeStream) received(msg rsproto.Msg) {
+func (s *nativeStream) received(msg rsproto.Msg, n int) {
 	s.fed = true
-	s.st.Received(msg)
+	s.st.Received(msg, n)
 }
 
 func (s *nativeStream) lost(err error) {

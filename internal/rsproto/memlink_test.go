@@ -28,8 +28,8 @@ func TestMemLinkWriteLandsAtAddressAndKey(t *testing.T) {
 	if err := a.PostWriteMsg(7, sgl, msg, 0x2004, 3); err != nil {
 		t.Fatalf("PostWriteMsg = %v", err)
 	}
-	if got, ok := b.Deliver(); !ok || got != msg {
-		t.Fatalf("Deliver() = %#x, %v, want the message word %#x", got, ok, msg)
+	if got, n, ok := b.Deliver(); !ok || got != msg || n != 5 {
+		t.Fatalf("Deliver() = %#x, %d bytes, %v, want the message word %#x and 5 bytes", got, n, ok, msg)
 	}
 	if want := []byte("\x00\x00\x00\x00hello\x00\x00\x00\x00\x00\x00\x00"); !bytes.Equal(dst.Buf, want) || !bytes.Equal(other.Buf, make([]byte, 16)) {
 		t.Errorf("the write of %q to 0x2004 under key 3 left key 3 holding %q and key 2 %q, want %q and zeros", "hello", dst.Buf, other.Buf, want)
@@ -64,7 +64,7 @@ func TestMemLinkWriteOutsideRegisteredMemoryFails(t *testing.T) {
 				t.Fatal("the posts failed")
 			}
 
-			if got, ok := b.Deliver(); ok || !bytes.Equal(dst.Buf, make([]byte, 16)) {
+			if got, _, ok := b.Deliver(); ok || !bytes.Equal(dst.Buf, make([]byte, 16)) {
 				t.Fatalf("Deliver() = %#x, %v, leaving %q, want nothing delivered and nothing landed", got, ok, dst.Buf)
 			}
 			if id, err, ok := a.Completion(); !ok || id != 1 || err == nil {
@@ -92,13 +92,13 @@ func TestMemLinkMessageAloneArrivesAtThePeer(t *testing.T) {
 		t.Fatalf("PostMsg = %v", err)
 	}
 
-	if got, ok := a.Deliver(); ok {
+	if got, _, ok := a.Deliver(); ok {
 		t.Fatalf("the sender's own Deliver() = %#x, want nothing", got)
 	}
-	if got, ok := b.Deliver(); !ok || got != msg {
-		t.Fatalf("Deliver() = %#x, %v, want the message word %#x", got, ok, msg)
+	if got, n, ok := b.Deliver(); !ok || got != msg || n != 0 {
+		t.Fatalf("Deliver() = %#x, %d bytes, %v, want the message word %#x and no bytes", got, n, ok, msg)
 	}
-	if got, ok := b.Deliver(); ok {
+	if got, _, ok := b.Deliver(); ok {
 		t.Errorf("a second Deliver() = %#x, want nothing", got)
 	}
 }
@@ -121,7 +121,7 @@ func TestMemLinkSendsCompleteInOrderOnceTaken(t *testing.T) {
 		if id, _, ok := a.Completion(); ok {
 			t.Fatalf("send %d completed before the peer took it", id)
 		}
-		if got, ok := b.Deliver(); !ok || got != msg {
+		if got, _, ok := b.Deliver(); !ok || got != msg {
 			t.Fatalf("Deliver() %d = %#x, %v, want %#x", i, got, ok, msg)
 		}
 		if id, err, ok := a.Completion(); !ok || id != uint64(10+i) || err != nil {
@@ -147,7 +147,7 @@ func TestMemLinkMessageWaitsForAReceive(t *testing.T) {
 	}
 
 	for range 3 {
-		if got, ok := b.Deliver(); ok {
+		if got, _, ok := b.Deliver(); ok {
 			t.Fatalf("Deliver() with no receive posted = %#x, want nothing", got)
 		}
 	}
@@ -158,10 +158,10 @@ func TestMemLinkMessageWaitsForAReceive(t *testing.T) {
 		if err := b.PostRecv(1 << 63); err != nil {
 			t.Fatalf("PostRecv = %v", err)
 		}
-		if got, ok := b.Deliver(); !ok || got != want {
+		if got, _, ok := b.Deliver(); !ok || got != want {
 			t.Fatalf("Deliver() with a receive posted = %#x, %v, want %#x", got, ok, want)
 		}
-		if got, ok := b.Deliver(); ok {
+		if got, _, ok := b.Deliver(); ok {
 			t.Fatalf("Deliver() with the receive used up = %#x, want nothing", got)
 		}
 	}
@@ -200,7 +200,7 @@ func TestMemLinkRefusesTheInjectedPost(t *testing.T) {
 			}
 			moved := 0
 			for _, e := range []*rsproto.MemEnd{a, b} {
-				for _, ok := e.Deliver(); ok; _, ok = e.Deliver() {
+				for _, _, ok := e.Deliver(); ok; _, _, ok = e.Deliver() {
 					moved++
 				}
 			}
@@ -237,7 +237,7 @@ func TestMemLinkFailsTheInjectedSend(t *testing.T) {
 	}
 
 	for _, e := range []*rsproto.MemEnd{b, a} {
-		if got, ok := e.Deliver(); ok {
+		if got, _, ok := e.Deliver(); ok {
 			t.Fatalf("Deliver() once the send failed = %#x, want nothing", got)
 		}
 	}
@@ -273,7 +273,7 @@ func TestMemLinkLossComesAfterTheCompletions(t *testing.T) {
 	a.Break(lost)
 
 	for i, e := range []*rsproto.MemEnd{a, b} {
-		if got, ok := e.Deliver(); ok {
+		if got, _, ok := e.Deliver(); ok {
 			t.Errorf("Deliver() after the loss = %#x, want nothing", got)
 		}
 		if err := e.Down(); err != nil {

@@ -261,15 +261,15 @@ func (t *qpTransport) arm(ev linkEvents, _ interest) interest {
 }
 
 // feed hands ev what wc reports: the end of a send, or the message word of a
-// receive; a receive that failed, flushed as the queue pair went down, has
-// none.
+// receive with the bytes its write placed; a receive that failed, flushed as
+// the queue pair went down, has none.
 func (t *qpTransport) feed(ev linkEvents, wc *verbs.WC) {
 	if wc.ID&recvWR == 0 {
 		ev.sent(wc.ID, wc.Err())
 		return
 	}
 	if wc.Status == verbs.WCSuccess && wc.HasImm() {
-		ev.received(rsproto.Msg(wc.Imm))
+		ev.received(rsproto.Msg(wc.Imm), int(wc.Len))
 	}
 }
 

@@ -393,16 +393,15 @@ func (c *chunkySource) Read(p []byte) (int, error) {
 	return n, nil
 }
 
-// sink hashes what it is given into s, taking all of it; a slow sink sleeps
-// now and then.
+// sink checks what it is given against s, taking all of it; a slow sink
+// sleeps now and then.
 type sink struct {
 	s    *testStream
 	slow *rand.Rand
 }
 
 func (w *sink) Write(p []byte) (int, error) {
-	w.s.hash.Write(p)
-	w.s.n += int64(len(p))
+	w.s.consume(p)
 	if w.slow != nil && w.slow.IntN(32) == 0 {
 		time.Sleep(time.Millisecond)
 	}

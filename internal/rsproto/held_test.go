@@ -129,7 +129,7 @@ func TestControlHeldWhileAnOwedEndWaitsForASlot(t *testing.T) {
 	s, l := fourCreditsDue(t)
 	s.Sent(l.posts[0].id, nil)
 	s.CloseWrite()
-	s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlShutdown))
+	s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlShutdown), 0)
 	if s.State()&rsproto.StateConnected != 0 || !s.ControlHeld() {
 		t.Fatalf("after the peer's RS_CTRL_SHUTDOWN met the held end the state is %#x and ControlHeld() = %v, want the connection ended and true", s.State(), s.ControlHeld())
 	}

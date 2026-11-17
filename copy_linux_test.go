@@ -15,7 +15,16 @@ import (
 // TestRXECopy runs io.Copy both ways on each pair of engines with small
 // buffers. ReadFrom and WriteTo move the bytes through the buffers of the
 // native engine's streams, which they lend, and through buffers of their own
-// over the librdmacm engine's, which lend nothing.
+// over the librdmacm engine's, which lend nothing. librdmacm's rsend uses a
+// grant before the write that placed it completes, which on rxe without FSRM
+// now and then puts a message over the one before (see internal/rsproto):
+// what a librdmacm end sends can arrive altered on such runners. That rxe's
+// memcpy there stores each half of the 16-byte grant twice is inferred, not
+// observed: from the kernel source and from the CPUs of the failed runs.
+// Where a librdmacm end sends, the occasional "connection reset by peer",
+// seen in 1 of 589 stress runs before the native engine waited for the
+// completion of a grant's write and in 1 of 664 after, may come of the same
+// flaw; that is unverified.
 func TestRXECopy(t *testing.T) {
 	forEachPair(t, func(t *testing.T, dial, listen engineName) {
 		testRXECopy(t, smallConfig, dial, listen, 1<<30)
@@ -33,9 +42,7 @@ func (r *fullSource) Read(p []byte) (int, error) {
 		return 0, io.EOF
 	}
 	n := min(len(p), r.left)
-	r.s.rng.Read(p[:n])
-	r.s.hash.Write(p[:n])
-	r.s.n += int64(n)
+	r.s.produce(p[:n])
 	r.left -= n
 	return n, nil
 }
@@ -94,9 +101,10 @@ func testRXECopy(t *testing.T, cfg Config, dial, listen engineName, total int) {
 	wg.Wait()
 	elapsed := time.Since(start)
 	t.Logf("%d MiB each way in %v (%.0f MiB/s each way)", total>>20, elapsed.Round(time.Millisecond), float64(total>>20)/elapsed.Seconds())
+	from := [...]engineName{dial, listen}
 	for i := range ins {
-		if ins[i].sum() != outs[i].sum() {
-			t.Errorf("direction #%d: sent %s, received %s", i, ins[i].sum(), outs[i].sum())
+		if report := describeTransfer(ins[i], outs[i]); report != "" {
+			t.Errorf("direction #%d, %s to %s: %s", i, from[i], from[1-i], report)
 		}
 	}
 }

@@ -175,7 +175,7 @@ func TestCreditsRunOutAndReturn(t *testing.T) {
 	if n := sendWhileCan(t, s, 10); n != 3 {
 		t.Fatalf("sent %d messages on 3 credits, want 3", n)
 	}
-	s.Received(rsproto.MakeMsg(rsproto.OpSGL, 5))
+	s.Received(rsproto.MakeMsg(rsproto.OpSGL, 5), 0)
 	if n := sendWhileCan(t, s, 10); n != 2 {
 		t.Fatalf("sent %d more messages when the peer raised its credits to 5, want 2", n)
 	}
@@ -186,7 +186,7 @@ func TestCreditsRunOutAndReturn(t *testing.T) {
 // sends the RS_OP_SGL message with the credit limit.
 func grant(s *rsproto.Stream, c rsproto.Config, i int, g rsproto.SGE, credits uint32) {
 	rsproto.PutSGE(c.GrantTable.Buf[i*rsproto.SGESize:], rsproto.ConnData{BigEndian: c.BigEndian}.ByteOrder(), g)
-	s.Received(rsproto.MakeMsg(rsproto.OpSGL, credits))
+	s.Received(rsproto.MakeMsg(rsproto.OpSGL, credits), rsproto.SGESize)
 }
 
 // rs_write_data moves on to the next of the RS_SGL_SIZE entries of
@@ -254,6 +254,115 @@ func TestGrantTableInHostByteOrder(t *testing.T) {
 	}
 	if got := l.posts[len(l.posts)-1]; got.addr != second.Addr || got.key != second.Key {
 		t.Errorf("Commit on a big-endian host wrote to %#x under %#x, want %#x under %#x", got.addr, got.key, second.Addr, second.Key)
+	}
+}
+
+// The bytes of a grant show in the grant table before the write that carries
+// them completes. The stream takes the grant only once the RS_OP_SGL message
+// whose write placed bytes has arrived, not at credits alone; rs_can_send
+// takes it as soon as its length shows.
+func TestGrantWaitsForTheCompletionOfItsWrite(t *testing.T) {
+	c := testConfig()
+	peer := testPeer
+	peer.FirstGrant.Length = 100
+	s := rsproto.NewStream(&recorder{}, c)
+	s.Connect(peer)
+	if err := s.Commit(len(s.Reserve())); err != nil {
+		t.Fatalf("Commit of the first grant = %v", err)
+	}
+
+	second := rsproto.SGE{Addr: 0x00007f1000010000, Key: 0x7b23, Length: 200}
+	rsproto.PutSGE(c.GrantTable.Buf[rsproto.SGESize:], rsproto.ConnData{BigEndian: c.BigEndian}.ByteOrder(), second)
+	if s.CanSend() {
+		t.Fatal("CanSend() with a grant in entry 1 whose write has not completed")
+	}
+	s.Received(rsproto.MakeMsg(rsproto.OpSGL, rsproto.DefaultReceiveQueueSize), 0)
+	if s.CanSend() {
+		t.Fatal("CanSend() after credits alone, the write of the grant in entry 1 not completed")
+	}
+	s.Received(rsproto.MakeMsg(rsproto.OpSGL, rsproto.DefaultReceiveQueueSize), rsproto.SGESize)
+	if v := s.Reserve(); len(v) != int(second.Length) {
+		t.Errorf("Reserve() once the write of the grant in entry 1 completed = %d bytes, want %d", len(v), second.Length)
+	}
+}
+
+// Each later grant waits for the completion of its own write as the first the
+// peer wrote does, in both entries of the table, and once that has come takes
+// message after message until it is used up.
+func TestEveryLaterGrantWaitsForTheCompletionOfItsWrite(t *testing.T) {
+	c := testConfig()
+	peer := testPeer
+	peer.FirstGrant.Length = 100
+	s := rsproto.NewStream(&recorder{}, c)
+	s.Connect(peer)
+	if err := s.Commit(len(s.Reserve())); err != nil {
+		t.Fatalf("Commit of the first grant = %v", err)
+	}
+
+	g := rsproto.SGE{Addr: 0x00007f1000010000, Key: 0x7b23, Length: 200}
+	for i := 1; i <= 6; i++ {
+		entry := i % rsproto.SGLSize
+		rsproto.PutSGE(c.GrantTable.Buf[entry*rsproto.SGESize:], rsproto.ConnData{BigEndian: c.BigEndian}.ByteOrder(), g)
+		if s.CanSend() {
+			t.Fatalf("CanSend() with grant %d in entry %d, whose write has not completed", i, entry)
+		}
+		s.Received(rsproto.MakeMsg(rsproto.OpSGL, rsproto.DefaultReceiveQueueSize), rsproto.SGESize)
+		for sent := 0; sent < int(g.Length); sent += 50 {
+			if s.Reserve() == nil {
+				t.Fatalf("Reserve() lends nothing %d bytes into grant %d in entry %d, whose write has completed", sent, i, entry)
+			}
+			if err := s.Commit(50); err != nil {
+				t.Fatalf("Commit(50) = %v", err)
+			}
+		}
+	}
+}
+
+// The device may store the bytes of a grant more than once until the write
+// that carries them completes: rxe, on a CPU without FSRM, copies the 16 bytes
+// with each 8-byte half stored twice. Each message goes past the one before
+// in the grant however often its bytes land before that completion; were the
+// entry the stream moved past a message set back to the whole grant, the next
+// message would land over that one before the peer read it.
+func TestGrantStoredAgainBeforeItsCompletionPutsNoMessageOverAnother(t *testing.T) {
+	c := testConfig()
+	peer := testPeer
+	peer.FirstGrant.Length = 100
+	l := &recorder{}
+	s := rsproto.NewStream(l, c)
+	s.Connect(peer)
+	if err := s.Commit(len(s.Reserve())); err != nil {
+		t.Fatalf("Commit of the first grant = %v", err)
+	}
+
+	second := rsproto.SGE{Addr: 0x00007f1000010000, Key: 0x7b23, Length: 200}
+	store := func() {
+		rsproto.PutSGE(c.GrantTable.Buf[rsproto.SGESize:], rsproto.ConnData{BigEndian: c.BigEndian}.ByteOrder(), second)
+	}
+	send := func() {
+		if s.Reserve() != nil {
+			if err := s.Commit(50); err != nil {
+				t.Fatalf("Commit(50) = %v", err)
+			}
+		}
+	}
+	store()
+	send()
+	store()
+	s.Received(rsproto.MakeMsg(rsproto.OpSGL, rsproto.DefaultReceiveQueueSize), rsproto.SGESize)
+	send()
+	send()
+
+	want := second.Addr
+	into := l.data()[1:]
+	if len(into) < 2 {
+		t.Fatalf("%d messages went into the second grant once its write completed, want 2", len(into))
+	}
+	for i, p := range into {
+		if p.addr != want {
+			t.Errorf("message %d into the second grant went to %#x, want %#x, past the %d bytes before it", i, p.addr, want, want-second.Addr)
+		}
+		want = p.addr + uint64(p.sgl[0].Length)
 	}
 }
 
@@ -333,7 +442,7 @@ func TestSequenceWrapsPast65536Messages(t *testing.T) {
 			s.Sent(p.id, nil)
 		}
 		l.posts = l.posts[:0]
-		s.Received(rsproto.MakeMsg(rsproto.OpSGL, uint32(uint16(sent))+rsproto.QPMinSize))
+		s.Received(rsproto.MakeMsg(rsproto.OpSGL, uint32(uint16(sent))+rsproto.QPMinSize), 0)
 	}
 }
 
@@ -457,8 +566,8 @@ func TestEveryArrivalPostsAReceive(t *testing.T) {
 	s.Connect(testPeer)
 	l.recvs = nil
 
-	s.Received(rsproto.MakeMsg(rsproto.OpData, 100))
-	s.Received(rsproto.MakeMsg(rsproto.OpSGL, rsproto.DefaultReceiveQueueSize))
+	s.Received(rsproto.MakeMsg(rsproto.OpData, 100), 100)
+	s.Received(rsproto.MakeMsg(rsproto.OpSGL, rsproto.DefaultReceiveQueueSize), 0)
 	if want := []uint64{1 << 63, 1 << 63}; !slices.Equal(l.recvs, want) {
 		t.Errorf("a data and a credit message arriving posted receives %#x, want %#x", l.recvs, want)
 	}
@@ -468,7 +577,7 @@ func TestEveryArrivalPostsAReceive(t *testing.T) {
 // off into the receive buffer of c, and the message for it arrives at s.
 func peerWrites(s *rsproto.Stream, c rsproto.Config, off int, b []byte) {
 	copy(c.ReceiveBuffer.Buf[off:], b)
-	s.Received(rsproto.MakeMsg(rsproto.OpData, uint32(len(b))))
+	s.Received(rsproto.MakeMsg(rsproto.OpData, uint32(len(b))), len(b))
 }
 
 // readAll reads what has arrived at s through the views Peek lends, at most
@@ -522,7 +631,7 @@ func TestWhichOpsArriveAsData(t *testing.T) {
 	for op := range rsproto.Op(8) {
 		s := rsproto.NewStream(&recorder{}, testConfig())
 		s.Connect(testPeer)
-		s.Received(rsproto.MakeMsg(op, 100))
+		s.Received(rsproto.MakeMsg(op, 100), 100)
 
 		want := 0
 		if op == rsproto.OpData || op == 1 || op == 3 || op == 5 {
@@ -892,7 +1001,7 @@ func TestRefusedReceiveBreaksTheStream(t *testing.T) {
 	s := rsproto.NewStream(l, testConfig())
 	s.Connect(testPeer)
 	l.err = refused
-	s.Received(rsproto.MakeMsg(rsproto.OpData, 100))
+	s.Received(rsproto.MakeMsg(rsproto.OpData, 100), 100)
 
 	if err := s.Err(); !errors.Is(err, refused) {
 		t.Errorf("Err() after the receive in place of an arrival was refused = %v, want an error wrapping %q", err, refused)
@@ -941,7 +1050,7 @@ func TestKeepaliveAndUnknownControlDataAreIgnored(t *testing.T) {
 		s := rsproto.NewStream(l, testConfig())
 		s.Connect(testPeer)
 		l.posts, l.recvs = nil, nil
-		s.Received(rsproto.MakeMsg(rsproto.OpCtrl, ctrl))
+		s.Received(rsproto.MakeMsg(rsproto.OpCtrl, ctrl), 0)
 
 		if want := rsproto.StateConnected | rsproto.StateReadable | rsproto.StateWritable; s.State() != want || len(l.posts) != 0 || len(l.recvs) != 1 {
 			t.Errorf("control data %d left the state %#x, posted %+v and %d receives; want %#x, nothing and 1 receive", ctrl, s.State(), l.posts, len(l.recvs), want)
@@ -1004,7 +1113,7 @@ func TestPeerShutdownEndsReadsBehindTheDataAndWritesGoOn(t *testing.T) {
 	s.Connect(testPeer)
 	peerWrites(s, c, 0, []byte("before"))
 	l.recvs = nil
-	s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlShutdown))
+	s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlShutdown), 0)
 
 	if want := rsproto.StateConnected | rsproto.StateWritable; s.State() != want || s.EOF() || string(s.Peek()) != "before" || len(l.recvs) != 1 {
 		t.Fatalf("after the peer's shutdown the state is %#x, EOF() = %v with %q lent and %d receives posted; want %#x, false with %q and 1", s.State(), s.EOF(), s.Peek(), len(l.recvs), want, "before")
@@ -1107,11 +1216,11 @@ func TestCompletionFlushedAfterAnOrderlyEndIsNoError(t *testing.T) {
 			s.Sent(l.posts[len(l.posts)-1].id, flushed)
 		}},
 		{"rs_poll_cq of the peer's RS_CTRL_DISCONNECT", func(s *rsproto.Stream, l *recorder) {
-			s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlDisconnect))
+			s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlDisconnect), 0)
 		}},
 		{"rs_poll_cq of the peer's RS_CTRL_SHUTDOWN after rshutdown(SHUT_WR)", func(s *rsproto.Stream, l *recorder) {
 			s.CloseWrite()
-			s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlShutdown))
+			s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlShutdown), 0)
 		}},
 	}
 	for _, tt := range tests {
@@ -1141,7 +1250,7 @@ func TestPeerDisconnectEndsTheStream(t *testing.T) {
 	s.Connect(testPeer)
 	peerWrites(s, c, 0, []byte("before"))
 	l.recvs = nil
-	s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlDisconnect))
+	s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlDisconnect), 0)
 
 	if err := s.Err(); s.State() != rsproto.StateDisconnected || !errors.Is(err, io.EOF) || len(l.recvs) != 0 {
 		t.Fatalf("the peer's disconnect left the state %#x and Err() = %v, and posted %d receives; want %#x, io.EOF and none", s.State(), err, len(l.recvs), rsproto.StateDisconnected)
@@ -1164,7 +1273,7 @@ func TestPeerShutdownAfterCloseWriteEndsTheStream(t *testing.T) {
 	s.Connect(testPeer)
 	s.CloseWrite()
 	l.recvs = nil
-	s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlShutdown))
+	s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlShutdown), 0)
 
 	if err := s.Err(); s.State() != rsproto.StateDisconnected || !errors.Is(err, io.EOF) || len(l.recvs) != 0 {
 		t.Errorf("the peer's shutdown after CloseWrite left the state %#x and Err() = %v, and posted %d receives; want %#x, io.EOF and none", s.State(), err, len(l.recvs), rsproto.StateDisconnected)
@@ -1177,7 +1286,7 @@ func TestCloseWriteAfterPeerShutdownSendsDisconnect(t *testing.T) {
 	l := &recorder{}
 	s := rsproto.NewStream(l, testConfig())
 	s.Connect(testPeer)
-	s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlShutdown))
+	s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlShutdown), 0)
 	l.posts = nil
 
 	s.CloseWrite()
@@ -1194,9 +1303,9 @@ func TestNoControlMessageOnceTheStreamEnds(t *testing.T) {
 		c     string // the C function and case that posts nothing
 		close func(s *rsproto.Stream)
 	}{
-		{"rshutdown(SHUT_WR) of an rs_disconnected rsocket", func(s *rsproto.Stream) { s.Received(end); s.CloseWrite() }},
-		{"rshutdown(SHUT_RDWR) of an rs_disconnected rsocket", func(s *rsproto.Stream) { s.Received(end); s.Disconnect() }},
-		{"rshutdown(SHUT_WR) waiting for a control slot as the peer disconnects", func(s *rsproto.Stream) { s.CloseWrite(); s.Received(end) }},
+		{"rshutdown(SHUT_WR) of an rs_disconnected rsocket", func(s *rsproto.Stream) { s.Received(end, 0); s.CloseWrite() }},
+		{"rshutdown(SHUT_RDWR) of an rs_disconnected rsocket", func(s *rsproto.Stream) { s.Received(end, 0); s.Disconnect() }},
+		{"rshutdown(SHUT_WR) waiting for a control slot as the peer disconnects", func(s *rsproto.Stream) { s.CloseWrite(); s.Received(end, 0) }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.c, func(t *testing.T) {
@@ -1230,7 +1339,7 @@ func TestHeldEndGoesOutAfterThePeerShutdown(t *testing.T) {
 		t.Run(tt.c, func(t *testing.T) {
 			s, l := fourCreditsDue(t)
 			tt.end(s)
-			s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlShutdown))
+			s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlShutdown), 0)
 			for _, p := range l.posts[:rsproto.QPCtrlSize] {
 				s.Sent(p.id, nil)
 			}
@@ -1248,7 +1357,7 @@ func TestHeldEndGoesOutAfterThePeerShutdown(t *testing.T) {
 func TestSendsDoneWaitsForTheEndHeldAtThePeerShutdown(t *testing.T) {
 	s, l := fourCreditsDue(t)
 	s.CloseWrite()
-	s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlShutdown))
+	s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlShutdown), 0)
 	for i, p := range l.posts[:rsproto.QPCtrlSize] {
 		if s.SendsDone() {
 			t.Fatalf("SendsDone() after the peer's shutdown with %d of the %d credits completed and RS_CTRL_SHUTDOWN held", i, rsproto.QPCtrlSize)
@@ -1270,7 +1379,7 @@ func TestSendsDoneWaitsForTheEndHeldAtThePeerShutdown(t *testing.T) {
 // waits for it then.
 func TestHeldEndIsDroppedAtADisconnectAFailureOrTheLinkLoss(t *testing.T) {
 	disconnect := func(s *rsproto.Stream, l *recorder) {
-		s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlDisconnect))
+		s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlDisconnect), 0)
 	}
 	fail := func(s *rsproto.Stream, l *recorder) { s.Sent(l.posts[0].id, errors.New("IBV_WC_RETRY_EXC_ERR")) }
 	lose := func(s *rsproto.Stream, l *recorder) { s.LinkDown(errors.New("RDMA_CM_EVENT_DISCONNECTED")) }
@@ -1289,7 +1398,7 @@ func TestHeldEndIsDroppedAtADisconnectAFailureOrTheLinkLoss(t *testing.T) {
 			s, l := fourCreditsDue(t)
 			s.CloseWrite()
 			tt.before(s, l)
-			s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlShutdown))
+			s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlShutdown), 0)
 			tt.after(s, l)
 			for _, p := range l.posts[1:rsproto.QPCtrlSize] {
 				s.Sent(p.id, nil)
@@ -1306,7 +1415,7 @@ func TestHeldEndIsDroppedAtADisconnectAFailureOrTheLinkLoss(t *testing.T) {
 func TestRefusedEndHeldAtThePeerShutdownIsNotWaitedFor(t *testing.T) {
 	s, l := fourCreditsDue(t)
 	s.CloseWrite()
-	s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlShutdown))
+	s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlShutdown), 0)
 	l.err = errors.New("ibv_post_send: EINVAL")
 	for _, p := range l.posts[:rsproto.QPCtrlSize] {
 		s.Sent(p.id, nil)
@@ -1338,7 +1447,7 @@ func TestNoEndJoinsTheOneHeldAtThePeerShutdown(t *testing.T) {
 		t.Run(tt.c, func(t *testing.T) {
 			s, l := fourCreditsDue(t)
 			s.CloseWrite()
-			s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlShutdown))
+			s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlShutdown), 0)
 			done := 0
 			tt.close(s, func() {
 				for ; done < len(l.posts); done++ {
@@ -1361,7 +1470,7 @@ func TestNoCreditsAfterTheEnd(t *testing.T) {
 	}{
 		{"rs_poll_cq of a failed send", func(s *rsproto.Stream, l *recorder) { s.Sent(l.data()[0].id, errors.New("IBV_WC_RETRY_EXC_ERR")) }},
 		{"rs_poll_cq of the peer's RS_CTRL_DISCONNECT", func(s *rsproto.Stream, l *recorder) {
-			s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlDisconnect))
+			s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlDisconnect), 0)
 		}},
 		{"rs_handle_cm_event of RDMA_CM_EVENT_DISCONNECTED", func(s *rsproto.Stream, l *recorder) {
 			s.LinkDown(errors.New("RDMA_CM_EVENT_DISCONNECTED"))
@@ -1400,7 +1509,7 @@ func TestFailureStaysTheCauseOfTheEnd(t *testing.T) {
 			s.Sent(l.posts[len(l.posts)-1].id, errors.New("IBV_WC_WR_FLUSH_ERR"))
 		}},
 		{"rs_poll_cq of the peer's RS_CTRL_DISCONNECT", func(s *rsproto.Stream, l *recorder) {
-			s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlDisconnect))
+			s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlDisconnect), 0)
 		}},
 	}
 	for _, tt := range tests {
@@ -1443,7 +1552,7 @@ func TestLinkLossAfterTheEndChangesNothing(t *testing.T) {
 		end func(s *rsproto.Stream, l *recorder)
 	}{
 		{"rs_poll_cq of the peer's RS_CTRL_DISCONNECT", func(s *rsproto.Stream, l *recorder) {
-			s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlDisconnect))
+			s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlDisconnect), 0)
 		}},
 		{"rs_poll_cq of a failed send", func(s *rsproto.Stream, l *recorder) { s.Sent(l.data()[0].id, errors.New("IBV_WC_RETRY_EXC_ERR")) }},
 	}
@@ -1482,7 +1591,7 @@ func TestReadableWithDataOrTheEnd(t *testing.T) {
 	if s.Readable() {
 		t.Fatal("Readable() once all that arrived is read")
 	}
-	s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlShutdown))
+	s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlShutdown), 0)
 	if !s.Readable() {
 		t.Error("Readable() = false after the peer's shutdown")
 	}
@@ -1526,7 +1635,7 @@ func TestSendsDoneOnceAllCompleteOrTheEnd(t *testing.T) {
 		t.Fatal("SendsDone() = false with the grant and the data message completed")
 	}
 	sendWhileCan(t, s, 1)
-	s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlDisconnect))
+	s.Received(rsproto.MakeMsg(rsproto.OpCtrl, rsproto.CtrlDisconnect), 0)
 	if !s.SendsDone() {
 		t.Error("SendsDone() = false with a data message in flight after the peer's disconnect")
 	}

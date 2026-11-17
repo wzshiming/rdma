@@ -230,9 +230,9 @@ type memTransport struct {
 	silence sync.Mutex // held, it keeps the device from taking anything, as a peer gone silent
 
 	mu        sync.Mutex
-	arrived   []rsproto.Msg // the messages taken in and not yet processed
-	completed []memDone     // the completions taken in and not yet processed
-	loss      error         // the loss of the link, once taken in
+	arrived   []memArrival // the messages taken in and not yet processed
+	completed []memDone    // the completions taken in and not yet processed
+	loss      error        // the loss of the link, once taken in
 	lossFed   bool
 	acks      int      // how many completions of sends the device may take in yet, -1 for all
 	armed     interest // the queues that raise an event for the next completion they take
@@ -243,8 +243,15 @@ type memTransport struct {
 	started   bool
 	released  bool
 
-	feedArrived   []rsproto.Msg // the drain's
-	feedCompleted []memDone     // the drain's
+	feedArrived   []memArrival // the drain's
+	feedCompleted []memDone    // the drain's
+}
+
+// memArrival is a message the device took in, with the bytes its write
+// placed.
+type memArrival struct {
+	msg rsproto.Msg
+	n   int
 }
 
 // memDone is the completion of a send as the device takes it in.
@@ -261,7 +268,7 @@ func newMemTransport(end *rsproto.MemEnd, mem rsproto.Config) *memTransport {
 	return &memTransport{
 		end: end, mem: mem, acks: -1,
 		kick: make(chan struct{}, 1), stop: make(chan struct{}), done: make(chan struct{}),
-		arrived: make([]rsproto.Msg, 0, mem.ReceiveQueueSize), feedArrived: make([]rsproto.Msg, 0, mem.ReceiveQueueSize),
+		arrived: make([]memArrival, 0, mem.ReceiveQueueSize), feedArrived: make([]memArrival, 0, mem.ReceiveQueueSize),
 		completed: make([]memDone, 0, mem.SendQueueSize), feedCompleted: make([]memDone, 0, mem.SendQueueSize),
 	}
 }
@@ -355,8 +362,8 @@ func (t *memTransport) land() (fire interest, lost bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	var took interest
-	for msg, ok := t.end.Deliver(); ok; msg, ok = t.end.Deliver() {
-		t.arrived = append(t.arrived, msg)
+	for msg, n, ok := t.end.Deliver(); ok; msg, n, ok = t.end.Deliver() {
+		t.arrived = append(t.arrived, memArrival{msg, n})
 		t.peer.poke()
 		took |= arrivals
 	}
@@ -395,8 +402,8 @@ func (t *memTransport) drain(ev linkEvents) (interest, bool) {
 	}
 	t.mu.Unlock()
 	ev.lock()
-	for _, msg := range t.feedArrived {
-		ev.received(msg)
+	for _, a := range t.feedArrived {
+		ev.received(a.msg, a.n)
 	}
 	for _, d := range t.feedCompleted {
 		ev.sent(d.id, d.err)

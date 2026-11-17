@@ -37,9 +37,9 @@ func bulkWrite(t *testing.T, a, b *side, total, write int) (toB, toA []rsproto.M
 				end *side
 				log *[]rsproto.Msg
 			}{{b, &toB}, {a, &toA}} {
-				for msg, ok := x.end.l.Deliver(); ok; msg, ok = x.end.l.Deliver() {
+				for msg, n, ok := x.end.l.Deliver(); ok; msg, n, ok = x.end.l.Deliver() {
 					*x.log = append(*x.log, msg)
-					x.end.s.Received(msg)
+					x.end.s.Received(msg, n)
 					carried = true
 				}
 				carried = x.end.complete() || carried
