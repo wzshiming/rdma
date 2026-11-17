@@ -32,8 +32,9 @@ func platformEngine() engine { return nativeEngine{} }
 // the native engine leaves out.
 var errIWARP = fmt.Errorf("rdma: iWARP devices are not supported: %w", errors.ErrUnsupported)
 
-// nativeLibraries are the libraries of rdma-core the native engine runs on.
-var nativeLibraries = []string{"libibverbs.so.1", "librdmacm.so.1"}
+// nativeLibraries are the libraries of rdma-core the native engine runs on:
+// libibverbs alone, as cm needs no librdmacm.
+var nativeLibraries = []string{"libibverbs.so.1"}
 
 // loadLibraries loads the libraries of the engine, which fails with an error
 // matching errors.ErrUnsupported for the first that cannot be loaded.

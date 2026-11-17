@@ -15,8 +15,9 @@ jobs:
       matrix:
         include:
         # The toolchain's default: cgo on Linux, which the race detector needs,
-        # the stubs on macOS and Windows. The bindings load rdma-core at run
-        # time, so Linux installs the libraries and no development package.
+        # the stubs on macOS and Windows. verbs loads libibverbs at run time
+        # and the tests' references load librdmacm, so Linux installs the two
+        # libraries and no development package.
         - os: ubuntu-latest
           apt: libibverbs1 librdmacm1t64
           flags: -race

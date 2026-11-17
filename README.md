@@ -3,14 +3,14 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/wzshiming/rdma.svg)](https://pkg.go.dev/github.com/wzshiming/rdma)
 [![Go](https://github.com/wzshiming/rdma/actions/workflows/go.yml/badge.svg)](https://github.com/wzshiming/rdma/actions/workflows/go.yml)
 
-Reliable byte streams over RDMA with the vocabulary of the `net` package: `Dial` and `Listen` give out `net.Conn` and `net.Listener` values addressed by IP address and port like TCP. The package is a Go implementation of rsockets, the stream protocol of librdmacm, on the module's own bindings of libibverbs and of the RDMA connection manager, `verbs` and `cm`: it runs over InfiniBand and RoCE and lends its registered buffers to `io.Copy`. On the wire it is stock rsockets, so any rsockets application can be its peer; the tests hold it to that against librdmacm's own rsockets and rstream, which are also what the [benchmarks](#benchmarks) measure it against. The module depends on the standard library, [`github.com/ebitengine/purego`](https://github.com/ebitengine/purego) and rdma-core, which the bindings load at run time.
+Reliable byte streams over RDMA with the vocabulary of the `net` package: `Dial` and `Listen` give out `net.Conn` and `net.Listener` values addressed by IP address and port like TCP. The package is a Go implementation of rsockets, the stream protocol of librdmacm, on the module's own binding of libibverbs, `verbs`, and its Go implementation of the RDMA connection manager on the kernel's rdma_cm device, `cm`: it runs over InfiniBand and RoCE and lends its registered buffers to `io.Copy`. On the wire it is stock rsockets, so any rsockets application can be its peer; the tests hold it to that against librdmacm's own rsockets and rstream, which are also what the [benchmarks](#benchmarks) measure it against; nothing outside the tests and benchmarks loads librdmacm. The module depends on the standard library, [`github.com/ebitengine/purego`](https://github.com/ebitengine/purego) and rdma-core's libibverbs, which `verbs` loads at run time.
 
 ## Requirements
 
 - Linux with the kernel's RDMA stack (`ib_uverbs`, `rdma_ucm`) and either an RDMA device or Soft-RoCE (the `rdma_rxe` kernel module) over any Ethernet interface; see [Soft-RoCE](#soft-roce) for a one-host setup.
-- rdma-core at run time: the libraries `libibverbs1`, `librdmacm1t64` and `ibverbs-providers` (Debian and Ubuntu package names; the library is `librdmacm1` before Debian trixie and Ubuntu 24.04), of which the package calls libibverbs and the connection manager of librdmacm, not its rsockets. Building needs neither the headers nor a C compiler: the bindings open `librdmacm.so.1` and `libibverbs.so.1` on first use.
+- rdma-core at run time: the libraries `libibverbs1` and `ibverbs-providers` (Debian and Ubuntu package names), which `verbs` loads, while `cm` speaks to the kernel's rdma_cm device itself. Building needs neither the headers nor a C compiler: `verbs` opens `libibverbs.so.1` on first use.
 - A locked-memory limit that holds the registered buffers, which are pinned: about 256 KiB per connection with the rsockets defaults, so the usual 8 MiB limit holds a few dozen connections. `ulimit -l unlimited` raises it for a shell.
-- For the tests and benchmarks, rdma-core 53 or later: they run librdmacm's rsockets as the package's peer and yardstick, and earlier releases, the 50.0 of Ubuntu 24.04 among them, have the rsockets `cm_svc_run` bug, a service thread polling a freed descriptor array once a fourth rsocket registers, which hangs connections or crashes the process. The package itself registers no rsocket, so the bug does not touch it.
+- For the tests and benchmarks, librdmacm as well, `librdmacm1t64` (`librdmacm1` before Debian trixie and Ubuntu 24.04), of rdma-core 53 or later: they hold the package against librdmacm's rsockets, its peer and yardstick, and `cm` against librdmacm's connection manager, and earlier releases, the 50.0 of Ubuntu 24.04 among them, have the rsockets `cm_svc_run` bug, a service thread polling a freed descriptor array once a fourth rsocket registers, which hangs connections or crashes the process. The package itself registers no rsocket, so the bug does not touch it.
 
 Everywhere else the module compiles to stubs; see [Platforms](#platforms).
 
@@ -70,9 +70,9 @@ A peer on stock rsockets, `rstream` or a program run under `LD_PRELOAD=librsprel
 ## Packages
 
 - [`verbs`](https://pkg.go.dev/github.com/wzshiming/rdma/verbs) binds libibverbs: devices, protection domains, memory regions, completion queues and channels, queue pairs, work requests and completions, with every wait on the Go runtime poller.
-- [`cm`](https://pkg.go.dev/github.com/wzshiming/rdma/cm) binds librdmacm: resolving addresses, connecting and accepting RC connections with private data, and the events of a connection's life.
+- [`cm`](https://pkg.go.dev/github.com/wzshiming/rdma/cm) is a Go implementation of the RDMA connection manager on the kernel's rdma_cm device, `/dev/infiniband/rdma_cm`, with `verbs` for the devices: resolving addresses, connecting and accepting RC connections with private data, and the events of a connection's life, as librdmacm does them.
 
-`verbs` and `cm`, on which the package runs, expose their rdma-core handles through `Pointer` methods and `*FromPointer` constructors, so they interoperate with other code built on rdma-core.
+`verbs` exposes its rdma-core handles through `Pointer` methods and `*FromPointer` constructors, and `cm` gives out its device contexts and queue pairs as `verbs` values, so both interoperate with other code built on rdma-core.
 
 ## Command line
 
@@ -127,7 +127,7 @@ The samples above come from Soft-RoCE on a GitHub Actions runner; hardware is a 
 
 ## Docker
 
-The image `ghcr.io/wzshiming/rdma` holds the `rdma` command with the rdma-core libraries and providers, built for linux/amd64 and linux/arm64, and runs it as an unprivileged user. A push to master publishes `latest`, `master` and `sha-<short commit>`; a `v1.2.3` tag publishes `1.2.3`, `1.2` and `1`.
+The image `ghcr.io/wzshiming/rdma` holds the `rdma` command with libibverbs and the providers of rdma-core, all it loads, built for linux/amd64 and linux/arm64, and runs it as an unprivileged user. A push to master publishes `latest`, `master` and `sha-<short commit>`; a `v1.2.3` tag publishes `1.2.3`, `1.2` and `1`.
 
 ```sh
 docker run --rm --network host --device /dev/infiniband --ulimit memlock=-1:-1 ghcr.io/wzshiming/rdma devices
@@ -224,7 +224,7 @@ pingpong reports the round trip, rstream its `usec/xfer`, the time of a transfer
 
 ## Platforms
 
-The real implementation is Linux on amd64, arm64, loong64, ppc64le, riscv64 and s390x, with or without cgo: the bindings load `librdmacm.so.1` and `libibverbs.so.1` through [`purego`](https://github.com/ebitengine/purego) on first use and call them directly, so `CGO_ENABLED` changes nothing, and a host without the libraries gets an error that `errors.Is(err, errors.ErrUnsupported)` matches from `Dial`, `Listen` and the constructors of `verbs` and `cm` rather than a program that cannot start. A build without cgo links glibc's dynamic loader; musl is unverified. The architectures are verified to different degrees: amd64 runs the device tests on the Soft-RoCE device of the CI workflow, arm64 runs the tests on a host without a device, and loong64, ppc64le, riscv64 and s390x get a cross vet and the compile-time check of the structure layouts against the rdma-core headers, so no code runs on them in CI. Every other GOOS and GOARCH, linux/386 and linux/arm among them, compiles the same API with those constructors returning the same error; a program using the package builds everywhere and fails only where it needs RDMA.
+The real implementation is Linux on amd64, arm64, loong64, ppc64le, riscv64 and s390x, with or without cgo: `verbs` loads `libibverbs.so.1` through [`purego`](https://github.com/ebitengine/purego) on first use and calls it directly, and `cm` writes the commands of the kernel's rdma_cm device in Go, so `CGO_ENABLED` changes nothing, and a host without libibverbs gets an error that `errors.Is(err, errors.ErrUnsupported)` matches from `Dial`, `Listen` and the constructors of `verbs` and `cm` rather than a program that cannot start. A build without cgo links glibc's dynamic loader; musl is unverified. The architectures are verified to different degrees: amd64 runs the device tests on the Soft-RoCE device of the CI workflow, arm64 runs the tests on a host without a device, and loong64, ppc64le, riscv64 and s390x get a cross vet and the compile-time check of the structure layouts against the rdma-core headers, so no code runs on them in CI. Every other GOOS and GOARCH, linux/386 and linux/arm among them, compiles the same API with those constructors returning the same error; a program using the package builds everywhere and fails only where it needs RDMA.
 
 Of the RDMA transports, the package runs on InfiniBand and RoCE but not on iWARP: over an iWARP device a dial fails with an error that `errors.Is(err, errors.ErrUnsupported)` matches, and a listener turns the requests away.
 

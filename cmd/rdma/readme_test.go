@@ -54,21 +54,25 @@ func TestREADMEBadges(t *testing.T) {
 	}
 }
 
-// TestREADMEDocker checks that the Docker section names the published image
-// and shows how to run and build it.
+// TestREADMEDocker checks that the Docker section names the published image,
+// what it carries besides the command, libibverbs and its providers, and
+// shows how to run and build it.
 func TestREADMEDocker(t *testing.T) {
 	docker := section(readREADME(t), "## Docker")
 	if docker == "" {
 		t.Fatal("README has no Docker section")
 	}
 	for _, want := range []string{
-		"ghcr.io/wzshiming/rdma",
+		"ghcr.io/wzshiming/rdma", "libibverbs", "providers",
 		"docker run --rm --network host --device /dev/infiniband --ulimit memlock=-1:-1 ghcr.io/wzshiming/rdma devices",
 		"docker build -t rdma .",
 	} {
 		if !strings.Contains(docker, want) {
 			t.Errorf("the Docker section lacks %q", want)
 		}
+	}
+	if strings.Contains(docker, "rdma-core libraries") {
+		t.Error("the Docker section still puts the rdma-core libraries in the image")
 	}
 }
 
@@ -147,6 +151,32 @@ func TestREADMEDescribesTheGoImplementation(t *testing.T) {
 	}
 }
 
+// TestREADMEDescribesCMInGo checks that the introduction and the Packages
+// section present cm as the Go implementation of the RDMA connection manager
+// on the kernel's rdma_cm device, no longer as a binding of librdmacm.
+func TestREADMEDescribesCMInGo(t *testing.T) {
+	readme := readREADME(t)
+	intro, _, _ := strings.Cut(readme, "\n## ")
+	var item string
+	for _, line := range strings.Split(section(readme, "## Packages"), "\n") {
+		if strings.HasPrefix(line, "- [`cm`]") {
+			item = line
+		}
+	}
+	for _, text := range []struct{ name, s string }{{"the introduction", intro}, {"the item of cm under Packages", item}} {
+		for _, want := range []string{"Go implementation", "rdma_cm device"} {
+			if !strings.Contains(text.s, want) {
+				t.Errorf("%s lacks %q", text.name, want)
+			}
+		}
+	}
+	for _, stale := range []string{"binds librdmacm", "bindings of libibverbs and of the RDMA connection manager"} {
+		if strings.Contains(readme, stale) {
+			t.Errorf("README still makes cm a binding of librdmacm: %q", stale)
+		}
+	}
+}
+
 // TestREADMEDescribesThePoll checks that the Command line section names the
 // flag of the poll before a wait, its Config field and the form that polls
 // as rsockets do, for their polling_time, and no longer a negative form.
@@ -178,10 +208,11 @@ func TestREADMEExplainsTheCopy(t *testing.T) {
 	}
 }
 
-// TestREADMERequirements checks that Requirements asks for the rdma-core
-// libraries at run time, no longer for the development packages and C
-// compiler a cgo build needed, and confines the release that librdmacm's
-// rsockets need to the tests and benchmarks, which run them.
+// TestREADMERequirements checks that Requirements asks at run time for
+// libibverbs and its providers alone, no longer for librdmacm nor for the
+// development packages and C compiler a cgo build needed, and names
+// librdmacm, of the release its rsockets need, only for the tests and
+// benchmarks, which hold the package against it.
 func TestREADMERequirements(t *testing.T) {
 	requirements := section(readREADME(t), "## Requirements")
 	if requirements == "" {
@@ -200,6 +231,20 @@ func TestREADMERequirements(t *testing.T) {
 			t.Errorf("the Requirements section lacks %q", want)
 		}
 	}
+	runTime := sentencesWith(requirements, "at run time")
+	if len(runTime) == 0 {
+		t.Error(`the Requirements section lacks "at run time"`)
+	}
+	for _, s := range runTime {
+		if !strings.Contains(s, "`libibverbs1`") || !strings.Contains(s, "`ibverbs-providers`") || strings.Contains(s, "librdmacm") {
+			t.Errorf("the Requirements section asks at run time for other than libibverbs and its providers: %q", s)
+		}
+	}
+	for _, s := range sentencesWith(requirements, "librdmacm") {
+		if !strings.Contains(s, "tests") {
+			t.Errorf("the Requirements section names librdmacm outside the tests: %q", s)
+		}
+	}
 	said := sentencesWith(requirements, "rdma-core 53 or later")
 	if len(said) == 0 {
 		t.Error(`the Requirements section lacks "rdma-core 53 or later"`)
@@ -213,20 +258,23 @@ func TestREADMERequirements(t *testing.T) {
 
 // TestREADMEPlatforms checks that Platforms names the six supported Linux
 // architectures and how each is verified, the independence from cgo, the
-// error a host without the libraries gets, the libc the no-cgo build
-// targets, and that iWARP devices are refused.
+// library loaded at run time, libibverbs alone, the error a host without it
+// gets, the libc the no-cgo build targets, and that iWARP devices are
+// refused.
 func TestREADMEPlatforms(t *testing.T) {
 	platforms := section(readREADME(t), "## Platforms")
 	if platforms == "" {
 		t.Fatal("README has no Platforms section")
 	}
-	if strings.Contains(platforms, "Linux with cgo") {
-		t.Error("the Platforms section still makes cgo the real implementation")
+	for _, stale := range []string{"Linux with cgo", "librdmacm"} {
+		if strings.Contains(platforms, stale) {
+			t.Errorf("the Platforms section still mentions %q", stale)
+		}
 	}
 	for _, want := range []string{
 		"amd64", "arm64", "loong64", "ppc64le", "riscv64", "s390x",
 		"Soft-RoCE", "without a device", "cross vet", "layout",
-		"`CGO_ENABLED`", "errors.ErrUnsupported", "glibc", "musl",
+		"`CGO_ENABLED`", "`libibverbs.so.1`", "errors.ErrUnsupported", "glibc", "musl",
 		"linux/386", "linux/arm",
 	} {
 		if !strings.Contains(platforms, want) {

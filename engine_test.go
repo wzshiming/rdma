@@ -4,8 +4,11 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io/fs"
 	"path/filepath"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -27,28 +30,49 @@ func TestPlatformEngineIsNative(t *testing.T) {
 	}
 }
 
-// The binding of librdmacm's rsockets serves the tests alone, whose control
-// the librdmacm engine is: no file the package builds from, on any platform,
-// imports it.
-func TestOnlyTheTestsImportTheBinding(t *testing.T) {
-	names, err := filepath.Glob("*.go")
+// The bindings of librdmacm, internal/rdmacm of its connection manager and
+// internal/rsocket of its rsockets, serve the tests alone, as the references
+// the package and cm are held against: no non-test file of the module, on
+// any platform, imports them.
+func TestOnlyTheTestsImportTheBindings(t *testing.T) {
+	bindings := []string{
+		"github.com/wzshiming/rdma/internal/rdmacm",
+		"github.com/wzshiming/rdma/internal/rsocket",
+	}
+	fset := token.NewFileSet()
+	checked := 0
+	err := filepath.WalkDir(".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		name := d.Name()
+		if d.IsDir() {
+			// Directories the go command ignores.
+			if path != "." && (name == "testdata" || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_")) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			return nil
+		}
+		f, err := parser.ParseFile(fset, path, nil, parser.ImportsOnly)
+		if err != nil {
+			return err
+		}
+		checked++
+		for _, imp := range f.Imports {
+			if p, err := strconv.Unquote(imp.Path.Value); err == nil && slices.Contains(bindings, p) {
+				t.Errorf("%s imports %s", path, p)
+			}
+		}
+		return nil
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	fset := token.NewFileSet()
-	for _, name := range names {
-		if strings.HasSuffix(name, "_test.go") {
-			continue
-		}
-		f, err := parser.ParseFile(fset, name, nil, parser.ImportsOnly)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, imp := range f.Imports {
-			if imp.Path.Value == `"github.com/wzshiming/rdma/internal/rsocket"` {
-				t.Errorf("%s imports internal/rsocket", name)
-			}
-		}
+	if checked == 0 {
+		t.Fatal("no file of the module to check")
 	}
 }
 

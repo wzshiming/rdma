@@ -70,10 +70,16 @@ jobs:
       run: |
         docker run --rm rdma:smoke help | tee "$RUNNER_TEMP/help"
         grep -q '^Usage: rdma' "$RUNNER_TEMP/help"
+        # The image carries libibverbs and its providers but no librdmacm: the
+        # loader's cache lists the one, and no file is named after the other.
+        docker run --rm --user 0 --entrypoint sh rdma:smoke -c 'ldconfig -p && find / -xdev -name "librdmacm*"' | tee "$RUNNER_TEMP/libraries"
+        grep -q 'libibverbs\.so\.1 ' "$RUNNER_TEMP/libraries"
+        if grep librdmacm "$RUNNER_TEMP/libraries"; then exit 1; fi
         # The container gets no /dev/infiniband, so libibverbs lists no device
-        # and rdma_cm, which the native engine listens through, answers ENODEV
-        # for its event channel: the binary reaches both libraries at run time,
-        # whatever the host carries. A library that fails to load reads
+        # and cm, which the package listens through, answers ENODEV under
+        # rdma_create_event_channel, as librdmacm would: the binary reaches
+        # libibverbs at run time, whatever the host carries, and needs no
+        # librdmacm. A library that fails to load reads
         # "dynlib: <library>: <reason>" instead.
         docker run --rm rdma:smoke devices | tee "$RUNNER_TEMP/devices"
         grep -qx 'no RDMA devices' "$RUNNER_TEMP/devices"

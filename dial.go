@@ -33,8 +33,8 @@ type Dialer struct {
 // the route to it. The peer may be any rsockets application. Errors are
 // *net.OpError values: errors.Is reports syscall.ECONNREFUSED when nobody
 // listens on the port, the context's error when it ends first, and
-// errors.ErrUnsupported on platforms without rdma-core, when its libraries
-// cannot be loaded, and on an iWARP device.
+// errors.ErrUnsupported on platforms without rdma-core, when libibverbs.so.1
+// cannot be loaded at run time, and on an iWARP device.
 func Dial(network, address string) (*Conn, error) {
 	var d Dialer
 	return d.DialContext(context.Background(), network, address)

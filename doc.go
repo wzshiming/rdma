@@ -2,11 +2,14 @@
 // of the net package.
 //
 // The package is a Go implementation of rsockets (rsocket(7)), the stream
-// protocol of librdmacm, on the verbs and cm packages of this module. A
-// connection speaks the protocol over an RDMA queue pair, so it talks to any
-// rsockets application, and it is addressed like TCP: an IP address, which
-// selects the device through rdma_cm, and a port. Dial connects to a
-// listener:
+// protocol of librdmacm, on the verbs and cm packages of this module: verbs
+// binds libibverbs, which with the provider of the device is all the package
+// loads at run time, and cm implements the RDMA connection manager in Go on
+// the kernel's rdma_cm device. librdmacm itself is what the tests and
+// benchmarks hold the package against. A connection speaks the protocol over
+// an RDMA queue pair, so it talks to any rsockets application, and it is
+// addressed like TCP: an IP address, which selects the device through
+// rdma_cm, and a port. Dial connects to a listener:
 //
 //	conn, err := rdma.Dial("rdma", "10.200.0.1:4791")
 //	if err != nil {
@@ -64,13 +67,13 @@
 // with os.ErrDeadlineExceeded (Timeout reports true), and every error is a
 // *net.OpError on net "rdma": errors.Is matches syscall.ECONNREFUSED when
 // nobody listens, and errors.ErrUnsupported on platforms without rdma-core,
-// where the package still compiles, or when libibverbs.so.1 or
-// librdmacm.so.1 cannot be loaded at run time. A connection lost without the
-// peer's close reads as syscall.ECONNRESET, once what arrived before is
-// read, where stock rsockets report the end of the stream. Close and
-// CloseWrite return at once while the peer is alive; when it has vanished,
-// Close gives the posted sends at most a second, while stock rsockets wait
-// out the retry timeout of the transport.
+// where the package still compiles, or when libibverbs.so.1 cannot be
+// loaded at run time. A connection lost without the peer's close reads as
+// syscall.ECONNRESET, once what arrived before is read, where stock rsockets
+// report the end of the stream. Close and CloseWrite return at once while
+// the peer is alive; when it has vanished, Close gives the posted sends at
+// most a second, while stock rsockets wait out the retry timeout of the
+// transport.
 //
 // *Conn implements io.ReaderFrom and io.WriterTo, which io.Copy uses in
 // either direction. ReadFrom sends what the source reads, each read as soon

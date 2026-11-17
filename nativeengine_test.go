@@ -148,16 +148,15 @@ func TestNativeListenerRejectsRequests(t *testing.T) {
 }
 
 // A native dial fails at once with a dial *net.OpError matching
-// errors.ErrUnsupported when one of the libraries it runs on, the first or
-// the second it loads, cannot be loaded.
+// errors.ErrUnsupported when libibverbs, the one library it runs on, cannot
+// be loaded.
 func TestNativeDialWithoutALibraryIsUnsupported(t *testing.T) {
 	const missing = "/nonexistent/"
 	for _, tt := range []struct {
 		name      string
 		libraries []string
 	}{
-		{"libibverbs", []string{missing + "libibverbs.so.1", "librdmacm.so.1"}},
-		{"librdmacm", []string{"libibverbs.so.1", missing + "librdmacm.so.1"}},
+		{"libibverbs", []string{missing + "libibverbs.so.1"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			d := Dialer{eng: nativeEngine{libraries: tt.libraries}}
@@ -174,16 +173,15 @@ func TestNativeDialWithoutALibraryIsUnsupported(t *testing.T) {
 }
 
 // A native listen fails at once with a listen *net.OpError matching
-// errors.ErrUnsupported when one of the libraries it runs on, the first or
-// the second it loads, cannot be loaded.
+// errors.ErrUnsupported when libibverbs, the one library it runs on, cannot
+// be loaded.
 func TestNativeListenWithoutALibraryIsUnsupported(t *testing.T) {
 	const missing = "/nonexistent/"
 	for _, tt := range []struct {
 		name      string
 		libraries []string
 	}{
-		{"libibverbs", []string{missing + "libibverbs.so.1", "librdmacm.so.1"}},
-		{"librdmacm", []string{"libibverbs.so.1", missing + "librdmacm.so.1"}},
+		{"libibverbs", []string{missing + "libibverbs.so.1"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			lc := ListenConfig{eng: nativeEngine{libraries: tt.libraries}}
