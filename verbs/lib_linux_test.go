@@ -102,6 +102,37 @@ func TestLibraryWithoutDeviceIndexLoads(t *testing.T) {
 	t.Logf("%d devices report -1", len(devs))
 }
 
+// ibv_query_ece and ibv_set_ece are optional: a library without them, older
+// than rdma-core 31, loads, and its queue pairs report EOPNOTSUPP, as those
+// of a provider without ECE do, without a call into the library.
+func TestLibraryWithoutECELoads(t *testing.T) {
+	useLibrary(t, "libibverbs.so.1")
+	libMu.Lock()
+	query, set := queryECEName, setECEName
+	queryECEName, setECEName = "ibv_query_ece_of_a_newer_library", "ibv_set_ece_of_a_newer_library"
+	libMu.Unlock()
+	t.Cleanup(func() {
+		libMu.Lock()
+		defer libMu.Unlock()
+		queryECEName, setECEName = query, set
+	})
+	if _, err := Devices(); err != nil {
+		var errno syscall.Errno
+		if !errors.As(err, &errno) {
+			t.Fatalf("Devices() from a library without %s and %s: %v, want nil or an errno", query, set, err)
+		}
+	}
+	qp := fakeQP(t, QPTypeRC)
+	ece, err := qp.QueryECE()
+	var opErr *OpError
+	if ece != (ECE{}) || !errors.As(err, &opErr) || opErr.Op != "ibv_query_ece" || !errors.Is(err, syscall.EOPNOTSUPP) {
+		t.Errorf("QueryECE() = %+v, %v; want none and an *OpError of ibv_query_ece with EOPNOTSUPP", ece, err)
+	}
+	if err := qp.SetECE(ECE{VendorID: 0x02c9, Options: 1}); !errors.As(err, &opErr) || opErr.Op != "ibv_set_ece" || !errors.Is(err, syscall.EOPNOTSUPP) {
+		t.Errorf("SetECE() error = %v, want an *OpError of ibv_set_ece with EOPNOTSUPP", err)
+	}
+}
+
 func TestCreateAHWithoutLibrary(t *testing.T) {
 	useLibrary(t, missingLibrary)
 	_, err := PDFromPointer(nil).CreateAH(&AHAttr{})

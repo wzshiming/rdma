@@ -263,6 +263,13 @@ type IbvSge struct {
 	Lkey   uint32
 }
 
+// IbvEce is struct ibv_ece.
+type IbvEce struct {
+	Vendor_id uint32
+	Options   uint32
+	Comp_mask uint32
+}
+
 // IbvSendWr is struct ibv_send_wr. Of the wr union only the rdma member is
 // named; IbvSendWrUd is its ud member. The qp_type union and the bind_mw/tso
 // union at the end are padding.

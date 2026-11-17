@@ -42,12 +42,16 @@
 //
 // The package does what librdmacm does for the functions it offers, with the
 // commands of the kernel's device /dev/infiniband/rdma_cm (ABI version 4) and
-// with package verbs on the devices, and a peer may run either. It departs
-// from librdmacm where nothing it offers depends on it: it exchanges no
-// vendor options (ECE), asks no ibacm for the routes of InfiniBand and reads
-// none of the GID and path records of a connection; and it keeps the default
-// protection domain of a device for the life of the process, where librdmacm
-// frees it with the device's last identifier.
+// with package verbs on the devices, and a peer may run either. That includes
+// the vendor option exchange (ECE) of ID.CreateQP, ID.Connect and
+// Request.Accept, which tests check step by step without a device and through
+// the kernel against a peer on Soft-RoCE, whose queue pairs have no ECE unless
+// a test simulates it; no device that supports ECE has run the
+// exchange. It departs from librdmacm where nothing it offers depends on it:
+// it asks no ibacm for the routes of InfiniBand and reads none of the GID and
+// path records of a connection; and it keeps the default protection domain of
+// a device for the life of the process, where librdmacm frees it with the
+// device's last identifier.
 //
 // It also departs in two lifetimes. The queue pair belongs to its ID, and
 // the *verbs.QP that ID.CreateQP and ID.QP return releases nothing on Close,

@@ -201,6 +201,12 @@ func (q *QP) AttachMulticast(gid GID, lid uint16) error { return unsupported("ib
 // DetachMulticast detaches the queue pair from a multicast group.
 func (q *QP) DetachMulticast(gid GID, lid uint16) error { return unsupported("ibv_detach_mcast") }
 
+// QueryECE returns the current ECE of the queue pair.
+func (q *QP) QueryECE() (ECE, error) { return ECE{}, unsupported("ibv_query_ece") }
+
+// SetECE sets the ECE options the queue pair is to use.
+func (q *QP) SetECE(ece ECE) error { return unsupported("ibv_set_ece") }
+
 // Close destroys the queue pair.
 func (q *QP) Close() error { return nil }
 

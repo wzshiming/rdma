@@ -17,9 +17,14 @@ import (
 // libName is the SONAME the first use opens; only a test points it elsewhere.
 var libName = "libibverbs.so.1"
 
-// deviceIndexName is the one function a library may lack: without it, every
+// deviceIndexName is a function a library may lack: without it, every
 // device reports index -1. Only a test points it elsewhere.
 var deviceIndexName = "ibv_get_device_index"
+
+// queryECEName and setECEName are the functions a library before rdma-core
+// 31 lacks: without them, every queue pair reports EOPNOTSUPP, as one of a
+// provider without ECE does. Only a test points them elsewhere.
+var queryECEName, setECEName = "ibv_query_ece", "ibv_set_ece"
 
 // funcs holds the exported functions of libibverbs the package calls. The
 // four verbs the header inlines (post_send, post_recv, poll_cq and
@@ -34,6 +39,7 @@ type funcs struct {
 	allocPD, deallocPD, regMR, deregMR                             dynlib.Func
 	createQP, destroyQP, modifyQP, queryQP                         dynlib.Func
 	createAH, destroyAH, attachMcast, detachMcast                  dynlib.Func
+	queryECE, setECE                                               dynlib.Func // zero when the library lacks them
 	wcStatusStr                                                    dynlib.Func
 }
 
@@ -100,6 +106,8 @@ func load(op string) (*funcs, error) {
 		}
 	}
 	f.getDeviceIndex, _ = l.Lookup(deviceIndexName)
+	f.queryECE, _ = l.Lookup(queryECEName)
+	f.setECE, _ = l.Lookup(setECEName)
 	lib.Store(f)
 	return f, nil
 }

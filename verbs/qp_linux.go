@@ -291,6 +291,43 @@ func (q *QP) DetachMulticast(gid GID, lid uint16) error {
 	return nil
 }
 
+// QueryECE returns the current ECE of the queue pair (ibv_query_ece). A
+// provider without ECE, or a libibverbs that lacks the function, reports
+// syscall.EOPNOTSUPP, which matches errors.ErrUnsupported.
+func (q *QP) QueryECE() (ECE, error) {
+	f, err := load("ibv_query_ece")
+	if err != nil {
+		return ECE{}, err
+	}
+	if f.queryECE.Addr() == 0 {
+		return ECE{}, &OpError{Op: "ibv_query_ece", Err: syscall.EOPNOTSUPP}
+	}
+	var ce rdmaabi.IbvEce
+	if rc, _ := f.queryECE.Int(caddr(q.qp), uintptr(unsafe.Pointer(&ce)), 0, 0, 0, 0); rc != 0 {
+		return ECE{}, opErrorRC("ibv_query_ece", rc)
+	}
+	return ECE{VendorID: ce.Vendor_id, Options: ce.Options}, nil
+}
+
+// SetECE sets the ECE options the queue pair is to use (ibv_set_ece), which
+// the provider applies in the transitions that support them. A provider
+// without ECE, a libibverbs that lacks the function, or a zero VendorID
+// reports syscall.EOPNOTSUPP.
+func (q *QP) SetECE(ece ECE) error {
+	f, err := load("ibv_set_ece")
+	if err != nil {
+		return err
+	}
+	if f.setECE.Addr() == 0 {
+		return &OpError{Op: "ibv_set_ece", Err: syscall.EOPNOTSUPP}
+	}
+	ce := rdmaabi.IbvEce{Vendor_id: ece.VendorID, Options: ece.Options}
+	if rc, _ := f.setECE.Int(caddr(q.qp), uintptr(unsafe.Pointer(&ce)), 0, 0, 0, 0); rc != 0 {
+		return opErrorRC("ibv_set_ece", rc)
+	}
+	return nil
+}
+
 // Close destroys the queue pair. A second Close is a no-op.
 func (q *QP) Close() error {
 	qp := q.qp

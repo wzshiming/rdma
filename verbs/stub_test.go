@@ -107,6 +107,18 @@ func TestStubMulticastIsUnsupported(t *testing.T) {
 	}
 }
 
+func TestStubECEIsUnsupported(t *testing.T) {
+	qp := verbs.QPFromPointer(nil)
+	ece, err := qp.QueryECE()
+	var opErr *verbs.OpError
+	if ece != (verbs.ECE{}) || !errors.As(err, &opErr) || !errors.Is(err, errors.ErrUnsupported) {
+		t.Errorf("QP.QueryECE() = %+v, %v; want none and an *OpError matching errors.ErrUnsupported", ece, err)
+	}
+	if err := qp.SetECE(verbs.ECE{VendorID: 0x02c9}); !errors.As(err, &opErr) || !errors.Is(err, errors.ErrUnsupported) {
+		t.Errorf("QP.SetECE() error = %v, want an *OpError matching errors.ErrUnsupported", err)
+	}
+}
+
 func TestStubDeviceIndexIsUnknown(t *testing.T) {
 	if got := new(verbs.Device).Index(); got != -1 {
 		t.Errorf("Device.Index() = %d, want -1", got)

@@ -118,6 +118,8 @@ type ID struct {
 	// The depths of the connection as rdma_connect and rdma_accept keep
 	// them; those of the request on an incoming connection.
 	initiatorDepth, responderResources uint8
+	// The ECE of the queue pair and the peer's, as librdmacm keeps them.
+	localECE, remoteECE verbs.ECE
 	// connectError is set when the connect response failed here; the peer's
 	// REJECTED and DISCONNECTED are not reported then.
 	connectError bool
@@ -217,7 +219,14 @@ func (id *ID) CreateQP(pd *verbs.PD, attr *verbs.QPInitAttr) (*verbs.QP, error) 
 	if err != nil {
 		return nil, opError(op, cause(err))
 	}
-	if err := id.modify(qp, verbs.QPStateInit, nil); err != nil {
+	err = id.initECE(eceOf(qp))
+	if err == nil {
+		err = id.modify(qp, verbs.QPStateInit, nil)
+	}
+	if err == nil {
+		err = id.setLocalECE(eceOf(qp))
+	}
+	if err != nil {
 		qp.Close()
 		return nil, opError(op, err)
 	}
@@ -316,7 +325,7 @@ func (id *ID) connect(p ConnParam) error {
 	}
 	id.initiatorDepth, id.responderResources = connectDepths(p, id.dev.limits)
 	cp := kernelConnParam(p, id.ownQP.Num(), id.initiatorDepth, id.responderResources)
-	if err := id.ch.Connect(id.handle, cp, ucma.ECE{}); err != nil {
+	if err := id.ch.Connect(id.handle, cp, id.connectECE()); err != nil {
 		return opError(op, err)
 	}
 	return nil
@@ -426,13 +435,13 @@ func (id *ID) process(uev ucma.Event, op string) (*event, error) {
 			ev.typ, ev.status = EventAddrError, -1
 		}
 	case EventConnectResponse:
-		if id.ownQP != nil {
-			if id.connectResponse() != nil {
-				ev.typ, ev.status = EventConnectError, -1
-				id.connectError = true
-			} else {
-				ev.typ = EventEstablished
-			}
+		if id.ownQP == nil {
+			id.receivedECE(uev.ECE)
+		} else if id.connectResponse(uev.ECE) != nil {
+			ev.typ, ev.status = EventConnectError, -1
+			id.connectError = true
+		} else {
+			ev.typ = EventEstablished
 		}
 	case EventRejected:
 		if id.connectError {
@@ -471,16 +480,30 @@ func (id *ID) queryAddr() error {
 }
 
 // connectResponse completes the connection the peer accepted, as
-// ucma_process_conn_resp does: RTR and RTS with the kernel's attributes, then
-// the ACCEPT without parameters that tells the peer the queue pair is ready.
-// A failure moves the queue pair to ERR.
-func (id *ID) connectResponse() error {
-	err := id.modifyRTR(maxDepth)
+// ucma_process_conn_resp_ece and ucma_process_conn_resp do: the ECE of the
+// peer's answer on the queue pair, RTR and RTS with the kernel's attributes,
+// the ACCEPT without parameters that tells the peer the queue pair is ready,
+// then the options the queue pair accepted as the local ones. An answer of
+// another vendor, or a failure after the ECE is set, moves the queue pair to
+// ERR.
+func (id *ID) connectResponse(answer ucma.ECE) error {
+	set, err := id.answerECE(answer)
+	if err != nil {
+		id.moveTo(verbs.QPStateErr)
+		return err
+	}
+	if err := eceError(eceOf(id.ownQP).SetECE(set)); err != nil {
+		return err
+	}
+	err = id.modifyRTR(maxDepth)
 	if err == nil {
 		err = id.modifyRTS(maxDepth)
 	}
 	if err == nil {
 		err = id.ch.Accept(id.handle, 0, nil, ucma.ECE{})
+	}
+	if err == nil {
+		err = id.queryLocalECE(eceOf(id.ownQP))
 	}
 	if err != nil {
 		id.moveTo(verbs.QPStateErr)
@@ -690,6 +713,7 @@ func (l *Listener) request(uev ucma.Event) (*Request, error) {
 	id.setDevice(dev, info.PortNum)
 	id.local, id.remote = info.Src, info.Dst
 	id.initiatorDepth, id.responderResources = conn.InitiatorDepth, conn.ResponderResources
+	id.receivedECE(uev.ECE)
 	return &Request{ID: id, PrivateData: conn.PrivateData, ResponderResources: conn.ResponderResources, InitiatorDepth: conn.InitiatorDepth}, nil
 }
 
@@ -746,7 +770,7 @@ func (id *ID) accept(p ConnParam) error {
 		return opError(op, err)
 	}
 	cp := kernelConnParam(p, id.ownQP.Num(), id.initiatorDepth, id.responderResources)
-	if err := id.ch.Accept(id.handle, id.uid, &cp, ucma.ECE{}); err != nil {
+	if err := id.ch.Accept(id.handle, id.uid, &cp, id.acceptECE()); err != nil {
 		id.moveTo(verbs.QPStateErr)
 		return opError(op, err)
 	}

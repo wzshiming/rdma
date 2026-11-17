@@ -50,6 +50,7 @@ var mirrors = []mirror{
 	{c: "struct ibv_send_wr", member: "wr.ud", at: unsafe.Offsetof(IbvSendWr{}.Wr), t: reflect.TypeFor[IbvSendWrUd]()},
 	{c: "struct ibv_recv_wr", t: reflect.TypeFor[IbvRecvWr]()},
 	{c: "struct ibv_sge", t: reflect.TypeFor[IbvSge]()},
+	{c: "struct ibv_ece", t: reflect.TypeFor[IbvEce]()},
 	{c: "struct rdma_event_channel", t: reflect.TypeFor[RdmaEventChannel]()},
 	{c: "struct rdma_cm_id", t: reflect.TypeFor[RdmaCmId]()},
 	{c: "struct rdma_route", t: reflect.TypeFor[RdmaRoute]()},

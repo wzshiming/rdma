@@ -650,6 +650,15 @@ type QPAttr struct {
 	RateLimit        uint32
 }
 
+// ECE is the enhanced connection establishment data of a queue pair (struct
+// ibv_ece): the IEEE OUI of the provider's vendor and options of that
+// vendor's devices, which the two ends of a connection exchange through the
+// connection manager.
+type ECE struct {
+	VendorID uint32
+	Options  uint32
+}
+
 // SGE is a scatter/gather element (struct ibv_sge); build one with MR.SGE.
 type SGE struct {
 	Addr   uint64

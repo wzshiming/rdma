@@ -211,6 +211,10 @@ struct ibv_sge 16
 struct ibv_sge.addr 0 8
 struct ibv_sge.length 8 4
 struct ibv_sge.lkey 12 4
+struct ibv_ece 12
+struct ibv_ece.vendor_id 0 4
+struct ibv_ece.options 4 4
+struct ibv_ece.comp_mask 8 4
 struct rdma_event_channel 4
 struct rdma_event_channel.fd 0 4
 struct rdma_cm_id 416
