@@ -226,8 +226,12 @@ type AddrInfo struct {
 }
 
 // QueryAddr queries the addresses and the device of an identifier.
-func (c *Channel) QueryAddr(id uint32) (AddrInfo, error) {
-	cmd := rdmaabi.UcmaAbiQuery{Id: id, Option: queryAddr}
+func (c *Channel) QueryAddr(id uint32) (AddrInfo, error) { return c.queryAddrs(id, queryAddr) }
+
+// queryAddrs sends a query whose response is a struct
+// ucma_abi_query_addr_resp and reads the response.
+func (c *Channel) queryAddrs(id, option uint32) (AddrInfo, error) {
+	cmd := rdmaabi.UcmaAbiQuery{Id: id, Option: option}
 	// A kernel that does not report the index leaves the field as it is.
 	resp := rdmaabi.UcmaAbiQueryAddrResp{Ibdev_index: math.MaxUint32}
 	if err := call(c, cmdQuery, &cmd, &cmd.Response, &resp); err != nil {
