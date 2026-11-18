@@ -13,11 +13,14 @@
 // byte arrays, host-order fields are fixed-size integers, and each field
 // bears the C member name with an upper-case initial.
 //
-// IbvDevice, IbvContext, IbvCq and IbvQp mirror the leading fields of their
-// C structures only: struct ibv_device up to transport_type, which is all the
-// bindings read of it, and the other three up to the pthread objects whose
+// IbvDevice, IbvContext, IbvCq, IbvQp and IbvSrq mirror the leading fields of
+// their C structures only: struct ibv_device up to transport_type, which is
+// all the bindings read of it, and the others up to the pthread objects whose
 // size depends on the architecture. libibverbs allocates them; Go code never
-// does.
+// does. IbvContextAbiCompat gives, for each architecture, the offset of the
+// abi_compat member that follows the mutex of struct ibv_context, and
+// VerbsContext mirrors the members of struct verbs_context that precede the
+// struct ibv_context it ends with, at their distance from it.
 //
 // The tests pin the layout in testdata/layout.txt and compare it with the
 // installed rdma-core headers through the C compiler of every architecture

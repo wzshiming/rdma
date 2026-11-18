@@ -98,7 +98,9 @@ type IbvContextOps struct {
 	_             [11]uint64
 	Poll_cq       uint64
 	Req_notify_cq uint64
-	_             [12]uint64
+	_             [7]uint64
+	Post_srq_recv uint64
+	_             [4]uint64
 	Post_send     uint64
 	Post_recv     uint64
 	_             [5]uint64
@@ -111,6 +113,40 @@ type IbvContext struct {
 	Cmd_fd           int32
 	Async_fd         int32
 	Num_comp_vectors int32
+}
+
+// IbvContextAbiCompat maps each GOARCH to offsetof(struct ibv_context,
+// abi_compat), the member that ends the struct and follows its mutex,
+// glibc's pthread_mutex_t of 48 bytes on arm64 and 40 on the other
+// architectures. musl's has 40 bytes on all of them, which puts abi_compat
+// at 320 on arm64 too: the 328 of the table points past the struct there,
+// and the bindings find no extended ops.
+var IbvContextAbiCompat = map[string]uintptr{
+	"amd64":   320,
+	"arm64":   328,
+	"loong64": 320,
+	"ppc64le": 320,
+	"riscv64": 320,
+	"s390x":   320,
+}
+
+// VerbsAbiIsExtended is __VERBS_ABI_IS_EXTENDED, the abi_compat of a struct
+// ibv_context that is the context member of a struct verbs_context.
+const VerbsAbiIsExtended = ^uint64(0)
+
+// VerbsContext is the part of struct verbs_context that precedes its context
+// member, from create_qp_ex on. The struct grows at its front from one
+// rdma-core release to the next, so these members keep their distance from
+// the context member, where the mirror ends; sz is the size of the whole
+// struct as the library knows it.
+type VerbsContext struct {
+	Create_qp_ex  uint64
+	Get_srq_num   uint64
+	Create_srq_ex uint64
+	Open_xrcd     uint64
+	Close_xrcd    uint64
+	_             uint64 // _ABI_placeholder3
+	Sz            uint64
 }
 
 // IbvCompChannel is struct ibv_comp_channel.
@@ -203,6 +239,24 @@ type IbvQpInitAttr struct {
 	_          [4]byte
 }
 
+// IbvQpInitAttrEx is struct ibv_qp_init_attr_ex, which the create_qp_ex of
+// struct verbs_context takes: the members of IbvQpInitAttr, then comp_mask
+// and those it selects. The members after xrcd, which the bindings leave
+// zero, are padding.
+type IbvQpInitAttrEx struct {
+	Qp_context uint64
+	Send_cq    uint64
+	Recv_cq    uint64
+	Srq        uint64
+	Cap        IbvQpCap
+	Qp_type    uint32
+	Sq_sig_all int32
+	Comp_mask  uint32
+	Pd         uint64
+	Xrcd       uint64
+	_          [56]byte
+}
+
 // IbvGlobalRoute is struct ibv_global_route.
 type IbvGlobalRoute struct {
 	Dgid          IbvGid
@@ -271,8 +325,8 @@ type IbvEce struct {
 }
 
 // IbvSendWr is struct ibv_send_wr. Of the wr union only the rdma member is
-// named; IbvSendWrUd is its ud member. The qp_type union and the bind_mw/tso
-// union at the end are padding.
+// named; IbvSendWrUd is its ud member. Of the qp_type union the xrc member
+// is named; the bind_mw/tso union at the end is padding.
 type IbvSendWr struct {
 	Wr_id      uint64
 	Next       uint64
@@ -289,7 +343,12 @@ type IbvSendWr struct {
 		}
 		_ [16]byte
 	}
-	_ [56]byte
+	Qp_type struct {
+		Xrc struct {
+			Remote_srqn uint32
+		}
+	}
+	_ [52]byte
 }
 
 // IbvSendWrUd is the ud member of the wr union of struct ibv_send_wr, the
@@ -307,4 +366,54 @@ type IbvRecvWr struct {
 	Sg_list uint64
 	Num_sge int32
 	_       [4]byte
+}
+
+// IbvSrq is the leading part of struct ibv_srq, up to the mutex.
+type IbvSrq struct {
+	Context     uint64
+	Srq_context uint64
+	Pd          uint64
+	Handle      uint32
+	_           [4]byte
+}
+
+// IbvSrqAttr is struct ibv_srq_attr.
+type IbvSrqAttr struct {
+	Max_wr    uint32
+	Max_sge   uint32
+	Srq_limit uint32
+}
+
+// IbvSrqInitAttr is struct ibv_srq_init_attr, which ibv_create_srq takes.
+type IbvSrqInitAttr struct {
+	Srq_context uint64
+	Attr        IbvSrqAttr
+	_           [4]byte
+}
+
+// IbvSrqInitAttrEx is struct ibv_srq_init_attr_ex, which the create_srq_ex
+// of struct verbs_context takes. The tm_cap member at the end, which the
+// bindings leave zero, is padding.
+type IbvSrqInitAttrEx struct {
+	Srq_context uint64
+	Attr        IbvSrqAttr
+	Comp_mask   uint32
+	Srq_type    uint32
+	_           [4]byte
+	Pd          uint64
+	Xrcd        uint64
+	Cq          uint64
+	_           [8]byte
+}
+
+// IbvXrcd is struct ibv_xrcd.
+type IbvXrcd struct {
+	Context uint64
+}
+
+// IbvXrcdInitAttr is struct ibv_xrcd_init_attr.
+type IbvXrcdInitAttr struct {
+	Comp_mask uint32
+	Fd        int32
+	Oflags    int32
 }

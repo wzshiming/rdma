@@ -210,6 +210,48 @@ func (q *QP) SetECE(ece ECE) error { return unsupported("ibv_set_ece") }
 // Close destroys the queue pair.
 func (q *QP) Close() error { return nil }
 
+// SRQ is a shared receive queue; libibverbs is unavailable on this platform.
+type SRQ struct{}
+
+// CreateSRQ creates a shared receive queue.
+func (p *PD) CreateSRQ(attr *SRQInitAttr) (*SRQ, error) { return nil, unsupported("ibv_create_srq") }
+
+// SRQFromPointer wraps a struct ibv_srq pointer without owning it.
+func SRQFromPointer(p unsafe.Pointer) *SRQ { return &SRQ{} }
+
+// Pointer returns the underlying struct ibv_srq pointer.
+func (s *SRQ) Pointer() unsafe.Pointer { return nil }
+
+// PostRecv posts receive work requests.
+func (s *SRQ) PostRecv(wrs ...RecvWR) error { return unsupported("ibv_post_srq_recv") }
+
+// Modify applies the attr fields selected by mask.
+func (s *SRQ) Modify(attr *SRQAttr, mask SRQAttrMask) error { return unsupported("ibv_modify_srq") }
+
+// Query returns the attributes of the shared receive queue.
+func (s *SRQ) Query() (*SRQAttr, error) { return nil, unsupported("ibv_query_srq") }
+
+// Num returns the number of the shared receive queue.
+func (s *SRQ) Num() (uint32, error) { return 0, unsupported("ibv_get_srq_num") }
+
+// Close destroys the shared receive queue.
+func (s *SRQ) Close() error { return nil }
+
+// XRCD is an XRC domain; libibverbs is unavailable on this platform.
+type XRCD struct{}
+
+// OpenXRCD opens an XRC domain.
+func (c *Context) OpenXRCD(fd, oflags int) (*XRCD, error) { return nil, unsupported("ibv_open_xrcd") }
+
+// XRCDFromPointer wraps a struct ibv_xrcd pointer without owning it.
+func XRCDFromPointer(p unsafe.Pointer) *XRCD { return &XRCD{} }
+
+// Pointer returns the underlying struct ibv_xrcd pointer.
+func (x *XRCD) Pointer() unsafe.Pointer { return nil }
+
+// Close closes the XRC domain.
+func (x *XRCD) Close() error { return nil }
+
 // AH is an address handle; libibverbs is unavailable on this platform.
 type AH struct{}
 

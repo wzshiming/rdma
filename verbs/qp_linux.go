@@ -22,6 +22,7 @@ type QP struct {
 	qp       *rdmaabi.IbvQp
 	owned    bool
 	ud       bool        // its sends are datagrams
+	xrc      bool        // its sends name the remote SRQ
 	postSend dynlib.Func // post_send of the device context
 	postRecv dynlib.Func // post_recv of the device context
 	send     postBuf[rdmaabi.IbvSendWr]
@@ -62,27 +63,27 @@ func newQP(qp *rdmaabi.IbvQp, owned bool) *QP {
 		q.postSend = dynlib.FuncAt(uintptr(ops.Post_send))
 		q.postRecv = dynlib.FuncAt(uintptr(ops.Post_recv))
 		q.ud = QPType(qp.Qp_type) == QPTypeUD
+		q.xrc = QPType(qp.Qp_type) == QPTypeXRCSend
 	}
 	return q
 }
 
-// CreateQP creates a queue pair and stores the granted capacities in attr.Cap.
+// CreateQP creates a queue pair and stores the granted capacities in
+// attr.Cap: through ibv_create_qp, or, of type QPTypeXRCRecv, in the XRC
+// domain attr.XRCD through the create_qp_ex of the domain's device, as
+// ibv_create_qp_ex does, which reports syscall.EOPNOTSUPP on a device or
+// library without it.
 func (p *PD) CreateQP(attr *QPInitAttr) (*QP, error) {
+	if attr.Type == QPTypeXRCRecv {
+		return p.createQPEx(attr)
+	}
+	ia, err := qpInitAttrToC(attr)
+	if err != nil {
+		return nil, &OpError{Op: "ibv_create_qp", Err: err}
+	}
 	f, err := load("ibv_create_qp")
 	if err != nil {
 		return nil, err
-	}
-	var ia rdmaabi.IbvQpInitAttr
-	if attr.SendCQ != nil {
-		ia.Send_cq = uint64(caddr(attr.SendCQ.cq))
-	}
-	if attr.RecvCQ != nil {
-		ia.Recv_cq = uint64(caddr(attr.RecvCQ.cq))
-	}
-	ia.Cap = capToC(attr.Cap)
-	ia.Qp_type = uint32(attr.Type)
-	if attr.SignalAll {
-		ia.Sq_sig_all = 1
 	}
 	qp, errno := f.createQP.Ptr(uintptr(p.pd), uintptr(unsafe.Pointer(&ia)), 0, 0, 0, 0)
 	if qp == 0 {
@@ -92,6 +93,85 @@ func (p *PD) CreateQP(attr *QPInitAttr) (*QP, error) {
 	q := newQP(dynlib.Pointer[rdmaabi.IbvQp](qp), true)
 	qps.Store(qp, q)
 	return q, nil
+}
+
+// qpInitAttrToC converts attr into the struct ibv_qp_init_attr of
+// ibv_create_qp. A domain is refused with EINVAL but on an XRC receive queue
+// pair: older libraries take its handle for the PD of any other type. A
+// closed SRQ is refused with os.ErrClosed: the provider would take it for
+// none and give the queue pair a receive queue of its own.
+func qpInitAttrToC(attr *QPInitAttr) (rdmaabi.IbvQpInitAttr, error) {
+	var ia rdmaabi.IbvQpInitAttr
+	if attr.XRCD != nil && attr.Type != QPTypeXRCRecv {
+		return ia, syscall.EINVAL
+	}
+	if attr.SendCQ != nil {
+		ia.Send_cq = uint64(caddr(attr.SendCQ.cq))
+	}
+	if attr.RecvCQ != nil {
+		ia.Recv_cq = uint64(caddr(attr.RecvCQ.cq))
+	}
+	if attr.SRQ != nil {
+		if attr.SRQ.srq == nil {
+			return ia, os.ErrClosed
+		}
+		ia.Srq = uint64(caddr(attr.SRQ.srq))
+	}
+	ia.Cap = capToC(attr.Cap)
+	ia.Qp_type = uint32(attr.Type)
+	if attr.SignalAll {
+		ia.Sq_sig_all = 1
+	}
+	return ia, nil
+}
+
+func (p *PD) createQPEx(attr *QPInitAttr) (*QP, error) {
+	ia, err := qpInitAttrExToC(attr, p.pd)
+	if err != nil {
+		return nil, &OpError{Op: "ibv_create_qp_ex", Err: err}
+	}
+	ctx := uintptr(attr.XRCD.xrcd.Context)
+	create := verbsOp(ctx, unsafe.Offsetof(rdmaabi.VerbsContext{}.Create_qp_ex))
+	if create.Addr() == 0 {
+		return nil, &OpError{Op: "ibv_create_qp_ex", Err: syscall.EOPNOTSUPP}
+	}
+	qp, errno := create.Ptr(ctx, uintptr(unsafe.Pointer(&ia)), 0, 0, 0, 0)
+	if qp == 0 {
+		return nil, opError("ibv_create_qp_ex", errno)
+	}
+	attr.Cap = capFromC(ia.Cap)
+	q := newQP(dynlib.Pointer[rdmaabi.IbvQp](qp), true)
+	qps.Store(qp, q)
+	return q, nil
+}
+
+// qpInitAttrExToC converts attr, of a queue pair in an XRC domain on the
+// struct ibv_pd at pd, into the struct ibv_qp_init_attr_ex of create_qp_ex:
+// that of ibv_create_qp followed by the PD and the domain. A missing domain
+// is invalid and a closed one refused with os.ErrClosed.
+func qpInitAttrExToC(attr *QPInitAttr, pd unsafe.Pointer) (rdmaabi.IbvQpInitAttrEx, error) {
+	base, err := qpInitAttrToC(attr)
+	if err != nil {
+		return rdmaabi.IbvQpInitAttrEx{}, err
+	}
+	if attr.XRCD == nil {
+		return rdmaabi.IbvQpInitAttrEx{}, syscall.EINVAL
+	}
+	if attr.XRCD.xrcd == nil {
+		return rdmaabi.IbvQpInitAttrEx{}, os.ErrClosed
+	}
+	return rdmaabi.IbvQpInitAttrEx{
+		Qp_context: base.Qp_context,
+		Send_cq:    base.Send_cq,
+		Recv_cq:    base.Recv_cq,
+		Srq:        base.Srq,
+		Cap:        base.Cap,
+		Qp_type:    base.Qp_type,
+		Sq_sig_all: base.Sq_sig_all,
+		Comp_mask:  1<<0 | 1<<1, // IBV_QP_INIT_ATTR_PD and _XRCD
+		Pd:         uint64(uintptr(pd)),
+		Xrcd:       uint64(caddr(attr.XRCD.xrcd)),
+	}, nil
 }
 
 // lookupQP returns the QP created for the struct ibv_qp at addr, or a
@@ -199,10 +279,14 @@ func sendWRToC(cw *rdmaabi.IbvSendWr, w *SendWR) {
 }
 
 // requestToC fills cw from w as a send of q: a datagram of a UD queue pair
-// carries its destination in place of the RDMA address. The provider follows
-// the address handle's pointer, so a missing or closed one is refused here.
+// carries its destination in place of the RDMA address, and a send of an XRC
+// send queue pair the number of the remote SRQ. The provider follows the
+// address handle's pointer, so a missing or closed one is refused here.
 func (q *QP) requestToC(cw *rdmaabi.IbvSendWr, w *SendWR) error {
 	sendWRToC(cw, w)
+	if q.xrc {
+		cw.Qp_type.Xrc.Remote_srqn = w.RemoteSRQN
+	}
 	if !q.ud {
 		return nil
 	}
@@ -226,13 +310,24 @@ func (q *QP) PostRecv(wrs ...RecvWR) error {
 	if len(wrs) == 0 {
 		return nil
 	}
+	q.recv.mu.Lock()
+	defer q.recv.mu.Unlock()
+	first := recvChain(&q.recv, wrs)
+	rc, _ := q.postRecv.Int(caddr(q.qp), uintptr(unsafe.Pointer(first)), uintptr(unsafe.Pointer(&q.recv.bad)), 0, 0, 0)
+	if rc != 0 {
+		return opErrorRC("ibv_post_recv", rc)
+	}
+	return nil
+}
+
+// recvChain builds wrs as one chain in b, whose mutex the caller holds, and
+// returns its first request.
+func recvChain(b *postBuf[rdmaabi.IbvRecvWr], wrs []RecvWR) *rdmaabi.IbvRecvWr {
 	nsge := 0
 	for i := range wrs {
 		nsge += len(wrs[i].SGE)
 	}
-	q.recv.mu.Lock()
-	defer q.recv.mu.Unlock()
-	cwrs, sges := q.recv.reserve(len(wrs), nsge)
+	cwrs, sges := b.reserve(len(wrs), nsge)
 	for i := range wrs {
 		w, cw := &wrs[i], &cwrs[i]
 		cw.Wr_id = w.ID
@@ -245,11 +340,7 @@ func (q *QP) PostRecv(wrs ...RecvWR) error {
 			sges = fillSGEs(sges, w.SGE)
 		}
 	}
-	rc, _ := q.postRecv.Int(caddr(q.qp), uintptr(unsafe.Pointer(&cwrs[0])), uintptr(unsafe.Pointer(&q.recv.bad)), 0, 0, 0)
-	if rc != 0 {
-		return opErrorRC("ibv_post_recv", rc)
-	}
-	return nil
+	return &cwrs[0]
 }
 
 // fillSGEs copies src to the front of dst and returns the rest of dst.

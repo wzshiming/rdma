@@ -3,6 +3,7 @@ package rdmaabi
 import (
 	"flag"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -22,9 +23,16 @@ type mirror struct {
 	// only; the library allocates these, never Go code.
 	prefix bool
 	// member designates the member of c that t mirrors instead, one with no
-	// C type of its own, such as "wr.ud"; at is its offset in c.
+	// C type of its own, such as "wr.ud"; at is its offset in c, or arches
+	// holds it for each GOARCH where it depends on the architecture.
 	member string
 	at     uintptr
+	arches map[string]uintptr
+	// last marks a member that ends c.
+	last bool
+	// before names the member of c that t ends at, for a type that mirrors
+	// the members preceding it: their offsets count back from it.
+	before string
 }
 
 var mirrors = []mirror{
@@ -35,6 +43,8 @@ var mirrors = []mirror{
 	{c: "union ibv_gid", t: reflect.TypeFor[IbvGid]()},
 	{c: "struct ibv_context_ops", t: reflect.TypeFor[IbvContextOps]()},
 	{c: "struct ibv_context", t: reflect.TypeFor[IbvContext](), prefix: true},
+	{c: "struct ibv_context", member: "abi_compat", arches: IbvContextAbiCompat, last: true, t: reflect.TypeFor[uint64]()},
+	{c: "struct verbs_context", t: reflect.TypeFor[VerbsContext](), before: "context"},
 	{c: "struct ibv_comp_channel", t: reflect.TypeFor[IbvCompChannel]()},
 	{c: "struct ibv_async_event", t: reflect.TypeFor[IbvAsyncEvent]()},
 	{c: "struct ibv_wc", t: reflect.TypeFor[IbvWc]()},
@@ -42,6 +52,7 @@ var mirrors = []mirror{
 	{c: "struct ibv_cq", t: reflect.TypeFor[IbvCq](), prefix: true},
 	{c: "struct ibv_qp", t: reflect.TypeFor[IbvQp](), prefix: true},
 	{c: "struct ibv_qp_init_attr", t: reflect.TypeFor[IbvQpInitAttr]()},
+	{c: "struct ibv_qp_init_attr_ex", t: reflect.TypeFor[IbvQpInitAttrEx]()},
 	{c: "struct ibv_qp_cap", t: reflect.TypeFor[IbvQpCap]()},
 	{c: "struct ibv_qp_attr", t: reflect.TypeFor[IbvQpAttr]()},
 	{c: "struct ibv_ah_attr", t: reflect.TypeFor[IbvAhAttr]()},
@@ -51,6 +62,12 @@ var mirrors = []mirror{
 	{c: "struct ibv_recv_wr", t: reflect.TypeFor[IbvRecvWr]()},
 	{c: "struct ibv_sge", t: reflect.TypeFor[IbvSge]()},
 	{c: "struct ibv_ece", t: reflect.TypeFor[IbvEce]()},
+	{c: "struct ibv_srq", t: reflect.TypeFor[IbvSrq](), prefix: true},
+	{c: "struct ibv_srq_attr", t: reflect.TypeFor[IbvSrqAttr]()},
+	{c: "struct ibv_srq_init_attr", t: reflect.TypeFor[IbvSrqInitAttr]()},
+	{c: "struct ibv_srq_init_attr_ex", t: reflect.TypeFor[IbvSrqInitAttrEx]()},
+	{c: "struct ibv_xrcd", t: reflect.TypeFor[IbvXrcd]()},
+	{c: "struct ibv_xrcd_init_attr", t: reflect.TypeFor[IbvXrcdInitAttr]()},
 	{c: "struct rdma_event_channel", t: reflect.TypeFor[RdmaEventChannel]()},
 	{c: "struct rdma_cm_id", t: reflect.TypeFor[RdmaCmId]()},
 	{c: "struct rdma_route", t: reflect.TypeFor[RdmaRoute]()},
@@ -137,16 +154,27 @@ func cName(goName string) string {
 func layoutText() string {
 	var b strings.Builder
 	b.WriteString("# Layout of the rdma-core mirrors in bytes: \"<C type> <size>\" and\n")
-	b.WriteString("# \"<C type>.<member> <offset> <size>\". Regenerate with go test -update\n")
-	b.WriteString("# once TestLayoutsMatchC passes.\n")
+	b.WriteString("# \"<C type>.<member> <offset> <size>\"; \"<member>@<GOARCH>\" holds on that\n")
+	b.WriteString("# architecture, and a negative offset counts back from the member a\n")
+	b.WriteString("# mirror ends at. Regenerate with go test -update once TestLayoutsMatchC\n")
+	b.WriteString("# passes.\n")
 	for _, m := range mirrors {
-		if m.member != "" {
+		switch {
+		case m.arches != nil:
+			for _, arch := range slices.Sorted(maps.Keys(m.arches)) {
+				fmt.Fprintf(&b, "%s.%s@%s %d %d\n", m.c, m.member, arch, m.arches[arch], m.t.Size())
+			}
+		case m.member != "":
 			fmt.Fprintf(&b, "%s.%s %d %d\n", m.c, m.member, m.at, m.t.Size())
-		} else {
+		default:
 			fmt.Fprintf(&b, "%s %d\n", m.c, m.t.Size())
 		}
 		for _, f := range fields(m) {
-			fmt.Fprintf(&b, "%s.%s %d %d\n", m.c, f.name, f.offset, f.size)
+			if m.before != "" {
+				fmt.Fprintf(&b, "%s.%s -%d %d\n", m.c, f.name, m.t.Size()-f.offset, f.size)
+			} else {
+				fmt.Fprintf(&b, "%s.%s %d %d\n", m.c, f.name, f.offset, f.size)
+			}
 		}
 	}
 	return b.String()

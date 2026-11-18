@@ -38,7 +38,9 @@ var errToolchain = errors.New("rdmaabi: C toolchain missing")
 // the installed rdma-core headers that every mirrored field has the offset
 // and size of its C member and that every mirror has the size of its C type,
 // or at most that size for the leading-fields mirrors, or the offset and size
-// of its member for the mirrors of a member. The architectures
+// of its member for the mirrors of a member, the offset on that architecture
+// for a member whose offset depends on it. The fields of a mirror that ends
+// at a member are checked for their distance to it. The architectures
 // RDMA_TEST_LAYOUT_ARCHES lists must all be checked; unset, the host's own
 // is checked when its toolchain is found and skipped otherwise.
 func TestLayoutsMatchC(t *testing.T) {
@@ -107,7 +109,7 @@ func checkAgainstC(dir, arch string) (string, error) {
 		return "", err
 	}
 	src := filepath.Join(dir, "layout.c")
-	if err := os.WriteFile(src, []byte(assertions()), 0o644); err != nil {
+	if err := os.WriteFile(src, []byte(assertions(arch)), 0o644); err != nil {
 		return "", err
 	}
 	// The cross compilers do not search /usr/local/include; last, so that
@@ -160,8 +162,8 @@ func headerPaths(preprocessed string) []string {
 }
 
 // assertions renders a C file whose static assertions hold when every
-// mirror has the layout of its C type.
-func assertions() string {
+// mirror has the layout of its C type on arch.
+func assertions(arch string) string {
 	var b strings.Builder
 	b.WriteString("#include <stddef.h>\n")
 	for _, h := range headers {
@@ -171,13 +173,29 @@ func assertions() string {
 	b.WriteString("#define FIELD(type, member, offset, size) \\\n")
 	b.WriteString("\t_Static_assert(offsetof(type, member) == offset, #type \".\" #member \": offset\"); \\\n")
 	b.WriteString("\t_Static_assert(sizeof(((type *)0)->member) == size, #type \".\" #member \": size\")\n\n")
+	b.WriteString("#define BEFORE(type, member, anchor, distance, size) \\\n")
+	b.WriteString("\t_Static_assert(offsetof(type, anchor) - offsetof(type, member) == distance, #type \".\" #member \": distance to \" #anchor); \\\n")
+	b.WriteString("\t_Static_assert(sizeof(((type *)0)->member) == size, #type \".\" #member \": size\")\n\n")
 	for _, m := range mirrors {
 		for _, f := range fields(m) {
-			fmt.Fprintf(&b, "FIELD(%s, %s, %d, %d);\n", m.c, f.name, f.offset, f.size)
+			if m.before != "" {
+				fmt.Fprintf(&b, "BEFORE(%s, %s, %s, %d, %d);\n", m.c, f.name, m.before, m.t.Size()-f.offset, f.size)
+			} else {
+				fmt.Fprintf(&b, "FIELD(%s, %s, %d, %d);\n", m.c, f.name, f.offset, f.size)
+			}
 		}
 		switch {
+		case m.arches != nil:
+			at := m.arches[arch]
+			fmt.Fprintf(&b, "FIELD(%s, %s, %d, %d);\n", m.c, m.member, at, m.t.Size())
+			if m.last {
+				fmt.Fprintf(&b, "_Static_assert(sizeof(%s) == %d, \"%s: %s does not end it\");\n", m.c, at+m.t.Size(), m.c, m.member)
+			}
+			b.WriteString("\n")
 		case m.member != "":
 			fmt.Fprintf(&b, "FIELD(%s, %s, %d, %d);\n\n", m.c, m.member, m.at, m.t.Size())
+		case m.before != "":
+			fmt.Fprintf(&b, "_Static_assert(offsetof(%s, %s) >= %d, \"%s: shorter before %s than its mirror\");\n\n", m.c, m.before, m.t.Size(), m.c, m.before)
 		case m.prefix:
 			fmt.Fprintf(&b, "_Static_assert(sizeof(%s) >= %d, \"%s: shorter than its mirror\");\n\n", m.c, m.t.Size(), m.c)
 		default:

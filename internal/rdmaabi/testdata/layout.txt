@@ -1,6 +1,8 @@
 # Layout of the rdma-core mirrors in bytes: "<C type> <size>" and
-# "<C type>.<member> <offset> <size>". Regenerate with go test -update
-# once TestLayoutsMatchC passes.
+# "<C type>.<member> <offset> <size>"; "<member>@<GOARCH>" holds on that
+# architecture, and a negative offset counts back from the member a
+# mirror ends at. Regenerate with go test -update once TestLayoutsMatchC
+# passes.
 struct ibv_device 24
 struct ibv_device.node_type 16 4
 struct ibv_device.transport_type 20 4
@@ -79,6 +81,7 @@ union ibv_gid 16
 struct ibv_context_ops 256
 struct ibv_context_ops.poll_cq 88 8
 struct ibv_context_ops.req_notify_cq 96 8
+struct ibv_context_ops.post_srq_recv 160 8
 struct ibv_context_ops.post_send 200 8
 struct ibv_context_ops.post_recv 208 8
 struct ibv_context 280
@@ -87,6 +90,19 @@ struct ibv_context.ops 8 256
 struct ibv_context.cmd_fd 264 4
 struct ibv_context.async_fd 268 4
 struct ibv_context.num_comp_vectors 272 4
+struct ibv_context.abi_compat@amd64 320 8
+struct ibv_context.abi_compat@arm64 328 8
+struct ibv_context.abi_compat@loong64 320 8
+struct ibv_context.abi_compat@ppc64le 320 8
+struct ibv_context.abi_compat@riscv64 320 8
+struct ibv_context.abi_compat@s390x 320 8
+struct verbs_context 56
+struct verbs_context.create_qp_ex -56 8
+struct verbs_context.get_srq_num -48 8
+struct verbs_context.create_srq_ex -40 8
+struct verbs_context.open_xrcd -32 8
+struct verbs_context.close_xrcd -24 8
+struct verbs_context.sz -8 8
 struct ibv_comp_channel 16
 struct ibv_comp_channel.context 0 8
 struct ibv_comp_channel.fd 8 4
@@ -141,6 +157,17 @@ struct ibv_qp_init_attr.srq 24 8
 struct ibv_qp_init_attr.cap 32 20
 struct ibv_qp_init_attr.qp_type 52 4
 struct ibv_qp_init_attr.sq_sig_all 56 4
+struct ibv_qp_init_attr_ex 136
+struct ibv_qp_init_attr_ex.qp_context 0 8
+struct ibv_qp_init_attr_ex.send_cq 8 8
+struct ibv_qp_init_attr_ex.recv_cq 16 8
+struct ibv_qp_init_attr_ex.srq 24 8
+struct ibv_qp_init_attr_ex.cap 32 20
+struct ibv_qp_init_attr_ex.qp_type 52 4
+struct ibv_qp_init_attr_ex.sq_sig_all 56 4
+struct ibv_qp_init_attr_ex.comp_mask 60 4
+struct ibv_qp_init_attr_ex.pd 64 8
+struct ibv_qp_init_attr_ex.xrcd 72 8
 struct ibv_qp_cap 20
 struct ibv_qp_cap.max_send_wr 0 4
 struct ibv_qp_cap.max_recv_wr 4 4
@@ -198,6 +225,7 @@ struct ibv_send_wr.send_flags 32 4
 struct ibv_send_wr.imm_data 36 4
 struct ibv_send_wr.wr.rdma.remote_addr 40 8
 struct ibv_send_wr.wr.rdma.rkey 48 4
+struct ibv_send_wr.qp_type.xrc.remote_srqn 72 4
 struct ibv_send_wr.wr.ud 40 16
 struct ibv_send_wr.wr.ud.ah 40 8
 struct ibv_send_wr.wr.ud.remote_qpn 48 4
@@ -215,6 +243,32 @@ struct ibv_ece 12
 struct ibv_ece.vendor_id 0 4
 struct ibv_ece.options 4 4
 struct ibv_ece.comp_mask 8 4
+struct ibv_srq 32
+struct ibv_srq.context 0 8
+struct ibv_srq.srq_context 8 8
+struct ibv_srq.pd 16 8
+struct ibv_srq.handle 24 4
+struct ibv_srq_attr 12
+struct ibv_srq_attr.max_wr 0 4
+struct ibv_srq_attr.max_sge 4 4
+struct ibv_srq_attr.srq_limit 8 4
+struct ibv_srq_init_attr 24
+struct ibv_srq_init_attr.srq_context 0 8
+struct ibv_srq_init_attr.attr 8 12
+struct ibv_srq_init_attr_ex 64
+struct ibv_srq_init_attr_ex.srq_context 0 8
+struct ibv_srq_init_attr_ex.attr 8 12
+struct ibv_srq_init_attr_ex.comp_mask 20 4
+struct ibv_srq_init_attr_ex.srq_type 24 4
+struct ibv_srq_init_attr_ex.pd 32 8
+struct ibv_srq_init_attr_ex.xrcd 40 8
+struct ibv_srq_init_attr_ex.cq 48 8
+struct ibv_xrcd 8
+struct ibv_xrcd.context 0 8
+struct ibv_xrcd_init_attr 12
+struct ibv_xrcd_init_attr.comp_mask 0 4
+struct ibv_xrcd_init_attr.fd 4 4
+struct ibv_xrcd_init_attr.oflags 8 4
 struct rdma_event_channel 4
 struct rdma_event_channel.fd 0 4
 struct rdma_cm_id 416

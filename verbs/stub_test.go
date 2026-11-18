@@ -125,6 +125,52 @@ func TestStubDeviceIndexIsUnknown(t *testing.T) {
 	}
 }
 
+func TestStubSRQIsUnsupported(t *testing.T) {
+	srq := verbs.SRQFromPointer(nil)
+	for name, call := range map[string]func() error{
+		"PD.CreateSRQ": func() error {
+			_, err := verbs.PDFromPointer(nil).CreateSRQ(&verbs.SRQInitAttr{Attr: verbs.SRQAttr{MaxWR: 1, MaxSGE: 1}})
+			return err
+		},
+		"SRQ.PostRecv": func() error { return srq.PostRecv(verbs.RecvWR{}) },
+		"SRQ.Modify":   func() error { return srq.Modify(&verbs.SRQAttr{Limit: 1}, verbs.SRQAttrLimit) },
+		"SRQ.Query":    func() error { _, err := srq.Query(); return err },
+	} {
+		err := call()
+		var opErr *verbs.OpError
+		if !errors.As(err, &opErr) || !errors.Is(err, errors.ErrUnsupported) {
+			t.Errorf("%s() error = %v, want an *OpError matching errors.ErrUnsupported", name, err)
+		}
+	}
+	if srq.Pointer() != nil {
+		t.Errorf("SRQ.Pointer() = %v, want nil", srq.Pointer())
+	}
+	if err := srq.Close(); err != nil {
+		t.Errorf("SRQ.Close() = %v, want nil", err)
+	}
+}
+
+func TestStubXRCIsUnsupported(t *testing.T) {
+	srq := verbs.SRQFromPointer(nil)
+	for name, call := range map[string]func() error{
+		"Context.OpenXRCD": func() error { _, err := verbs.ContextFromPointer(nil).OpenXRCD(-1, 0); return err },
+		"SRQ.Num":          func() error { _, err := srq.Num(); return err },
+	} {
+		err := call()
+		var opErr *verbs.OpError
+		if !errors.As(err, &opErr) || !errors.Is(err, errors.ErrUnsupported) {
+			t.Errorf("%s() error = %v, want an *OpError matching errors.ErrUnsupported", name, err)
+		}
+	}
+	xrcd := verbs.XRCDFromPointer(nil)
+	if xrcd.Pointer() != nil {
+		t.Errorf("XRCD.Pointer() = %v, want nil", xrcd.Pointer())
+	}
+	if err := xrcd.Close(); err != nil {
+		t.Errorf("XRCD.Close() = %v, want nil", err)
+	}
+}
+
 func TestStubQPContextIsEmpty(t *testing.T) {
 	if ctx := verbs.QPFromPointer(nil).Context(); ctx == nil || ctx.Pointer() != nil {
 		t.Errorf("QP.Context() = %v, want a context with a nil pointer", ctx)

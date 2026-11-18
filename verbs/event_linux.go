@@ -246,7 +246,7 @@ func (c *Context) WaitAsyncEvent(ctx context.Context) (*AsyncEvent, error) {
 }
 
 // asyncEventFromC reads the element union according to the event type: a
-// pointer for CQ and QP events, an int port number for port events.
+// pointer for CQ, QP and SRQ events, an int port number for port events.
 func asyncEventFromC(cev *rdmaabi.IbvAsyncEvent) AsyncEvent {
 	ev := AsyncEvent{Type: EventType(cev.Event_type)}
 	switch ev.Type {
@@ -255,6 +255,8 @@ func asyncEventFromC(cev *rdmaabi.IbvAsyncEvent) AsyncEvent {
 	case EventQPFatal, EventQPReqErr, EventQPAccessErr, EventCommEst, EventSQDrained,
 		EventPathMig, EventPathMigErr, EventQPLastWQEReached:
 		ev.QP = lookupQP(uintptr(binary.NativeEndian.Uint64(cev.Element[:])))
+	case EventSRQErr, EventSRQLimitReached:
+		ev.SRQ = lookupSRQ(uintptr(binary.NativeEndian.Uint64(cev.Element[:])))
 	case EventPortActive, EventPortErr, EventLIDChange, EventPkeyChange, EventSMChange,
 		EventClientReregister, EventGIDChange:
 		ev.Port = uint8(binary.NativeEndian.Uint32(cev.Element[:4]))
