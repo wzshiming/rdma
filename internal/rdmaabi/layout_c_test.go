@@ -23,12 +23,11 @@ var compilers = map[string]string{
 	"s390x":   "s390x-linux-gnu-gcc",
 }
 
-// includeDirs are searched in order for the rdma-core headers
-// infiniband/verbs.h, rdma/rdma_cma.h and rdma/rdma_cma_abi.h.
+// includeDirs are searched in order for the rdma-core headers.
 var includeDirs = []string{"/usr/local/include", "/usr/include"}
 
 // headers are the rdma-core headers the check compiles against.
-var headers = []string{"infiniband/verbs.h", "rdma/rdma_cma.h", "rdma/rdma_cma_abi.h"}
+var headers = []string{"infiniband/verbs.h", "infiniband/sa.h", "infiniband/ib.h", "rdma/rdma_cma.h", "rdma/rdma_cma_abi.h"}
 
 // errToolchain reports a missing compiler or missing headers, which skips
 // the check unless RDMA_TEST_LAYOUT_ARCHES demands the architecture.

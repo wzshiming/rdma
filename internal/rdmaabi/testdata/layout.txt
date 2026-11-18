@@ -269,6 +269,24 @@ struct ibv_xrcd_init_attr 12
 struct ibv_xrcd_init_attr.comp_mask 0 4
 struct ibv_xrcd_init_attr.fd 4 4
 struct ibv_xrcd_init_attr.oflags 8 4
+struct ibv_path_record 64
+struct ibv_path_record.service_id 0 8
+struct ibv_path_record.dgid 8 16
+struct ibv_path_record.sgid 24 16
+struct ibv_path_record.dlid 40 2
+struct ibv_path_record.slid 42 2
+struct ibv_path_record.flowlabel_hoplimit 44 4
+struct ibv_path_record.tclass 48 1
+struct ibv_path_record.reversible_numpath 49 1
+struct ibv_path_record.pkey 50 2
+struct ibv_path_record.qosclass_sl 52 2
+struct ibv_path_record.mtu 54 1
+struct ibv_path_record.rate 55 1
+struct ibv_path_record.packetlifetime 56 1
+struct ibv_path_record.preference 57 1
+struct ibv_path_data 72
+struct ibv_path_data.flags 0 4
+struct ibv_path_data.path 8 64
 struct rdma_event_channel 4
 struct rdma_event_channel.fd 0 4
 struct rdma_cm_id 416
@@ -315,6 +333,14 @@ struct rdma_conn_param.retry_count 12 1
 struct rdma_conn_param.rnr_retry_count 13 1
 struct rdma_conn_param.srq 14 1
 struct rdma_conn_param.qp_num 16 4
+struct sockaddr_ib 48
+struct sockaddr_ib.sib_family 0 2
+struct sockaddr_ib.sib_pkey 2 2
+struct sockaddr_ib.sib_flowinfo 4 4
+struct sockaddr_ib.sib_addr 8 16
+struct sockaddr_ib.sib_sid 24 8
+struct sockaddr_ib.sib_sid_mask 32 8
+struct sockaddr_ib.sib_scope_id 40 8
 struct ucma_abi_cmd_hdr 8
 struct ucma_abi_cmd_hdr.cmd 0 4
 struct ucma_abi_cmd_hdr.in 4 2
@@ -376,6 +402,11 @@ struct ucma_abi_query_addr_resp.dst_size 14 2
 struct ucma_abi_query_addr_resp.src_addr 16 128
 struct ucma_abi_query_addr_resp.dst_addr 144 128
 struct ucma_abi_query_addr_resp.ibdev_index 272 4
+struct ucma_abi_query_path_resp 8
+struct ucma_abi_query_path_resp.num_paths 0 4
+struct ucma_abi_query_path_resp.path_data[0] 8 72
+struct ucma_abi_query_path_resp.path_data[0].flags 8 4
+struct ucma_abi_query_path_resp.path_data[0].path 16 64
 struct ucma_abi_conn_param 272
 struct ucma_abi_conn_param.qp_num 0 4
 struct ucma_abi_conn_param.private_data 8 256

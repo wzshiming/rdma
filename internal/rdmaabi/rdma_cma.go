@@ -81,3 +81,15 @@ type RdmaCmEvent struct {
 		_    [32]byte
 	}
 }
+
+// SockaddrIb is struct sockaddr_ib of infiniband/ib.h, an address of the
+// AF_IB family; Sib_addr is its struct ib_addr, a GID.
+type SockaddrIb struct {
+	Sib_family   uint16
+	Sib_pkey     [2]byte // __be16
+	Sib_flowinfo [4]byte // __be32
+	Sib_addr     [16]byte
+	Sib_sid      [8]byte // __be64
+	Sib_sid_mask [8]byte // __be64
+	Sib_scope_id uint64
+}

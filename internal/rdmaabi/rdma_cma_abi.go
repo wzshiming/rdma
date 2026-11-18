@@ -101,6 +101,14 @@ type UcmaAbiQueryAddrResp struct {
 	_           [4]byte
 }
 
+// UcmaAbiQueryPathResp is struct ucma_abi_query_path_resp, the response to a
+// query with the option UCMA_QUERY_PATH, without the flexible array of
+// struct ibv_path_data that follows it.
+type UcmaAbiQueryPathResp struct {
+	Num_paths uint32
+	_         [4]byte
+}
+
 // UcmaAbiConnParam is struct ucma_abi_conn_param. The member after qp_num
 // is reserved here and the qkey of the kernel's header, which only AF_IB
 // addresses use.

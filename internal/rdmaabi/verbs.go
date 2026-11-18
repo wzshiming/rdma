@@ -417,3 +417,34 @@ type IbvXrcdInitAttr struct {
 	Fd        int32
 	Oflags    int32
 }
+
+// IbvPathRecord is struct ibv_path_record of infiniband/sa.h, a path record
+// in the subnet administrator's wire form: big-endian, with the bit fields
+// the C header's comments name packed into Flowlabel_hoplimit,
+// Reversible_numpath, Qosclass_sl, Mtu, Rate and Packetlifetime.
+type IbvPathRecord struct {
+	Service_id         [8]byte // __be64
+	Dgid               IbvGid
+	Sgid               IbvGid
+	Dlid               [2]byte // __be16
+	Slid               [2]byte // __be16
+	Flowlabel_hoplimit [4]byte // __be32
+	Tclass             uint8
+	Reversible_numpath uint8
+	Pkey               [2]byte // __be16
+	Qosclass_sl        [2]byte // __be16
+	Mtu                uint8
+	Rate               uint8
+	Packetlifetime     uint8
+	Preference         uint8
+	_                  [6]byte
+}
+
+// IbvPathData is struct ibv_path_data of infiniband/sa.h, a path record with
+// its IBV_PATH_FLAG_* flags; the kernel's struct ib_path_rec_data has its
+// layout.
+type IbvPathData struct {
+	Flags uint32
+	_     [4]byte
+	Path  IbvPathRecord
+}
