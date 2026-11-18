@@ -32,8 +32,11 @@ const (
 	cmdResolveAddr  = 21
 )
 
-// queryAddr is the option of a query for the addresses (UCMA_QUERY_ADDR).
-const queryAddr = 0
+// The options of a query (UCMA_QUERY_*).
+const (
+	queryAddr = 0
+	queryGID  = 2
+)
 
 // maxPrivateData is the most private data a request carries, whose length
 // is a byte; the CM messages limit it further.
@@ -227,6 +230,13 @@ type AddrInfo struct {
 
 // QueryAddr queries the addresses and the device of an identifier.
 func (c *Channel) QueryAddr(id uint32) (AddrInfo, error) { return c.queryAddrs(id, queryAddr) }
+
+// QueryGID queries the addresses of an identifier in their GID form, as
+// InfiniBand addresses in SrcIB and DstIB, with the device as QueryAddr
+// reports it. The kernel answers an identifier of AF_IB with its addresses,
+// and one of IP with the GIDs of its route, the partition key of its port
+// and the service ID of its port space and port.
+func (c *Channel) QueryGID(id uint32) (AddrInfo, error) { return c.queryAddrs(id, queryGID) }
 
 // queryAddrs sends a query whose response is a struct
 // ucma_abi_query_addr_resp and reads the response.

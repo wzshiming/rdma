@@ -100,6 +100,8 @@ func commandCalls(t *testing.T, from *Channel) []commandCall {
 			bytesOf(&rdmaabi.UcmaAbiResolveRoute{Cmd: 4, In: 8, Id: 7}), 0},
 		{"QueryAddr", func(c *Channel) error { _, err := c.QueryAddr(7); return err },
 			bytesOf(&rdmaabi.UcmaAbiQuery{Cmd: 19, In: 16, Out: 280, Id: 7, Option: 0}), 272},
+		{"QueryGID", func(c *Channel) error { _, err := c.QueryGID(7); return err },
+			bytesOf(&rdmaabi.UcmaAbiQuery{Cmd: 19, In: 16, Out: 280, Id: 7, Option: 2}), 272},
 		{"Listen", func(c *Channel) error { return c.Listen(7, 8) },
 			bytesOf(&rdmaabi.UcmaAbiListen{Cmd: 7, In: 8, Id: 7, Backlog: 8}), 0},
 		{"Connect", func(c *Channel) error { return c.Connect(7, testConn, testECE) },
@@ -321,6 +323,31 @@ func TestQueryAddrWithoutTheDeviceIndex(t *testing.T) {
 	}
 }
 
+// The GID query answers in the response of the address query with both
+// addresses as struct sockaddr_ib, which for an identifier of IP the kernel
+// makes of the GIDs, the partition key and the service ID of the port space
+// and the port. QueryGID reads them into SrcIB and DstIB.
+func TestQueryGIDDecodesTheGIDForms(t *testing.T) {
+	d := newFakeDevice(t)
+	resp := testAddrResp()
+	resp.Src_size, resp.Dst_size = 48, 48
+	resp.Src_addr = sockaddrIb("::ffff:10.200.0.1", 0xffff, 0, 0x0000000001061234, 0, 0)
+	resp.Dst_addr = sockaddrIb("::ffff:10.200.0.2", 0xffff, 0, 0x0000000001061d2f, 0, 0)
+	d.answer(bytesOf(&resp))
+	got, err := d.ch.QueryGID(7)
+	want := AddrInfo{
+		SrcIB:    IBAddr{GID: netip.MustParseAddr("::ffff:10.200.0.1"), PKey: 0xffff, ServiceID: 0x0000000001061234},
+		DstIB:    IBAddr{GID: netip.MustParseAddr("::ffff:10.200.0.2"), PKey: 0xffff, ServiceID: 0x0000000001061d2f},
+		NodeGUID: 0x020000fffe000001,
+		PortNum:  1,
+		PKey:     0xffff,
+		DevIndex: 3,
+	}
+	if got != want || err != nil {
+		t.Errorf("QueryGID() = %+v, %v; want %+v", got, err, want)
+	}
+}
+
 func testQPAttr() rdmaabi.IbUverbsQpAttr {
 	return rdmaabi.IbUverbsQpAttr{
 		Qp_attr_mask:    0x1fe5f,
@@ -381,6 +408,7 @@ func TestResponseMemoryIsPinnedForTheWrite(t *testing.T) {
 		{"CreateID", bytesOf(&rdmaabi.UcmaAbiCreateIdResp{Id: 42}), func(c *Channel) (any, error) { return c.CreateID(1, PortSpaceTCP, QPTypeRC) }, uint32(42)},
 		{"DestroyID", bytesOf(&rdmaabi.UcmaAbiDestroyIdResp{Events_reported: 3}), func(c *Channel) (any, error) { return c.DestroyID(7) }, uint32(3)},
 		{"QueryAddr", bytesOf(&addr), func(c *Channel) (any, error) { a, err := c.QueryAddr(7); return a.NodeGUID, err }, uint64(0x020000fffe000001)},
+		{"QueryGID", bytesOf(&addr), func(c *Channel) (any, error) { a, err := c.QueryGID(7); return a.NodeGUID, err }, uint64(0x020000fffe000001)},
 		{"InitQPAttr", bytesOf(&qpAttr), func(c *Channel) (any, error) { return c.InitQPAttr(7, 2) }, qpAttr},
 		{"MigrateID", bytesOf(&rdmaabi.UcmaAbiMigrateResp{Events_reported: 5}), func(c *Channel) (any, error) {
 			from := newFakeDevice(t)
