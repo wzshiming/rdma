@@ -103,6 +103,42 @@ func (id *DatagramID) LocalAddr() netip.AddrPort { return id.id.LocalAddr() }
 // identifier of BindDatagram.
 func (id *DatagramID) RemoteAddr() netip.AddrPort { return id.id.RemoteAddr() }
 
+// CreateQP creates the queue pair of the identifier (rdma_create_qp), whose
+// attr.Type is verbs.QPTypeUD, and takes it to RTS as ucma_init_ud_qp does:
+// INIT with the port, partition and Q_Key the kernel has for the
+// identifier, RTR, and RTS with send PSN 0; no connection moves it later.
+// The Q_Key is rdma_cm's for the UDP port space, 0x01234567. pd, attr and
+// the life of the queue pair are as for ID.CreateQP.
+func (id *DatagramID) CreateQP(pd *verbs.PD, attr *verbs.QPInitAttr) (*verbs.QP, error) {
+	return id.id.CreateQP(pd, attr)
+}
+
+// QP returns the queue pair created by CreateQP, or nil.
+func (id *DatagramID) QP() *verbs.QP { return id.id.QP() }
+
+// qpModifier is a queue pair as initUD moves it; a test stands in for it.
+type qpModifier interface {
+	Modify(attr *verbs.QPAttr, mask verbs.QPAttrMask) error
+}
+
+// initUD takes a UD queue pair to RTS as ucma_init_ud_qp does: INIT with the
+// attributes the kernel has for the identifier, its qkey among them, RTR
+// with the state alone and RTS with send PSN 0.
+func (id *ID) initUD(qp qpModifier) error {
+	k, err := id.ch.InitQPAttr(id.handle, uint32(verbs.QPStateInit))
+	if err != nil {
+		return err
+	}
+	attr, mask := qpAttrFromKernel(verbs.QPStateInit, &k)
+	if err := cause(qp.Modify(attr, mask)); err != nil {
+		return err
+	}
+	if err := cause(qp.Modify(&verbs.QPAttr{State: verbs.QPStateRTR}, verbs.QPAttrState)); err != nil {
+		return err
+	}
+	return cause(qp.Modify(&verbs.QPAttr{State: verbs.QPStateRTS}, verbs.QPAttrState|verbs.QPAttrSQPSN))
+}
+
 // Close destroys the queue pair and the identifier and wakes a pending wait
 // with an error. It never blocks on pending events; a second Close is a
 // no-op.

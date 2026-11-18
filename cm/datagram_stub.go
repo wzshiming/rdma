@@ -51,6 +51,14 @@ func (id *DatagramID) LocalAddr() netip.AddrPort { return netip.AddrPort{} }
 // RemoteAddr returns the address of the peer.
 func (id *DatagramID) RemoteAddr() netip.AddrPort { return netip.AddrPort{} }
 
+// CreateQP creates the queue pair of the identifier.
+func (id *DatagramID) CreateQP(pd *verbs.PD, attr *verbs.QPInitAttr) (*verbs.QP, error) {
+	return nil, unsupported("rdma_create_qp")
+}
+
+// QP returns the queue pair created by CreateQP.
+func (id *DatagramID) QP() *verbs.QP { return nil }
+
 // Close destroys the queue pair and the identifier.
 func (id *DatagramID) Close() error { return nil }
 

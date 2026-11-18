@@ -308,7 +308,7 @@ func (id *ID) CreateQP(pd *verbs.PD, attr *verbs.QPInitAttr) (*verbs.QP, error) 
 	}
 	err = id.initECE(eceOf(qp))
 	if err == nil {
-		err = id.modify(qp, verbs.QPStateInit, nil)
+		err = id.initQP(qp)
 	}
 	if err == nil {
 		err = id.setLocalECE(eceOf(qp))
@@ -351,6 +351,15 @@ func (id *ID) modify(qp *verbs.QP, state verbs.QPState, adjust func(*verbs.QPAtt
 		adjust(attr, &mask)
 	}
 	return cause(qp.Modify(attr, mask))
+}
+
+// initQP brings a new queue pair to INIT as ucma_init_conn_qp does, or that
+// of a datagram identifier to RTS as ucma_init_ud_qp does.
+func (id *ID) initQP(qp *verbs.QP) error {
+	if id.svc.qpType == ucma.QPTypeUD {
+		return id.initUD(qp)
+	}
+	return id.modify(qp, verbs.QPStateInit, nil)
 }
 
 // modifyRTR moves the queue pair to RTR as ucma_modify_qp_rtr does: to INIT

@@ -6,7 +6,10 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net/netip"
+	"slices"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -220,4 +223,80 @@ func TestDatagramRequest(t *testing.T) {
 		"ch1 MIGRATE_ID id=9",
 		"ch1 DESTROY_ID id=9",
 	})
+}
+
+// qpRecorder stands in for a queue pair and records what is done to it: the
+// transitions, with the attributes their masks name, and the multicast
+// groups it is attached to and detached from.
+type qpRecorder struct {
+	calls []string
+}
+
+func (q *qpRecorder) Modify(attr *verbs.QPAttr, mask verbs.QPAttrMask) error {
+	s := fmt.Sprintf("%v mask=%#x", attr.State, uint32(mask))
+	for _, f := range []struct {
+		bit   verbs.QPAttrMask
+		value string
+	}{
+		{verbs.QPAttrPkeyIndex, fmt.Sprintf("pkey_index=%d", attr.PkeyIndex)},
+		{verbs.QPAttrPort, fmt.Sprintf("port=%d", attr.Port)},
+		{verbs.QPAttrQKey, fmt.Sprintf("qkey=%#x", attr.QKey)},
+		{verbs.QPAttrSQPSN, fmt.Sprintf("sq_psn=%d", attr.SQPSN)},
+	} {
+		if mask&f.bit != 0 {
+			s += " " + f.value
+		}
+	}
+	q.calls = append(q.calls, s)
+	return nil
+}
+
+// udInitAttr is what the kernel answers INIT_QP_ATTR with for a datagram
+// identifier on port 1: the state, the partition index, the port and the
+// qkey of the UDP port space.
+var udInitAttr = rdmaabi.IbUverbsQpAttr{
+	Qp_attr_mask: uint32(verbs.QPAttrState | verbs.QPAttrPkeyIndex | verbs.QPAttrPort | verbs.QPAttrQKey),
+	Qp_state:     uint32(verbs.QPStateInit),
+	Qkey:         0x01234567,
+	Pkey_index:   2,
+	Port_num:     1,
+}
+
+// bindOnFake binds a datagram identifier on a fake kernel that reports the
+// fake device, and returns the kernel and the identifier, closed when the
+// test ends.
+func bindOnFake(t *testing.T) (*fakeKernel, *DatagramID) {
+	t.Helper()
+	k := newFakeKernel(t)
+	withDevice(t, fakeGUID, fakeIndex)
+	k.answerQuery(fakeGUID, fakeIndex)
+	k.qpAttr = udInitAttr
+	id, err := BindDatagram(netip.MustParseAddrPort("10.200.0.1:0"))
+	if err != nil {
+		t.Fatalf("BindDatagram() error: %v", err)
+	}
+	t.Cleanup(func() { id.Close() })
+	return k, id
+}
+
+// The queue pair of a datagram identifier goes to RTS as ucma_init_ud_qp
+// takes it there: INIT with the attributes the kernel has for the
+// identifier, its qkey among them, RTR with the state alone and RTS with
+// send PSN 0.
+func TestDatagramQueuePairTransitions(t *testing.T) {
+	k, id := bindOnFake(t)
+	n := len(k.commands())
+	qp := new(qpRecorder)
+	if err := id.id.initUD(qp); err != nil {
+		t.Fatalf("initUD() error: %v", err)
+	}
+	checkCommands(t, k.commands()[n:], []string{"ch0 INIT_QP_ATTR id=1 state=1"})
+	want := []string{
+		"INIT mask=0x71 pkey_index=2 port=1 qkey=0x1234567",
+		"RTR mask=0x1",
+		"RTS mask=0x10001 sq_psn=0",
+	}
+	if !slices.Equal(qp.calls, want) {
+		t.Errorf("transitions:\n\t%s\nwant:\n\t%s", strings.Join(qp.calls, "\n\t"), strings.Join(want, "\n\t"))
+	}
 }

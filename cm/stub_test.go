@@ -55,6 +55,10 @@ func TestStubUnsupported(t *testing.T) {
 			return err
 		}},
 		{"DatagramListener.Accept", func() error { _, err := dln.Accept(ctx); return err }},
+		{"DatagramID.CreateQP", func() error {
+			_, err := did.CreateQP(verbs.PDFromPointer(nil), &verbs.QPInitAttr{Type: verbs.QPTypeUD})
+			return err
+		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -74,7 +78,7 @@ func TestStubUnsupported(t *testing.T) {
 	if ln.Addr().IsValid() {
 		t.Errorf("stub Listener.Addr() = %v, want the zero value", ln.Addr())
 	}
-	if did.Device() != nil || did.Port() != 0 || did.LocalAddr().IsValid() || did.RemoteAddr().IsValid() || dln.Addr().IsValid() {
+	if did.Device() != nil || did.QP() != nil || did.Port() != 0 || did.LocalAddr().IsValid() || did.RemoteAddr().IsValid() || dln.Addr().IsValid() {
 		t.Error("stub DatagramID and DatagramListener accessors are not zero")
 	}
 	if err := did.Close(); err != nil {
