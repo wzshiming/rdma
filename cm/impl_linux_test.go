@@ -18,14 +18,18 @@ type impl struct {
 	name    string
 	listen  func(local netip.AddrPort, backlog int) (listener, error)
 	resolve func(ctx context.Context, local, remote netip.AddrPort) (conn, error)
+	// listenWith and resolveWith create the identifier with the options of
+	// a ListenConfig or a Dialer.
+	listenWith  func(lc cm.ListenConfig, local netip.AddrPort, backlog int) (listener, error)
+	resolveWith func(ctx context.Context, d cm.Dialer, local, remote netip.AddrPort) (conn, error)
 }
 
 // underTest is the implementation the tests examine, this package, the one
 // place that names it; reference is librdmacm's through the binding of
 // internal/rdmacm, which the tests compare it with.
 var (
-	underTest = impl{"cm", listenCM, resolveCM}
-	reference = impl{"librdmacm", listenReference, resolveReference}
+	underTest = impl{"cm", listenCM, resolveCM, listenConfigCM, dialerCM}
+	reference = impl{"librdmacm", listenReference, resolveReference, listenConfigReference, dialerReference}
 	impls     = []impl{underTest, reference}
 )
 
@@ -101,6 +105,22 @@ func resolveCM(ctx context.Context, local, remote netip.AddrPort) (conn, error) 
 	return id, nil
 }
 
+func listenConfigCM(lc cm.ListenConfig, local netip.AddrPort, backlog int) (listener, error) {
+	l, err := lc.Listen(local, backlog)
+	if err != nil {
+		return nil, err
+	}
+	return cmListener{l}, nil
+}
+
+func dialerCM(ctx context.Context, d cm.Dialer, local, remote netip.AddrPort) (conn, error) {
+	id, err := d.Resolve(ctx, local, remote)
+	if err != nil {
+		return nil, err
+	}
+	return id, nil
+}
+
 type cmListener struct{ *cm.Listener }
 
 func (l cmListener) Accept(ctx context.Context) (*request, error) {
@@ -128,6 +148,22 @@ func listenReference(local netip.AddrPort, backlog int) (listener, error) {
 
 func resolveReference(ctx context.Context, local, remote netip.AddrPort) (conn, error) {
 	id, err := rdmacm.Resolve(ctx, local, remote)
+	if err != nil {
+		return nil, err
+	}
+	return referenceConn{id}, nil
+}
+
+func listenConfigReference(lc cm.ListenConfig, local netip.AddrPort, backlog int) (listener, error) {
+	l, err := rdmacm.ListenConfig(lc).Listen(local, backlog)
+	if err != nil {
+		return nil, err
+	}
+	return referenceListener{l}, nil
+}
+
+func dialerReference(ctx context.Context, d cm.Dialer, local, remote netip.AddrPort) (conn, error) {
+	id, err := rdmacm.Dialer(d).Resolve(ctx, local, remote)
 	if err != nil {
 		return nil, err
 	}

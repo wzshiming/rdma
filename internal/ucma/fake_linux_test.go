@@ -39,7 +39,7 @@ func newFakeDevice(t *testing.T) *fakeDevice {
 		t.Fatal(err)
 	}
 	d := &fakeDevice{r: r, w: w}
-	d.ch = newChannel(r, d.write)
+	d.ch = NewChannel(r, d.write)
 	t.Cleanup(func() {
 		d.ch.Close()
 		w.Close()

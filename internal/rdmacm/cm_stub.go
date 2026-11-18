@@ -17,7 +17,15 @@ type ID struct{}
 
 // Resolve resolves the address and route to remote.
 func Resolve(ctx context.Context, local, remote netip.AddrPort) (*ID, error) {
+	return Dialer{}.Resolve(ctx, local, remote)
+}
+
+// Resolve resolves the address and route to remote with the options of d.
+func (d Dialer) Resolve(ctx context.Context, local, remote netip.AddrPort) (*ID, error) {
 	if err := checkResolveAddrs(local, remote); err != nil {
+		return nil, err
+	}
+	if err := d.options().check(); err != nil {
 		return nil, err
 	}
 	return nil, unsupported("rdma_resolve_addr")
@@ -66,7 +74,15 @@ type Listener struct{}
 
 // Listen listens for connection requests on local.
 func Listen(local netip.AddrPort, backlog int) (*Listener, error) {
+	return ListenConfig{}.Listen(local, backlog)
+}
+
+// Listen listens for connection requests on local with the options of lc.
+func (lc ListenConfig) Listen(local netip.AddrPort, backlog int) (*Listener, error) {
 	if err := checkListenAddr(local); err != nil {
+		return nil, err
+	}
+	if err := lc.options().check(); err != nil {
 		return nil, err
 	}
 	return nil, unsupported("rdma_listen")

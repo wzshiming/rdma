@@ -70,7 +70,7 @@ A peer on stock rsockets, `rstream` or a program run under `LD_PRELOAD=librsprel
 ## Packages
 
 - [`verbs`](https://pkg.go.dev/github.com/wzshiming/rdma/verbs) binds libibverbs: devices, protection domains, memory regions, completion queues and channels, queue pairs, work requests and completions, with every wait on the Go runtime poller.
-- [`cm`](https://pkg.go.dev/github.com/wzshiming/rdma/cm) is a Go implementation of the RDMA connection manager on the kernel's rdma_cm device, `/dev/infiniband/rdma_cm`, with `verbs` for the devices: resolving addresses, connecting and accepting RC connections with private data, and the events of a connection's life, as librdmacm does them.
+- [`cm`](https://pkg.go.dev/github.com/wzshiming/rdma/cm) is a Go implementation of the RDMA connection manager on the kernel's rdma_cm device, `/dev/infiniband/rdma_cm`, with `verbs` for the devices: resolving addresses, connecting and accepting RC connections with private data, the identifier options of `rdma_set_option` through `Dialer` and `ListenConfig`, and the events of a connection's life, as librdmacm does them.
 
 `verbs` exposes its rdma-core handles through `Pointer` methods and `*FromPointer` constructors, and `cm` gives out its device contexts and queue pairs as `verbs` values, so both interoperate with other code built on rdma-core.
 

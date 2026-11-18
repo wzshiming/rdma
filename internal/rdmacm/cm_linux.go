@@ -58,6 +58,62 @@ func destroyID(lib *funcs, id *rdmaabi.RdmaCmId, ch *rdmaabi.RdmaEventChannel) e
 	return err
 }
 
+// The level of the identifier options (RDMA_OPTION_ID) and their names.
+const (
+	rdmaOptionID           = 0
+	rdmaOptionIDTOS        = 0
+	rdmaOptionIDReuseAddr  = 1
+	rdmaOptionIDAFOnly     = 2
+	rdmaOptionIDAckTimeout = 3
+)
+
+// setOptions sets the options of o that are set on id with rdma_set_option,
+// in the order of their names: a uint8_t for TOS and ACK_TIMEOUT, an int for
+// REUSEADDR and AFONLY.
+func setOptions(lib *funcs, id *rdmaabi.RdmaCmId, o options) error {
+	if o.tos != nil {
+		tos := *o.tos
+		if err := setOption(lib, id, rdmaOptionIDTOS, unsafe.Pointer(&tos), 1); err != nil {
+			return err
+		}
+	}
+	if o.reuseAddr {
+		reuse := int32(1)
+		if err := setOption(lib, id, rdmaOptionIDReuseAddr, unsafe.Pointer(&reuse), 4); err != nil {
+			return err
+		}
+	}
+	if o.afOnly != nil {
+		var afOnly int32
+		if *o.afOnly {
+			afOnly = 1
+		}
+		if err := setOption(lib, id, rdmaOptionIDAFOnly, unsafe.Pointer(&afOnly), 4); err != nil {
+			return err
+		}
+	}
+	return setAckTimeout(lib, id, o)
+}
+
+// setAckTimeout sets the ACK timeout of o, if it is set, on id: that of a
+// Resolve or a Listen, or that of a request, which does not inherit its
+// listener's.
+func setAckTimeout(lib *funcs, id *rdmaabi.RdmaCmId, o options) error {
+	if o.ackTimeout == nil {
+		return nil
+	}
+	timeout := *o.ackTimeout
+	return setOption(lib, id, rdmaOptionIDAckTimeout, unsafe.Pointer(&timeout), 1)
+}
+
+// setOption sets the identifier option name of id to the size bytes at value.
+func setOption(lib *funcs, id *rdmaabi.RdmaCmId, name uintptr, value unsafe.Pointer, size uintptr) error {
+	if rc, errno := lib.setOption.Int(caddr(id), rdmaOptionID, name, uintptr(value), size, 0); rc != 0 {
+		return opError("rdma_set_option", errno)
+	}
+	return nil
+}
+
 // sockaddrIn and sockaddrIn6 are struct sockaddr_in and struct sockaddr_in6:
 // the family an sa_family_t in the host's byte order, the port two bytes in
 // network order whatever the host's, then the address; sin6_flowinfo and
@@ -256,9 +312,21 @@ func (id *ID) readRoute() {
 // the local address; otherwise its IP selects the device and its port, if
 // not 0, the local port. Both must be IP addresses: host names are the
 // caller's business. The timeout of each resolution step comes from the
-// deadline of ctx, or is 2 seconds.
+// deadline of ctx, or is 2 seconds. Resolve sets no option: it is
+// Dialer{}.Resolve.
 func Resolve(ctx context.Context, local, remote netip.AddrPort) (*ID, error) {
+	return Dialer{}.Resolve(ctx, local, remote)
+}
+
+// Resolve resolves the address and route to remote as the package's Resolve
+// does, on an identifier with the options of d. An option the kernel
+// refuses fails it with a *verbs.OpError of rdma_set_option.
+func (d Dialer) Resolve(ctx context.Context, local, remote netip.AddrPort) (*ID, error) {
 	if err := checkResolveAddrs(local, remote); err != nil {
+		return nil, err
+	}
+	opts := d.options()
+	if err := opts.check(); err != nil {
 		return nil, err
 	}
 	if err := ctx.Err(); err != nil {
@@ -270,6 +338,10 @@ func Resolve(ctx context.Context, local, remote netip.AddrPort) (*ID, error) {
 	}
 	ch, id, err := createID(lib)
 	if err != nil {
+		return nil, err
+	}
+	if err := setOptions(lib, id, opts); err != nil {
+		destroyID(lib, id, ch)
 		return nil, err
 	}
 	w, err := newFDWaiter(int(ch.Fd))
@@ -548,6 +620,7 @@ type Listener struct {
 	ch   *rdmaabi.RdmaEventChannel
 	w    *fdWaiter
 	addr netip.AddrPort
+	opts options // those of the listening identifier
 
 	mu     sync.Mutex
 	closed bool
@@ -556,8 +629,20 @@ type Listener struct {
 // Listen binds local, whose IP picks the device and may be unspecified, and
 // listens for connection requests; port 0 picks a free port. backlog bounds
 // the requests waiting to be accepted, 0 meaning the kernel's maximum.
+// Listen sets no option: it is ListenConfig{}.Listen.
 func Listen(local netip.AddrPort, backlog int) (*Listener, error) {
+	return ListenConfig{}.Listen(local, backlog)
+}
+
+// Listen binds local and listens as the package's Listen does, on an
+// identifier with the options of lc. An option the kernel refuses fails it
+// with a *verbs.OpError of rdma_set_option.
+func (lc ListenConfig) Listen(local netip.AddrPort, backlog int) (*Listener, error) {
 	if err := checkListenAddr(local); err != nil {
+		return nil, err
+	}
+	opts := lc.options()
+	if err := opts.check(); err != nil {
 		return nil, err
 	}
 	lib, err := load("rdma_listen")
@@ -566,6 +651,10 @@ func Listen(local netip.AddrPort, backlog int) (*Listener, error) {
 	}
 	ch, id, err := createID(lib)
 	if err != nil {
+		return nil, err
+	}
+	if err := setOptions(lib, id, opts); err != nil {
+		destroyID(lib, id, ch)
 		return nil, err
 	}
 	var ss sockaddrStorage
@@ -584,7 +673,7 @@ func Listen(local netip.AddrPort, backlog int) (*Listener, error) {
 		return nil, err
 	}
 	bound, _ := addrs(id)
-	return &Listener{lib: lib, id: id, ch: ch, w: w, addr: bound}, nil
+	return &Listener{lib: lib, id: id, ch: ch, w: w, addr: bound, opts: opts}, nil
 }
 
 // Addr returns the bound address, with the port actually chosen for port 0.
@@ -612,6 +701,10 @@ func (l *Listener) Accept(ctx context.Context) (*Request, error) {
 			case EventConnectRequest:
 				id, err := migrate(l.lib, ev.id)
 				if err != nil {
+					return false, err
+				}
+				if err := setAckTimeout(l.lib, id.id, l.opts); err != nil {
+					id.Close()
 					return false, err
 				}
 				req = &Request{ID: id, PrivateData: ev.privateData, ResponderResources: ev.responderResources, InitiatorDepth: ev.initiatorDepth}

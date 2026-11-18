@@ -28,6 +28,10 @@ var lastUID atomic.Uint64
 
 func newUID() uint64 { return lastUID.Add(1) }
 
+// openChannel opens an event channel on the kernel's device; a test replaces
+// it.
+var openChannel = ucma.Open
+
 // opError reports an operation that failed with err, an errno of the
 // kernel's device or of verbs.
 func opError(op string, err error) error { return &verbs.OpError{Op: op, Err: err} }
@@ -55,15 +59,26 @@ func resolveTimeout(ctx context.Context) time.Duration {
 	return time.Duration(min(max(d.Milliseconds(), 1), 1<<31-1)) * time.Millisecond
 }
 
-// createID opens an event channel and creates an identifier of the TCP port
-// space on it, as rdma_create_event_channel and rdma_create_id do.
-func createID() (*ucma.Channel, uint32, uint64, error) {
-	ch, err := ucma.Open()
+// service is the kind of identifier a configuration creates: its port space
+// and the type of its queue pairs.
+type service struct {
+	ps     ucma.PortSpace
+	qpType ucma.QPType
+}
+
+// connected is the service of Resolve and Listen: RC connections in the TCP
+// port space.
+var connected = service{ucma.PortSpaceTCP, ucma.QPTypeRC}
+
+// createID opens an event channel and creates an identifier of svc on it, as
+// rdma_create_event_channel and rdma_create_id do.
+func createID(svc service) (*ucma.Channel, uint32, uint64, error) {
+	ch, err := openChannel()
 	if err != nil {
 		return nil, 0, 0, opError("rdma_create_event_channel", err)
 	}
 	uid := newUID()
-	handle, err := ch.CreateID(uid, ucma.PortSpaceTCP, ucma.QPTypeRC)
+	handle, err := ch.CreateID(uid, svc.ps, svc.qpType)
 	if err != nil {
 		ch.Close()
 		return nil, 0, 0, opError("rdma_create_id", err)
@@ -139,9 +154,21 @@ func (id *ID) setDevice(dev *device, port uint8) {
 // the local address; otherwise its IP selects the device and its port, if
 // not 0, the local port. Both must be IP addresses: host names are the
 // caller's business. The timeout of each resolution step comes from the
-// deadline of ctx, or is 2 seconds.
+// deadline of ctx, or is 2 seconds. Resolve sets no option: it is
+// Dialer{}.Resolve.
 func Resolve(ctx context.Context, local, remote netip.AddrPort) (*ID, error) {
+	return Dialer{}.Resolve(ctx, local, remote)
+}
+
+// Resolve resolves the address and route to remote as the package's Resolve
+// does, on an identifier with the options of d. An option the kernel
+// refuses fails it with a *verbs.OpError of rdma_set_option.
+func (d Dialer) Resolve(ctx context.Context, local, remote netip.AddrPort) (*ID, error) {
 	if err := checkResolveAddrs(local, remote); err != nil {
+		return nil, err
+	}
+	opts := d.options()
+	if err := opts.check(); err != nil {
 		return nil, err
 	}
 	if err := ctx.Err(); err != nil {
@@ -150,7 +177,65 @@ func Resolve(ctx context.Context, local, remote netip.AddrPort) (*ID, error) {
 	if err := initialize("rdma_resolve_addr"); err != nil {
 		return nil, err
 	}
-	ch, handle, uid, err := createID()
+	return config{connected, opts}.resolve(ctx, local, remote)
+}
+
+// config is how the identifiers of a Resolve or a Listen are created.
+type config struct {
+	service service
+	options options
+}
+
+// create opens an event channel, creates an identifier of c's service on it
+// and sets c's options.
+func (c config) create() (*ucma.Channel, uint32, uint64, error) {
+	ch, handle, uid, err := createID(c.service)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	if err := c.options.set(ch, handle); err != nil {
+		destroyID(ch, handle)
+		return nil, 0, 0, err
+	}
+	return ch, handle, uid, nil
+}
+
+// set sends the options that are set to an identifier, as rdma_set_option
+// does, in the order of their names.
+func (o options) set(ch *ucma.Channel, handle uint32) error {
+	var err error
+	if o.tos != nil {
+		err = ch.SetTOS(handle, *o.tos)
+	}
+	if err == nil && o.reuseAddr {
+		err = ch.SetReuseAddr(handle, true)
+	}
+	if err == nil && o.afOnly != nil {
+		err = ch.SetAFOnly(handle, *o.afOnly)
+	}
+	if err != nil {
+		return opError("rdma_set_option", err)
+	}
+	return o.setAckTimeout(ch, handle)
+}
+
+// setAckTimeout sends the ACK timeout, if it is set, to an identifier: that
+// of a Resolve or a Listen, or that of a request, which does not inherit
+// its listener's.
+func (o options) setAckTimeout(ch *ucma.Channel, handle uint32) error {
+	if o.ackTimeout == nil {
+		return nil
+	}
+	if err := ch.SetAckTimeout(handle, *o.ackTimeout); err != nil {
+		return opError("rdma_set_option", err)
+	}
+	return nil
+}
+
+// resolve creates an identifier with c and resolves the address and route to
+// remote from local.
+func (c config) resolve(ctx context.Context, local, remote netip.AddrPort) (*ID, error) {
+	ch, handle, uid, err := c.create()
 	if err != nil {
 		return nil, err
 	}
@@ -589,6 +674,7 @@ type Listener struct {
 	handle uint32
 	uid    uint64
 	addr   netip.AddrPort
+	cfg    config // what the listening identifier was created with
 
 	mu     sync.Mutex // serialises taking a request with Close
 	closed bool
@@ -597,14 +683,31 @@ type Listener struct {
 // Listen binds local, whose IP picks the device and may be unspecified, and
 // listens for connection requests; port 0 picks a free port. backlog bounds
 // the requests waiting to be accepted, 0 meaning the kernel's maximum.
+// Listen sets no option: it is ListenConfig{}.Listen.
 func Listen(local netip.AddrPort, backlog int) (*Listener, error) {
+	return ListenConfig{}.Listen(local, backlog)
+}
+
+// Listen binds local and listens as the package's Listen does, on an
+// identifier with the options of lc. An option the kernel refuses fails it
+// with a *verbs.OpError of rdma_set_option.
+func (lc ListenConfig) Listen(local netip.AddrPort, backlog int) (*Listener, error) {
 	if err := checkListenAddr(local); err != nil {
+		return nil, err
+	}
+	opts := lc.options()
+	if err := opts.check(); err != nil {
 		return nil, err
 	}
 	if err := initialize("rdma_listen"); err != nil {
 		return nil, err
 	}
-	ch, handle, uid, err := createID()
+	return config{connected, opts}.listen(local, backlog)
+}
+
+// listen creates an identifier with c, binds it to local and listens.
+func (c config) listen(local netip.AddrPort, backlog int) (*Listener, error) {
+	ch, handle, uid, err := c.create()
 	if err != nil {
 		return nil, err
 	}
@@ -621,7 +724,7 @@ func Listen(local netip.AddrPort, backlog int) (*Listener, error) {
 		destroyID(ch, handle)
 		return nil, opError("rdma_listen", err)
 	}
-	return &Listener{ch: ch, handle: handle, uid: uid, addr: info.Src}, nil
+	return &Listener{ch: ch, handle: handle, uid: uid, addr: info.Src, cfg: c}, nil
 }
 
 // bind binds an identifier to addr as rdma_bind_addr does, opening the
@@ -684,9 +787,10 @@ func (l *Listener) accept(ctx context.Context) (*Request, error) {
 }
 
 // request turns a CONNECT_REQUEST event into a Request whose ID is on an
-// event channel of its own, as ucma_process_conn_req and rdma_migrate_id do.
-// A request whose identifier the query of its addresses and device fails on
-// is destroyed and skipped, which a nil Request reports.
+// event channel of its own, as ucma_process_conn_req and rdma_migrate_id do,
+// with the listener's ACK timeout. A request whose identifier the query of
+// its addresses and device fails on is destroyed and skipped, which a nil
+// Request reports.
 func (l *Listener) request(uev ucma.Event) (*Request, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -698,7 +802,7 @@ func (l *Listener) request(uev ucma.Event) (*Request, error) {
 		l.ch.DestroyID(uev.ID)
 		return nil, nil
 	}
-	ch, err := ucma.Open()
+	ch, err := openChannel()
 	if err != nil {
 		l.ch.DestroyID(uev.ID)
 		return nil, opError("rdma_create_event_channel", err)
@@ -707,6 +811,10 @@ func (l *Listener) request(uev ucma.Event) (*Request, error) {
 		l.ch.DestroyID(uev.ID)
 		ch.Close()
 		return nil, opError("rdma_migrate_id", err)
+	}
+	if err := l.cfg.options.setAckTimeout(ch, uev.ID); err != nil {
+		destroyID(ch, uev.ID)
+		return nil, err
 	}
 	conn := uev.Conn()
 	id := newID(ch, uev.ID, newUID())

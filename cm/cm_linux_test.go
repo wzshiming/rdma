@@ -44,6 +44,21 @@ func listen(t *testing.T, im impl) (rdmatest.Dev, listener) {
 func listenOn(t *testing.T, im impl, addr netip.AddrPort) listener {
 	t.Helper()
 	ln, err := im.listen(addr, 8)
+	return keepListening(t, ln, err, addr)
+}
+
+// listenWith starts a Listener of im with the options of lc on addr, closed
+// when the test ends.
+func listenWith(t *testing.T, im impl, lc cm.ListenConfig, addr netip.AddrPort) listener {
+	t.Helper()
+	ln, err := im.listenWith(lc, addr, 8)
+	return keepListening(t, ln, err, addr)
+}
+
+// keepListening fails the test unless the Listen on addr that returned ln
+// and err succeeded, and closes ln when the test ends.
+func keepListening(t *testing.T, ln listener, err error, addr netip.AddrPort) listener {
+	t.Helper()
 	if err != nil {
 		t.Fatalf("Listen(%v) error: %v", addr, err)
 	}
@@ -69,6 +84,23 @@ func resolveFrom(t *testing.T, im impl, local, remote netip.AddrPort) conn {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	id, err := im.resolve(ctx, local, remote)
+	return resolved(t, id, err, local, remote)
+}
+
+// resolveWith resolves remote from local with im and the options of d and
+// gives the ID a queue pair.
+func resolveWith(t *testing.T, im impl, d cm.Dialer, local, remote netip.AddrPort) conn {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	id, err := im.resolveWith(ctx, d, local, remote)
+	return resolved(t, id, err, local, remote)
+}
+
+// resolved fails the test unless the Resolve from local to remote that
+// returned id and err succeeded, and gives the ID a queue pair.
+func resolved(t *testing.T, id conn, err error, local, remote netip.AddrPort) conn {
+	t.Helper()
 	if err != nil {
 		t.Fatalf("Resolve(%v, %v) error: %v", local, remote, err)
 	}

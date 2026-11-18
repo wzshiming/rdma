@@ -18,7 +18,7 @@ func TestDepthsSameAsReference(t *testing.T) {
 	t.Run("the limits", func(t *testing.T) {
 		limits := &cm.ConnParam{ResponderResources: 0xFF, InitiatorDepth: 0xFF}
 		compare(t, dev, func(t *testing.T, im impl, at endpoints) connection {
-			return connectAt(t, im, at, limits, limits)
+			return connectAt(t, im, at, scenario{connect: limits, accept: limits})
 		})
 	})
 	t.Run("above the limit", func(t *testing.T) { compare(t, dev, exceedAt) })

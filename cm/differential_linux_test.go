@@ -23,22 +23,27 @@ import (
 // what the two leave behind: what each end learns from the other, the queue
 // pair attributes the connection manager sets on either end, the queue pair
 // states after Disconnect and after a failed Connect, and the errors of a
-// rejected and a refused Connect.
+// rejected and a refused Connect. A scenario with options sets every option
+// on both ends.
 func TestSameAsReference(t *testing.T) {
 	dev := testDevice(t)
 	for _, tt := range []struct {
-		name            string
-		connect, accept *cm.ConnParam
+		name string
+		scenario
 	}{
-		{"default parameters", nil, nil},
-		{"non-default parameters",
-			&cm.ConnParam{PrivateData: []byte("client hello"), ResponderResources: 2, InitiatorDepth: 3, RetryCount: 4, RNRRetryCount: 5},
-			&cm.ConnParam{PrivateData: []byte("server welcome"), ResponderResources: 3, InitiatorDepth: 2, RetryCount: 1, RNRRetryCount: 6},
-		},
+		{"default parameters", scenario{}},
+		{"non-default parameters", scenario{
+			connect: &cm.ConnParam{PrivateData: []byte("client hello"), ResponderResources: 2, InitiatorDepth: 3, RetryCount: 4, RNRRetryCount: 5},
+			accept:  &cm.ConnParam{PrivateData: []byte("server welcome"), ResponderResources: 3, InitiatorDepth: 2, RetryCount: 1, RNRRetryCount: 6},
+		}},
+		{"options", scenario{
+			dialer:       cm.Dialer{TOS: new(uint8(0x60)), ReuseAddr: true, AFOnly: new(true), AckTimeout: new(uint8(14))},
+			listenConfig: cm.ListenConfig{TOS: new(uint8(0x20)), ReuseAddr: true, AFOnly: new(true), AckTimeout: new(uint8(16))},
+		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			compare(t, dev, func(t *testing.T, im impl, at endpoints) connection {
-				return connectAt(t, im, at, tt.connect, tt.accept)
+				return connectAt(t, im, at, tt.scenario)
 			})
 		})
 	}
@@ -151,22 +156,30 @@ func endOf(t *testing.T, id conn) end {
 	}
 }
 
+// scenario is how connectAt connects: with the options of the client's and
+// the listener's identifiers, and the parameters of Connect and Accept.
+type scenario struct {
+	dialer          cm.Dialer
+	listenConfig    cm.ListenConfig
+	connect, accept *cm.ConnParam
+}
+
 // connectAt connects a client of im from at.client to a listener of im on
-// at.listener with the parameters given, then disconnects both ends.
-func connectAt(t *testing.T, im impl, at endpoints, connect, accept *cm.ConnParam) connection {
+// at.listener as s says, then disconnects both ends.
+func connectAt(t *testing.T, im impl, at endpoints, s scenario) connection {
 	t.Helper()
-	ln := listenOn(t, im, at.listener)
-	client := resolveFrom(t, im, at.client, at.listener)
+	ln := listenWith(t, im, s.listenConfig, at.listener)
+	client := resolveWith(t, im, s.dialer, at.client, at.listener)
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	res := make(chan connectResult, 1)
 	go func() {
-		info, err := client.Connect(ctx, connect)
+		info, err := client.Connect(ctx, s.connect)
 		res <- connectResult{info, err}
 	}()
 	req := acceptRequest(t, ln)
 	createQP(t, req.ID)
-	if err := req.Accept(ctx, accept); err != nil {
+	if err := req.Accept(ctx, s.accept); err != nil {
 		t.Fatalf("Request.Accept() error: %v", err)
 	}
 	r := <-res

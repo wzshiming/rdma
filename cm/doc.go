@@ -15,6 +15,14 @@
 // host with several RDMA devices chooses one through the local address of
 // Resolve or Listen.
 //
+// A Dialer and a ListenConfig carry the options librdmacm sets with
+// rdma_set_option on an identifier, the type of service, address reuse, the
+// address family of a wildcard bind and the ACK timeout, which their Resolve
+// and Listen set right after creating the identifier; the package's Resolve
+// and Listen set none. The identifier of a request inherits none of its
+// listener's options, so a Listener sets its ACK timeout on each request's
+// before handing the request out.
+//
 // Queue pairs and protection domains are verbs types. The protection domain
 // passed to ID.CreateQP must belong to ID.Device(), the device context the
 // package opened for the connection, or be nil for the device's default one;

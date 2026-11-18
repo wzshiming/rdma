@@ -25,3 +25,23 @@ func TestConnParamDefaults(t *testing.T) {
 		})
 	}
 }
+
+// The options a Resolve or a Listen takes, which a Listener reads at every
+// request, keep their values whatever the caller's variables hold afterwards.
+func TestOptionsKeepTheValuesTaken(t *testing.T) {
+	tos, afOnly, timeout := uint8(0x20), true, uint8(16)
+	taken := []struct {
+		of string
+		o  options
+	}{
+		{"Dialer", Dialer{TOS: &tos, AFOnly: &afOnly, AckTimeout: &timeout}.options()},
+		{"ListenConfig", ListenConfig{TOS: &tos, AFOnly: &afOnly, AckTimeout: &timeout}.options()},
+	}
+	tos, afOnly, timeout = 0xff, false, 200
+	for _, tt := range taken {
+		if *tt.o.tos != 0x20 || !*tt.o.afOnly || *tt.o.ackTimeout != 16 {
+			t.Errorf("options of the %s once the variables changed: TOS %d, AFOnly %v, ACK timeout %d; want 32, true, 16",
+				tt.of, *tt.o.tos, *tt.o.afOnly, *tt.o.ackTimeout)
+		}
+	}
+}

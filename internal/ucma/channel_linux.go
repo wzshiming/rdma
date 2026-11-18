@@ -37,10 +37,13 @@ func open(path string) (*Channel, error) {
 		}
 		return nil, err
 	}
-	return newChannel(f, sysWrite), nil
+	return NewChannel(f, sysWrite), nil
 }
 
-func newChannel(f *os.File, write func(fd uintptr, b []byte) (int, syscall.Errno)) *Channel {
+// NewChannel returns a Channel on f whose commands go to write in place of
+// write(2): a stand-in for the kernel in the tests of the packages built on
+// this one.
+func NewChannel(f *os.File, write func(fd uintptr, b []byte) (int, syscall.Errno)) *Channel {
 	raw, _ := f.SyscallConn() // fails for a nil *os.File only
 	return &Channel{file: f, raw: raw, write: write, turn: make(chan struct{}, 1)}
 }

@@ -170,6 +170,11 @@ func TestREADMEDescribesCMInGo(t *testing.T) {
 			}
 		}
 	}
+	for _, want := range []string{"`rdma_set_option`", "`Dialer`", "`ListenConfig`"} {
+		if !strings.Contains(item, want) {
+			t.Errorf("the item of cm under Packages lacks %q", want)
+		}
+	}
 	for _, stale := range []string{"binds librdmacm", "bindings of libibverbs and of the RDMA connection manager"} {
 		if strings.Contains(readme, stale) {
 			t.Errorf("README still makes cm a binding of librdmacm: %q", stale)

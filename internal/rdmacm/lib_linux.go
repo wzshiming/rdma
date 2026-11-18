@@ -25,6 +25,7 @@ type funcs struct {
 	getCMEvent, ackCMEvent                  dynlib.Func
 	resolveAddr, resolveRoute               dynlib.Func
 	bindAddr, listen                        dynlib.Func
+	setOption                               dynlib.Func
 	createQP, destroyQP                     dynlib.Func
 	connect, accept, reject, disconnect     dynlib.Func
 }
@@ -66,6 +67,7 @@ func load(op string) (*funcs, error) {
 		{"rdma_resolve_route", &f.resolveRoute},
 		{"rdma_bind_addr", &f.bindAddr},
 		{"rdma_listen", &f.listen},
+		{"rdma_set_option", &f.setOption},
 		{"rdma_create_qp", &f.createQP},
 		{"rdma_destroy_qp", &f.destroyQP},
 		{"rdma_connect", &f.connect},

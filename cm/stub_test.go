@@ -23,6 +23,14 @@ func TestStubUnsupported(t *testing.T) {
 	}{
 		{"Resolve", func() error { _, err := cm.Resolve(ctx, netip.AddrPort{}, v4); return err }},
 		{"Listen", func() error { _, err := cm.Listen(netip.AddrPortFrom(v4.Addr(), 0), 1); return err }},
+		{"Dialer.Resolve", func() error {
+			_, err := cm.Dialer{TOS: new(uint8(0x20)), AckTimeout: new(uint8(14))}.Resolve(ctx, netip.AddrPort{}, v4)
+			return err
+		}},
+		{"ListenConfig.Listen", func() error {
+			_, err := cm.ListenConfig{ReuseAddr: true, AFOnly: new(true)}.Listen(netip.AddrPortFrom(v4.Addr(), 0), 1)
+			return err
+		}},
 		{"ID.CreateQP", func() error {
 			_, err := id.CreateQP(verbs.PDFromPointer(nil), &verbs.QPInitAttr{Type: verbs.QPTypeRC})
 			return err
