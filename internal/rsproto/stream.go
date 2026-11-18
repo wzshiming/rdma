@@ -51,6 +51,8 @@ type Stream struct {
 	order binary.ByteOrder // of the host, which the grant table is in
 
 	targetSGE int        // the entry of the grant table data goes to
+	inGrant   bool       // data has gone to the grant at targetSGE, or Connect put it there
+	landed    int        // grants whose writes have completed and data has yet to go to
 	sqeAvail  int        // send queue entries free for data
 	sbufAvail int        // bytes of the send buffer free
 	sbufPos   int        // where the free bytes of the send buffer start: ssgl[0].addr
@@ -126,6 +128,7 @@ func (s *Stream) ConnData() ConnData {
 // connection does, so the link must be able to send.
 func (s *Stream) Connect(peer ConnData) {
 	s.setGrant(0, peer.FirstGrant)
+	s.inGrant = true
 	s.sseqComp = peer.Credits
 	s.remote = peer.GrantTable
 	s.remoteSGE = 1
@@ -176,9 +179,10 @@ func (s *Stream) setGrant(i int, g SGE) {
 }
 
 // CanSend mirrors rs_can_send while the write side is open: whether Reserve
-// would lend room now.
+// would lend room now. It takes a grant only once the write that placed it
+// has completed, where rs_can_send takes it as soon as its length shows.
 func (s *Stream) CanSend() bool {
-	return s.state&StateWritable != 0 && s.sqeAvail > 0 && s.sbufAvail >= SndLowat && s.sseqNo != s.sseqComp && s.grant(s.targetSGE).Length != 0
+	return s.state&StateWritable != 0 && s.sqeAvail > 0 && s.sbufAvail >= SndLowat && s.sseqNo != s.sseqComp && (s.inGrant || s.landed > 0) && s.grant(s.targetSGE).Length != 0
 }
 
 // Writable mirrors rs_conn_can_send, which rsend waits for: whether Reserve
@@ -196,12 +200,14 @@ func (s *Stream) SendsDone() bool {
 }
 
 // Reserve lends the room of the send buffer that one message can carry now,
-// nil when there is none.
+// nil when there is none: the free bytes that run on from ssgl[0], within
+// what the current grant leaves and the 29 bits of the message word, not cut
+// at RS_MAX_TRANSFER as rsend cuts its messages.
 func (s *Stream) Reserve() []byte {
 	if !s.CanSend() {
 		return nil
 	}
-	n := min(s.sbufAvail, len(s.c.SendBuffer.Buf)-s.sbufPos, int(s.grant(s.targetSGE).Length), MaxTransfer)
+	n := min(s.sbufAvail, len(s.c.SendBuffer.Buf)-s.sbufPos, int(s.grant(s.targetSGE).Length), maxData)
 	return s.c.SendBuffer.Buf[s.sbufPos : s.sbufPos+n : s.sbufPos+n]
 }
 
@@ -219,6 +225,10 @@ func (s *Stream) Commit(n int) error {
 	s.sseqNo++
 	s.sqeAvail--
 	s.sbufAvail -= n
+	if !s.inGrant {
+		s.landed--
+		s.inGrant = true
+	}
 	g := s.grant(s.targetSGE)
 	addr, key := g.Addr, g.Key
 	g.Addr += uint64(n)
@@ -226,6 +236,7 @@ func (s *Stream) Commit(n int) error {
 	s.setGrant(s.targetSGE, g)
 	if g.Length == 0 {
 		s.targetSGE = (s.targetSGE + 1) % SGLSize
+		s.inGrant = false
 	}
 
 	s.sgl[0] = Segment{Addr: s.c.SendBuffer.Addr + uint64(s.sbufPos), Length: uint32(n), Key: s.c.SendBuffer.Key}
@@ -266,12 +277,16 @@ func (s *Stream) Sent(id uint64, err error) {
 	s.updateCredits()
 }
 
-// Received takes a message word the peer sent, as rs_poll_cq does, and while
+// Received takes a message word the peer sent, with n, the bytes the write
+// that carried it placed in this end's memory, as rs_poll_cq does, and while
 // connected posts a receive in place of the one it used up.
-func (s *Stream) Received(msg Msg) {
+func (s *Stream) Received(msg Msg, n int) {
 	switch msg.Op() {
 	case OpSGL:
 		s.sseqComp = uint16(msg.Data())
+		if n > 0 {
+			s.landed++
+		}
 	case OpCtrl:
 		switch msg.Data() {
 		case CtrlDisconnect:
@@ -415,6 +430,19 @@ func (s *Stream) postCtrl(ctrl uint32) {
 	s.ctrlSeqNo++
 	msg := MakeMsg(OpCtrl, ctrl)
 	s.checkPost(s.link.PostMsg(uint64(msg), msg))
+}
+
+// ControlHeld reports whether a control message is due that only the
+// completion of one in flight lets go out: the credits or a grant the peer
+// is due, which go out one a call and wait for every slot in flight, or an
+// end CloseWrite or Disconnect holds for a slot. rsockets posts it at the
+// next call that processes completions; an engine need not wait for a call.
+func (s *Stream) ControlHeld() bool {
+	connected := s.state&StateConnected != 0
+	if (s.shutdownHeld || s.disconnectHeld) && (connected || s.endOwed) {
+		return true
+	}
+	return connected && (s.rbufAvail >= len(s.c.ReceiveBuffer.Buf)/2 || int16(s.rseqNo-s.rseqComp) >= 0)
 }
 
 // checkPost breaks the stream on err, the refusal of a post it made, unless

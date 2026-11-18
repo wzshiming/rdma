@@ -18,10 +18,11 @@ type deviceList struct {
 
 // Device is an RDMA device returned by Devices.
 type Device struct {
-	dev  uintptr // struct ibv_device *, opaque to the package
-	list *deviceList
-	name string
-	guid uint64
+	dev   uintptr // struct ibv_device *, opaque to the package
+	list  *deviceList
+	name  string
+	guid  uint64
+	index int
 }
 
 // Devices returns the RDMA devices of the host.
@@ -42,7 +43,11 @@ func Devices() ([]*Device, error) {
 		name, _ := f.getDeviceName.Ptr(d, 0, 0, 0, 0, 0)
 		// The __be64 GUID comes back in the return register.
 		g, _ := f.getDeviceGUID.Ptr(d, 0, 0, 0, 0, 0)
-		devs = append(devs, &Device{dev: d, list: dl, name: goString(name), guid: be64(uint64(g))})
+		index := int32(-1)
+		if f.getDeviceIndex.Addr() != 0 {
+			index, _ = f.getDeviceIndex.Int(d, 0, 0, 0, 0, 0)
+		}
+		devs = append(devs, &Device{dev: d, list: dl, name: goString(name), guid: be64(uint64(g)), index: int(index)})
 	}
 	return devs, nil
 }
@@ -52,6 +57,11 @@ func (d *Device) Name() string { return d.name }
 
 // GUID returns the node GUID of the device.
 func (d *Device) GUID() uint64 { return d.guid }
+
+// Index returns the kernel's index of the device, as ibv_get_device_index
+// reports it, or -1 when it is unknown: the kernel does not tell it over
+// netlink, or libibverbs lacks the function.
+func (d *Device) Index() int { return d.index }
 
 // TransportType returns the transport of the device.
 func (d *Device) TransportType() TransportType {

@@ -27,9 +27,9 @@ const (
 // raccept and rclose or crash, so the test skips, or fails under
 // RDMA_TEST_REQUIRE=1 so that CI never skips it silently.
 // RDMA_TEST_MANY_CONNS=1 runs it regardless.
-func manyConnectionsVerdict(e Engine, release int, getenv func(string) string) verdict {
+func manyConnectionsVerdict(e engineName, release int, getenv func(string) string) verdict {
 	switch {
-	case e != EngineLibrdmacm, getenv("RDMA_TEST_MANY_CONNS") == "1", release == 0, release >= 53:
+	case e != engineLibrdmacm, getenv("RDMA_TEST_MANY_CONNS") == "1", release == 0, release >= 53:
 		return verdictRun
 	case getenv("RDMA_TEST_REQUIRE") == "1":
 		return verdictFatal
@@ -64,20 +64,20 @@ func rdmaCoreReleaseIn(maps string) int {
 func TestManyConnectionsVerdict(t *testing.T) {
 	tests := []struct {
 		name    string
-		engine  Engine
+		engine  engineName
 		release int
 		env     map[string]string
 		want    verdict
 	}{
-		{"required on 50 fails", EngineLibrdmacm, 50, map[string]string{"RDMA_TEST_REQUIRE": "1"}, verdictFatal},
-		{"50 skips", EngineLibrdmacm, 50, nil, verdictSkip},
-		{"56 runs", EngineLibrdmacm, 56, nil, verdictRun},
-		{"53 runs when required", EngineLibrdmacm, 53, map[string]string{"RDMA_TEST_REQUIRE": "1"}, verdictRun},
-		{"forced on 50 runs", EngineLibrdmacm, 50, map[string]string{"RDMA_TEST_MANY_CONNS": "1"}, verdictRun},
-		{"forced on 50 runs when required", EngineLibrdmacm, 50, map[string]string{"RDMA_TEST_MANY_CONNS": "1", "RDMA_TEST_REQUIRE": "1"}, verdictRun},
-		{"unknown release runs", EngineLibrdmacm, 0, map[string]string{"RDMA_TEST_REQUIRE": "1"}, verdictRun},
-		{"native on 50 runs", EngineNative, 50, nil, verdictRun},
-		{"native on 50 runs when required", EngineNative, 50, map[string]string{"RDMA_TEST_REQUIRE": "1"}, verdictRun},
+		{"required on 50 fails", engineLibrdmacm, 50, map[string]string{"RDMA_TEST_REQUIRE": "1"}, verdictFatal},
+		{"50 skips", engineLibrdmacm, 50, nil, verdictSkip},
+		{"56 runs", engineLibrdmacm, 56, nil, verdictRun},
+		{"53 runs when required", engineLibrdmacm, 53, map[string]string{"RDMA_TEST_REQUIRE": "1"}, verdictRun},
+		{"forced on 50 runs", engineLibrdmacm, 50, map[string]string{"RDMA_TEST_MANY_CONNS": "1"}, verdictRun},
+		{"forced on 50 runs when required", engineLibrdmacm, 50, map[string]string{"RDMA_TEST_MANY_CONNS": "1", "RDMA_TEST_REQUIRE": "1"}, verdictRun},
+		{"unknown release runs", engineLibrdmacm, 0, map[string]string{"RDMA_TEST_REQUIRE": "1"}, verdictRun},
+		{"native on 50 runs", engineNative, 50, nil, verdictRun},
+		{"native on 50 runs when required", engineNative, 50, map[string]string{"RDMA_TEST_REQUIRE": "1"}, verdictRun},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

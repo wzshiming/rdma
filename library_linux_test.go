@@ -3,8 +3,10 @@
 package rdma
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -12,7 +14,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/wzshiming/rdma/rsocket"
+	"github.com/wzshiming/rdma/internal/rsocket"
 )
 
 // childEnv marks the child process runInChild starts.
@@ -31,6 +33,15 @@ func runInChild(t *testing.T, name string, env ...string) {
 	if err != nil {
 		t.Fatalf("child process: %v", err)
 	}
+}
+
+// libraryPathFirst returns the LD_LIBRARY_PATH of a child that searches dir
+// before the directories of this process's LD_LIBRARY_PATH.
+func libraryPathFirst(dir string) string {
+	if p := os.Getenv("LD_LIBRARY_PATH"); p != "" {
+		dir += ":" + p
+	}
+	return "LD_LIBRARY_PATH=" + dir
 }
 
 // requireLibrary skips t, or fails it under RDMA_TEST_REQUIRE=1, when the
@@ -69,32 +80,33 @@ func TestRdmaCoreReleaseLoadsTheLibrary(t *testing.T) {
 	t.Logf("rdma-core release %d", v)
 }
 
-// TestMissingLibraryIsUnsupported runs Dial and Listen of either engine in a
-// process whose dynamic loader finds an empty file in place of
-// librdmacm.so.1, which fails to load as a missing one would: the process
-// starts, and both return a *net.OpError matching errors.ErrUnsupported that
-// names the library.
+// TestMissingLibraryIsUnsupported runs Dial and Listen in a process whose
+// dynamic loader finds an empty file in place of librdmacm.so.1, which fails
+// to load as a missing one would: the process starts, those of the librdmacm
+// engine return a *net.OpError matching errors.ErrUnsupported that names the
+// library, and those of the package, which needs libibverbs alone, connect
+// on the device all the same.
 func TestMissingLibraryIsUnsupported(t *testing.T) {
 	if os.Getenv(childEnv) == "" {
 		dir := t.TempDir()
 		if err := os.WriteFile(filepath.Join(dir, "librdmacm.so.1"), nil, 0o644); err != nil {
 			t.Fatal(err)
 		}
-		runInChild(t, "TestMissingLibraryIsUnsupported", "LD_LIBRARY_PATH="+dir)
+		runInChild(t, "TestMissingLibraryIsUnsupported", libraryPathFirst(dir))
 		return
 	}
-	forEachEngine(t, func(t *testing.T, e Engine) {
+	t.Run(string(engineLibrdmacm), func(t *testing.T) {
 		for _, tt := range []struct {
 			name, op string
 			call     func() error
 		}{
 			{"Dial", "dial", func() error {
-				d := Dialer{Config: Config{Engine: e}}
+				d := Dialer{eng: engineLibrdmacm.engine()}
 				_, err := d.Dial("rdma", "10.200.0.1:4791")
 				return err
 			}},
 			{"Listen", "listen", func() error {
-				lc := ListenConfig{Config: Config{Engine: e}}
+				lc := ListenConfig{eng: engineLibrdmacm.engine()}
 				_, err := lc.Listen(context.Background(), "rdma", "10.200.0.1:0")
 				return err
 			}},
@@ -113,4 +125,46 @@ func TestMissingLibraryIsUnsupported(t *testing.T) {
 			t.Logf("%s() without librdmacm: %v", tt.name, err)
 		}
 	})
+	t.Run(string(engineNative), func(t *testing.T) {
+		ln := rxeListenOn(t, Config{}, nil)
+		acc := acceptAsync(ln)
+		d := Dialer{Timeout: rxeTimeout}
+		client, err := d.Dial("rdma", ln.Addr().String())
+		if err != nil {
+			t.Fatalf("Dial(%v) error: %v", ln.Addr(), err)
+		}
+		defer client.Close()
+		r := <-acc
+		if r.err != nil {
+			t.Fatalf("AcceptRDMA() error: %v", r.err)
+		}
+		defer r.c.Close()
+		want := []byte("carried without librdmacm")
+		if _, err := client.Write(want); err != nil {
+			t.Fatalf("Write() error: %v", err)
+		}
+		got := make([]byte, len(want))
+		if _, err := io.ReadFull(r.c, got); err != nil || !bytes.Equal(got, want) {
+			t.Fatalf("ReadFull() = %q, %v; want %q", got, err, want)
+		}
+	})
+}
+
+// TestLibraryPathFirstKeepsTheInheritedPath checks that the child still
+// searches the inherited LD_LIBRARY_PATH, where a local build of rdma-core
+// may hold the host's only libibverbs.
+func TestLibraryPathFirstKeepsTheInheritedPath(t *testing.T) {
+	t.Setenv("LD_LIBRARY_PATH", "/opt/rdma-core/lib")
+	if got, want := libraryPathFirst("/tmp/unloadable"), "LD_LIBRARY_PATH=/tmp/unloadable:/opt/rdma-core/lib"; got != want {
+		t.Errorf("libraryPathFirst() = %q, want %q", got, want)
+	}
+}
+
+// TestLibraryPathFirstAloneWithoutAnInheritedPath checks that the child gets
+// no empty entry, which the dynamic loader reads as the working directory.
+func TestLibraryPathFirstAloneWithoutAnInheritedPath(t *testing.T) {
+	t.Setenv("LD_LIBRARY_PATH", "")
+	if got, want := libraryPathFirst("/tmp/unloadable"), "LD_LIBRARY_PATH=/tmp/unloadable"; got != want {
+		t.Errorf("libraryPathFirst() = %q, want %q", got, want)
+	}
 }

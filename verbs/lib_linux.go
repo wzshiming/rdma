@@ -5,6 +5,7 @@ package verbs
 import (
 	"bytes"
 	"encoding/binary"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -17,17 +18,30 @@ import (
 // libName is the SONAME the first use opens; only a test points it elsewhere.
 var libName = "libibverbs.so.1"
 
+// deviceIndexName is a function a library may lack: without it, every
+// device reports index -1. Only a test points it elsewhere.
+var deviceIndexName = "ibv_get_device_index"
+
+// queryECEName and setECEName are the functions a library before rdma-core
+// 31 lacks: without them, every queue pair reports EOPNOTSUPP, as one of a
+// provider without ECE does. Only a test points them elsewhere.
+var queryECEName, setECEName = "ibv_query_ece", "ibv_set_ece"
+
 // funcs holds the exported functions of libibverbs the package calls. The
-// four verbs the header inlines (post_send, post_recv, poll_cq and
+// verbs the header inlines (post_send, post_recv, post_srq_recv, poll_cq and
 // req_notify_cq) come from the ops table of each device context instead.
 type funcs struct {
 	getDeviceList, freeDeviceList, getDeviceName, getDeviceGUID    dynlib.Func
+	getDeviceIndex                                                 dynlib.Func // zero when the library lacks it
 	openDevice, closeDevice, forkInit                              dynlib.Func
 	queryDevice, queryPort, queryGIDTable                          dynlib.Func
 	createCompChannel, destroyCompChannel, getCQEvent, ackCQEvents dynlib.Func
 	createCQ, destroyCQ, getAsyncEvent, ackAsyncEvent              dynlib.Func
 	allocPD, deallocPD, regMR, deregMR                             dynlib.Func
 	createQP, destroyQP, modifyQP, queryQP                         dynlib.Func
+	createSRQ, destroySRQ, modifySRQ, querySRQ                     dynlib.Func
+	createAH, destroyAH, attachMcast, detachMcast                  dynlib.Func
+	queryECE, setECE                                               dynlib.Func // zero when the library lacks them
 	wcStatusStr                                                    dynlib.Func
 }
 
@@ -83,12 +97,23 @@ func load(op string) (*funcs, error) {
 		{"ibv_destroy_qp", &f.destroyQP},
 		{"ibv_modify_qp", &f.modifyQP},
 		{"ibv_query_qp", &f.queryQP},
+		{"ibv_create_srq", &f.createSRQ},
+		{"ibv_destroy_srq", &f.destroySRQ},
+		{"ibv_modify_srq", &f.modifySRQ},
+		{"ibv_query_srq", &f.querySRQ},
+		{"ibv_create_ah", &f.createAH},
+		{"ibv_destroy_ah", &f.destroyAH},
+		{"ibv_attach_mcast", &f.attachMcast},
+		{"ibv_detach_mcast", &f.detachMcast},
 		{"ibv_wc_status_str", &f.wcStatusStr},
 	} {
 		if *s.fn, err = l.Lookup(s.name); err != nil {
 			return nil, &OpError{Op: op, Err: err}
 		}
 	}
+	f.getDeviceIndex, _ = l.Lookup(deviceIndexName)
+	f.queryECE, _ = l.Lookup(queryECEName)
+	f.setECE, _ = l.Lookup(setECEName)
 	lib.Store(f)
 	return f, nil
 }
@@ -124,6 +149,28 @@ func caddr[T any](p *T) uintptr { return uintptr(unsafe.Pointer(p)) }
 // contextOps returns the ops table of the device context at addr.
 func contextOps(addr uint64) *rdmaabi.IbvContextOps {
 	return &dynlib.Pointer[rdmaabi.IbvContext](uintptr(addr)).Ops
+}
+
+// abiCompat is the offset of abi_compat, the last member of struct
+// ibv_context, on this architecture.
+var abiCompat = rdmaabi.IbvContextAbiCompat[runtime.GOARCH]
+
+// verbsOp returns the function that the member at offset off of
+// rdmaabi.VerbsContext holds for the device context at ctx, as
+// verbs_get_ctx_op finds it: none, the zero Func, when the context is not
+// the context member of a struct verbs_context, when the library's struct is
+// too old to have the member, or when the member is NULL.
+func verbsOp(ctx, off uintptr) dynlib.Func {
+	if *dynlib.Pointer[uint64](ctx + abiCompat) != rdmaabi.VerbsAbiIsExtended {
+		return dynlib.Func{}
+	}
+	before := unsafe.Sizeof(rdmaabi.VerbsContext{})
+	vctx := ctx - before
+	// sz counts from the struct's first member to the end of its context.
+	if dynlib.Pointer[rdmaabi.VerbsContext](vctx).Sz < uint64(before-off+abiCompat+8) {
+		return dynlib.Func{}
+	}
+	return dynlib.FuncAt(uintptr(*dynlib.Pointer[uint64](vctx + off)))
 }
 
 // goString copies the NUL-terminated C string at addr.

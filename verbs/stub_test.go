@@ -78,6 +78,105 @@ func TestStubUnsupported(t *testing.T) {
 	}
 }
 
+func TestStubAddressHandlesAreUnsupported(t *testing.T) {
+	_, err := verbs.PDFromPointer(nil).CreateAH(&verbs.AHAttr{})
+	var opErr *verbs.OpError
+	if !errors.As(err, &opErr) || !errors.Is(err, errors.ErrUnsupported) {
+		t.Errorf("PD.CreateAH() error = %v, want an *OpError matching errors.ErrUnsupported", err)
+	}
+	ah := verbs.AHFromPointer(nil)
+	if ah.Pointer() != nil {
+		t.Errorf("AH.Pointer() = %v, want nil", ah.Pointer())
+	}
+	if err := ah.Close(); err != nil {
+		t.Errorf("AH.Close() = %v, want nil", err)
+	}
+}
+
+func TestStubMulticastIsUnsupported(t *testing.T) {
+	qp := verbs.QPFromPointer(nil)
+	for name, call := range map[string]func(verbs.GID, uint16) error{
+		"QP.AttachMulticast": qp.AttachMulticast,
+		"QP.DetachMulticast": qp.DetachMulticast,
+	} {
+		err := call(verbs.GID{0: 0xff}, 0)
+		var opErr *verbs.OpError
+		if !errors.As(err, &opErr) || !errors.Is(err, errors.ErrUnsupported) {
+			t.Errorf("%s() error = %v, want an *OpError matching errors.ErrUnsupported", name, err)
+		}
+	}
+}
+
+func TestStubECEIsUnsupported(t *testing.T) {
+	qp := verbs.QPFromPointer(nil)
+	ece, err := qp.QueryECE()
+	var opErr *verbs.OpError
+	if ece != (verbs.ECE{}) || !errors.As(err, &opErr) || !errors.Is(err, errors.ErrUnsupported) {
+		t.Errorf("QP.QueryECE() = %+v, %v; want none and an *OpError matching errors.ErrUnsupported", ece, err)
+	}
+	if err := qp.SetECE(verbs.ECE{VendorID: 0x02c9}); !errors.As(err, &opErr) || !errors.Is(err, errors.ErrUnsupported) {
+		t.Errorf("QP.SetECE() error = %v, want an *OpError matching errors.ErrUnsupported", err)
+	}
+}
+
+func TestStubDeviceIndexIsUnknown(t *testing.T) {
+	if got := new(verbs.Device).Index(); got != -1 {
+		t.Errorf("Device.Index() = %d, want -1", got)
+	}
+}
+
+func TestStubSRQIsUnsupported(t *testing.T) {
+	srq := verbs.SRQFromPointer(nil)
+	for name, call := range map[string]func() error{
+		"PD.CreateSRQ": func() error {
+			_, err := verbs.PDFromPointer(nil).CreateSRQ(&verbs.SRQInitAttr{Attr: verbs.SRQAttr{MaxWR: 1, MaxSGE: 1}})
+			return err
+		},
+		"SRQ.PostRecv": func() error { return srq.PostRecv(verbs.RecvWR{}) },
+		"SRQ.Modify":   func() error { return srq.Modify(&verbs.SRQAttr{Limit: 1}, verbs.SRQAttrLimit) },
+		"SRQ.Query":    func() error { _, err := srq.Query(); return err },
+	} {
+		err := call()
+		var opErr *verbs.OpError
+		if !errors.As(err, &opErr) || !errors.Is(err, errors.ErrUnsupported) {
+			t.Errorf("%s() error = %v, want an *OpError matching errors.ErrUnsupported", name, err)
+		}
+	}
+	if srq.Pointer() != nil {
+		t.Errorf("SRQ.Pointer() = %v, want nil", srq.Pointer())
+	}
+	if err := srq.Close(); err != nil {
+		t.Errorf("SRQ.Close() = %v, want nil", err)
+	}
+}
+
+func TestStubXRCIsUnsupported(t *testing.T) {
+	srq := verbs.SRQFromPointer(nil)
+	for name, call := range map[string]func() error{
+		"Context.OpenXRCD": func() error { _, err := verbs.ContextFromPointer(nil).OpenXRCD(-1, 0); return err },
+		"SRQ.Num":          func() error { _, err := srq.Num(); return err },
+	} {
+		err := call()
+		var opErr *verbs.OpError
+		if !errors.As(err, &opErr) || !errors.Is(err, errors.ErrUnsupported) {
+			t.Errorf("%s() error = %v, want an *OpError matching errors.ErrUnsupported", name, err)
+		}
+	}
+	xrcd := verbs.XRCDFromPointer(nil)
+	if xrcd.Pointer() != nil {
+		t.Errorf("XRCD.Pointer() = %v, want nil", xrcd.Pointer())
+	}
+	if err := xrcd.Close(); err != nil {
+		t.Errorf("XRCD.Close() = %v, want nil", err)
+	}
+}
+
+func TestStubQPContextIsEmpty(t *testing.T) {
+	if ctx := verbs.QPFromPointer(nil).Context(); ctx == nil || ctx.Pointer() != nil {
+		t.Errorf("QP.Context() = %v, want a context with a nil pointer", ctx)
+	}
+}
+
 func TestStubTransportTypeIsUnknown(t *testing.T) {
 	if got := new(verbs.Device).TransportType(); got != verbs.TransportUnknown {
 		t.Errorf("Device.TransportType() = %v, want %v", got, verbs.TransportUnknown)

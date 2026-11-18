@@ -168,62 +168,64 @@ func (e *MemEnd) Down() error {
 
 // Deliver carries the oldest message the peer posted and this end has not
 // taken into the oldest receive posted here: its bytes into the memory
-// registered here and its word, returned for Stream.Received. It reports
-// false when there is no message, when the message fails instead, as
+// registered here and its word, returned for Stream.Received with the number
+// of those bytes. It reports false when there is no message, when the
+// message fails instead, as
 // FailSend and a write outside registered memory make it, or when there is
 // no receive, which leaves the message on the link, with those behind it,
 // for a later Deliver to retry as the RNR retry of rnr_retry_count 7 does
 // without end. Deliver writes the memory of this end, so the goroutine that
 // drives its stream calls it.
-func (e *MemEnd) Deliver() (Msg, bool) {
+func (e *MemEnd) Deliver() (Msg, int, bool) {
 	e.link.mu.Lock()
 	defer e.link.mu.Unlock()
 	from := e.peer
 	if len(from.sends) == 0 {
-		return 0, false
+		return 0, 0, false
 	}
 	if err := from.sendErr; err != nil {
 		from.sendErr = nil
 		e.link.fail(err)
-		return 0, false
+		return 0, 0, false
 	}
 	if e.recvs == 0 {
-		return 0, false
+		return 0, 0, false
 	}
 	p := from.sends[0]
-	if err := e.write(from, p); err != nil {
+	n, err := e.write(from, p)
+	if err != nil {
 		e.link.fail(err)
-		return 0, false
+		return 0, 0, false
 	}
 	e.recvs--
 	from.sends = slices.Delete(from.sends, 0, 1)
 	from.done = append(from.done, memDone{id: p.id})
-	return p.msg, true
+	return p.msg, n, true
 }
 
 // write copies the bytes of p, from the memory registered at from under the
-// keys of its segments, to the memory registered here under its key. A write
-// of no bytes touches no memory.
-func (e *MemEnd) write(from *MemEnd, p memSend) error {
+// keys of its segments, to the memory registered here under its key, and
+// returns how many. A write of no bytes touches no memory.
+func (e *MemEnd) write(from *MemEnd, p memSend) (int, error) {
 	var n uint64
 	for _, s := range p.sgl[:p.nsge] {
 		n += uint64(s.Length)
 	}
 	if n == 0 {
-		return nil
+		return 0, nil
 	}
 	dst, ok := e.bytes(p.addr, n, p.key)
 	if !ok {
-		return fmt.Errorf("rsproto: remote access error: no %d bytes at %#x under key %#x", n, p.addr, p.key)
+		return 0, fmt.Errorf("rsproto: remote access error: no %d bytes at %#x under key %#x", n, p.addr, p.key)
 	}
 	for _, s := range p.sgl[:p.nsge] {
 		src, ok := from.bytes(s.Addr, uint64(s.Length), s.Key)
 		if !ok {
-			return fmt.Errorf("rsproto: local protection error: no %d bytes at %#x under key %#x", s.Length, s.Addr, s.Key)
+			return 0, fmt.Errorf("rsproto: local protection error: no %d bytes at %#x under key %#x", s.Length, s.Addr, s.Key)
 		}
 		dst = dst[copy(dst, src):]
 	}
-	return nil
+	return int(n), nil
 }
 
 // Completion takes the completion of the oldest send of this end not yet

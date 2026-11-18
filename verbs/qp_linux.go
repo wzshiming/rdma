@@ -4,7 +4,9 @@ package verbs
 
 import (
 	"encoding/binary"
+	"os"
 	"sync"
+	"syscall"
 	"unsafe"
 
 	"github.com/wzshiming/rdma/internal/dynlib"
@@ -19,6 +21,8 @@ var qps sync.Map
 type QP struct {
 	qp       *rdmaabi.IbvQp
 	owned    bool
+	ud       bool        // its sends are datagrams
+	xrc      bool        // its sends name the remote SRQ
 	postSend dynlib.Func // post_send of the device context
 	postRecv dynlib.Func // post_recv of the device context
 	send     postBuf[rdmaabi.IbvSendWr]
@@ -58,27 +62,28 @@ func newQP(qp *rdmaabi.IbvQp, owned bool) *QP {
 		ops := contextOps(qp.Context)
 		q.postSend = dynlib.FuncAt(uintptr(ops.Post_send))
 		q.postRecv = dynlib.FuncAt(uintptr(ops.Post_recv))
+		q.ud = QPType(qp.Qp_type) == QPTypeUD
+		q.xrc = QPType(qp.Qp_type) == QPTypeXRCSend
 	}
 	return q
 }
 
-// CreateQP creates a queue pair and stores the granted capacities in attr.Cap.
+// CreateQP creates a queue pair and stores the granted capacities in
+// attr.Cap: through ibv_create_qp, or, of type QPTypeXRCRecv, in the XRC
+// domain attr.XRCD through the create_qp_ex of the domain's device, as
+// ibv_create_qp_ex does, which reports syscall.EOPNOTSUPP on a device or
+// library without it.
 func (p *PD) CreateQP(attr *QPInitAttr) (*QP, error) {
+	if attr.Type == QPTypeXRCRecv {
+		return p.createQPEx(attr)
+	}
+	ia, err := qpInitAttrToC(attr)
+	if err != nil {
+		return nil, &OpError{Op: "ibv_create_qp", Err: err}
+	}
 	f, err := load("ibv_create_qp")
 	if err != nil {
 		return nil, err
-	}
-	var ia rdmaabi.IbvQpInitAttr
-	if attr.SendCQ != nil {
-		ia.Send_cq = uint64(caddr(attr.SendCQ.cq))
-	}
-	if attr.RecvCQ != nil {
-		ia.Recv_cq = uint64(caddr(attr.RecvCQ.cq))
-	}
-	ia.Cap = capToC(attr.Cap)
-	ia.Qp_type = uint32(attr.Type)
-	if attr.SignalAll {
-		ia.Sq_sig_all = 1
 	}
 	qp, errno := f.createQP.Ptr(uintptr(p.pd), uintptr(unsafe.Pointer(&ia)), 0, 0, 0, 0)
 	if qp == 0 {
@@ -88,6 +93,85 @@ func (p *PD) CreateQP(attr *QPInitAttr) (*QP, error) {
 	q := newQP(dynlib.Pointer[rdmaabi.IbvQp](qp), true)
 	qps.Store(qp, q)
 	return q, nil
+}
+
+// qpInitAttrToC converts attr into the struct ibv_qp_init_attr of
+// ibv_create_qp. A domain is refused with EINVAL but on an XRC receive queue
+// pair: older libraries take its handle for the PD of any other type. A
+// closed SRQ is refused with os.ErrClosed: the provider would take it for
+// none and give the queue pair a receive queue of its own.
+func qpInitAttrToC(attr *QPInitAttr) (rdmaabi.IbvQpInitAttr, error) {
+	var ia rdmaabi.IbvQpInitAttr
+	if attr.XRCD != nil && attr.Type != QPTypeXRCRecv {
+		return ia, syscall.EINVAL
+	}
+	if attr.SendCQ != nil {
+		ia.Send_cq = uint64(caddr(attr.SendCQ.cq))
+	}
+	if attr.RecvCQ != nil {
+		ia.Recv_cq = uint64(caddr(attr.RecvCQ.cq))
+	}
+	if attr.SRQ != nil {
+		if attr.SRQ.srq == nil {
+			return ia, os.ErrClosed
+		}
+		ia.Srq = uint64(caddr(attr.SRQ.srq))
+	}
+	ia.Cap = capToC(attr.Cap)
+	ia.Qp_type = uint32(attr.Type)
+	if attr.SignalAll {
+		ia.Sq_sig_all = 1
+	}
+	return ia, nil
+}
+
+func (p *PD) createQPEx(attr *QPInitAttr) (*QP, error) {
+	ia, err := qpInitAttrExToC(attr, p.pd)
+	if err != nil {
+		return nil, &OpError{Op: "ibv_create_qp_ex", Err: err}
+	}
+	ctx := uintptr(attr.XRCD.xrcd.Context)
+	create := verbsOp(ctx, unsafe.Offsetof(rdmaabi.VerbsContext{}.Create_qp_ex))
+	if create.Addr() == 0 {
+		return nil, &OpError{Op: "ibv_create_qp_ex", Err: syscall.EOPNOTSUPP}
+	}
+	qp, errno := create.Ptr(ctx, uintptr(unsafe.Pointer(&ia)), 0, 0, 0, 0)
+	if qp == 0 {
+		return nil, opError("ibv_create_qp_ex", errno)
+	}
+	attr.Cap = capFromC(ia.Cap)
+	q := newQP(dynlib.Pointer[rdmaabi.IbvQp](qp), true)
+	qps.Store(qp, q)
+	return q, nil
+}
+
+// qpInitAttrExToC converts attr, of a queue pair in an XRC domain on the
+// struct ibv_pd at pd, into the struct ibv_qp_init_attr_ex of create_qp_ex:
+// that of ibv_create_qp followed by the PD and the domain. A missing domain
+// is invalid and a closed one refused with os.ErrClosed.
+func qpInitAttrExToC(attr *QPInitAttr, pd unsafe.Pointer) (rdmaabi.IbvQpInitAttrEx, error) {
+	base, err := qpInitAttrToC(attr)
+	if err != nil {
+		return rdmaabi.IbvQpInitAttrEx{}, err
+	}
+	if attr.XRCD == nil {
+		return rdmaabi.IbvQpInitAttrEx{}, syscall.EINVAL
+	}
+	if attr.XRCD.xrcd == nil {
+		return rdmaabi.IbvQpInitAttrEx{}, os.ErrClosed
+	}
+	return rdmaabi.IbvQpInitAttrEx{
+		Qp_context: base.Qp_context,
+		Send_cq:    base.Send_cq,
+		Recv_cq:    base.Recv_cq,
+		Srq:        base.Srq,
+		Cap:        base.Cap,
+		Qp_type:    base.Qp_type,
+		Sq_sig_all: base.Sq_sig_all,
+		Comp_mask:  1<<0 | 1<<1, // IBV_QP_INIT_ATTR_PD and _XRCD
+		Pd:         uint64(uintptr(pd)),
+		Xrcd:       uint64(caddr(attr.XRCD.xrcd)),
+	}, nil
 }
 
 // lookupQP returns the QP created for the struct ibv_qp at addr, or a
@@ -111,6 +195,12 @@ func (q *QP) Num() uint32 { return q.qp.Qp_num }
 
 // Type returns the transport service type.
 func (q *QP) Type() QPType { return QPType(q.qp.Qp_type) }
+
+// Context returns the device context the queue pair was created on. As with
+// ContextFromPointer, its Close does not close the device.
+func (q *QP) Context() *Context {
+	return &Context{ctx: dynlib.Pointer[rdmaabi.IbvContext](uintptr(q.qp.Context))}
+}
 
 // Modify applies the attr fields selected by mask, as ibv_modify_qp does.
 func (q *QP) Modify(attr *QPAttr, mask QPAttrMask) error {
@@ -157,7 +247,9 @@ func (q *QP) PostSend(wrs ...SendWR) error {
 	cwrs, sges := q.send.reserve(len(wrs), nsge)
 	for i := range wrs {
 		w, cw := &wrs[i], &cwrs[i]
-		sendWRToC(cw, w)
+		if err := q.requestToC(cw, w); err != nil {
+			return err
+		}
 		if i+1 < len(wrs) {
 			cw.Next = uint64(uintptr(unsafe.Pointer(&cwrs[i+1])))
 		}
@@ -186,19 +278,56 @@ func sendWRToC(cw *rdmaabi.IbvSendWr, w *SendWR) {
 	cw.Wr.Rdma.Rkey = w.RKey
 }
 
+// requestToC fills cw from w as a send of q: a datagram of a UD queue pair
+// carries its destination in place of the RDMA address, and a send of an XRC
+// send queue pair the number of the remote SRQ. The provider follows the
+// address handle's pointer, so a missing or closed one is refused here.
+func (q *QP) requestToC(cw *rdmaabi.IbvSendWr, w *SendWR) error {
+	sendWRToC(cw, w)
+	if q.xrc {
+		cw.Qp_type.Xrc.Remote_srqn = w.RemoteSRQN
+	}
+	if !q.ud {
+		return nil
+	}
+	if w.AH == nil {
+		return &OpError{Op: "ibv_post_send", Err: syscall.EINVAL}
+	}
+	if w.AH.ah == nil {
+		return &OpError{Op: "ibv_post_send", Err: os.ErrClosed}
+	}
+	*(*rdmaabi.IbvSendWrUd)(unsafe.Pointer(&cw.Wr)) = rdmaabi.IbvSendWrUd{
+		Ah:          uint64(uintptr(w.AH.ah)),
+		Remote_qpn:  w.RemoteQPN,
+		Remote_qkey: w.RemoteQKey,
+	}
+	return nil
+}
+
 // PostRecv posts receive work requests as one chain, built in the queue
 // pair's buffer like PostSend does.
 func (q *QP) PostRecv(wrs ...RecvWR) error {
 	if len(wrs) == 0 {
 		return nil
 	}
+	q.recv.mu.Lock()
+	defer q.recv.mu.Unlock()
+	first := recvChain(&q.recv, wrs)
+	rc, _ := q.postRecv.Int(caddr(q.qp), uintptr(unsafe.Pointer(first)), uintptr(unsafe.Pointer(&q.recv.bad)), 0, 0, 0)
+	if rc != 0 {
+		return opErrorRC("ibv_post_recv", rc)
+	}
+	return nil
+}
+
+// recvChain builds wrs as one chain in b, whose mutex the caller holds, and
+// returns its first request.
+func recvChain(b *postBuf[rdmaabi.IbvRecvWr], wrs []RecvWR) *rdmaabi.IbvRecvWr {
 	nsge := 0
 	for i := range wrs {
 		nsge += len(wrs[i].SGE)
 	}
-	q.recv.mu.Lock()
-	defer q.recv.mu.Unlock()
-	cwrs, sges := q.recv.reserve(len(wrs), nsge)
+	cwrs, sges := b.reserve(len(wrs), nsge)
 	for i := range wrs {
 		w, cw := &wrs[i], &cwrs[i]
 		cw.Wr_id = w.ID
@@ -211,11 +340,7 @@ func (q *QP) PostRecv(wrs ...RecvWR) error {
 			sges = fillSGEs(sges, w.SGE)
 		}
 	}
-	rc, _ := q.postRecv.Int(caddr(q.qp), uintptr(unsafe.Pointer(&cwrs[0])), uintptr(unsafe.Pointer(&q.recv.bad)), 0, 0, 0)
-	if rc != 0 {
-		return opErrorRC("ibv_post_recv", rc)
-	}
-	return nil
+	return &cwrs[0]
 }
 
 // fillSGEs copies src to the front of dst and returns the rest of dst.
@@ -224,6 +349,74 @@ func fillSGEs(dst []rdmaabi.IbvSge, src []SGE) []rdmaabi.IbvSge {
 		dst[i] = rdmaabi.IbvSge{Addr: s.Addr, Length: s.Length, Lkey: s.LKey}
 	}
 	return dst[len(src):]
+}
+
+// AttachMulticast attaches the queue pair, a UD one, to the multicast group
+// gid, lid, so that it receives the datagrams sent to the group; joining the
+// group on the network, as rdma_cm does, is not part of it. On RoCE v2 gid
+// is the group's IP address, an IPv4 one mapped into IPv6, while RoCE v1
+// gives an IPv4 group a.b.c.d the GID ff0e::ffff:a.b.c.d; rdma_cm's join
+// reports the group's GID either way. On RoCE lid is not used.
+func (q *QP) AttachMulticast(gid GID, lid uint16) error {
+	f, err := load("ibv_attach_mcast")
+	if err != nil {
+		return err
+	}
+	g := rdmaabi.IbvGid(gid)
+	if rc, _ := f.attachMcast.Int(caddr(q.qp), uintptr(unsafe.Pointer(&g)), uintptr(lid), 0, 0, 0); rc != 0 {
+		return opErrorRC("ibv_attach_mcast", rc)
+	}
+	return nil
+}
+
+// DetachMulticast detaches the queue pair from the multicast group gid, lid.
+func (q *QP) DetachMulticast(gid GID, lid uint16) error {
+	f, err := load("ibv_detach_mcast")
+	if err != nil {
+		return err
+	}
+	g := rdmaabi.IbvGid(gid)
+	if rc, _ := f.detachMcast.Int(caddr(q.qp), uintptr(unsafe.Pointer(&g)), uintptr(lid), 0, 0, 0); rc != 0 {
+		return opErrorRC("ibv_detach_mcast", rc)
+	}
+	return nil
+}
+
+// QueryECE returns the current ECE of the queue pair (ibv_query_ece). A
+// provider without ECE, or a libibverbs that lacks the function, reports
+// syscall.EOPNOTSUPP, which matches errors.ErrUnsupported.
+func (q *QP) QueryECE() (ECE, error) {
+	f, err := load("ibv_query_ece")
+	if err != nil {
+		return ECE{}, err
+	}
+	if f.queryECE.Addr() == 0 {
+		return ECE{}, &OpError{Op: "ibv_query_ece", Err: syscall.EOPNOTSUPP}
+	}
+	var ce rdmaabi.IbvEce
+	if rc, _ := f.queryECE.Int(caddr(q.qp), uintptr(unsafe.Pointer(&ce)), 0, 0, 0, 0); rc != 0 {
+		return ECE{}, opErrorRC("ibv_query_ece", rc)
+	}
+	return ECE{VendorID: ce.Vendor_id, Options: ce.Options}, nil
+}
+
+// SetECE sets the ECE options the queue pair is to use (ibv_set_ece), which
+// the provider applies in the transitions that support them. A provider
+// without ECE, a libibverbs that lacks the function, or a zero VendorID
+// reports syscall.EOPNOTSUPP.
+func (q *QP) SetECE(ece ECE) error {
+	f, err := load("ibv_set_ece")
+	if err != nil {
+		return err
+	}
+	if f.setECE.Addr() == 0 {
+		return &OpError{Op: "ibv_set_ece", Err: syscall.EOPNOTSUPP}
+	}
+	ce := rdmaabi.IbvEce{Vendor_id: ece.VendorID, Options: ece.Options}
+	if rc, _ := f.setECE.Int(caddr(q.qp), uintptr(unsafe.Pointer(&ce)), 0, 0, 0, 0); rc != 0 {
+		return opErrorRC("ibv_set_ece", rc)
+	}
+	return nil
 }
 
 // Close destroys the queue pair. A second Close is a no-op.

@@ -24,8 +24,11 @@ var compilers = map[string]string{
 }
 
 // includeDirs are searched in order for the rdma-core headers
-// infiniband/verbs.h and rdma/rdma_cma.h.
+// infiniband/verbs.h, rdma/rdma_cma.h and rdma/rdma_cma_abi.h.
 var includeDirs = []string{"/usr/local/include", "/usr/include"}
+
+// headers are the rdma-core headers the check compiles against.
+var headers = []string{"infiniband/verbs.h", "rdma/rdma_cma.h", "rdma/rdma_cma_abi.h"}
 
 // errToolchain reports a missing compiler or missing headers, which skips
 // the check unless RDMA_TEST_LAYOUT_ARCHES demands the architecture.
@@ -34,7 +37,10 @@ var errToolchain = errors.New("rdmaabi: C toolchain missing")
 // TestLayoutsMatchC has the C compiler of each architecture confirm against
 // the installed rdma-core headers that every mirrored field has the offset
 // and size of its C member and that every mirror has the size of its C type,
-// or at most that size for the leading-fields mirrors. The architectures
+// or at most that size for the leading-fields mirrors, or the offset and size
+// of its member for the mirrors of a member, the offset on that architecture
+// for a member whose offset depends on it. The fields of a mirror that ends
+// at a member are checked for their distance to it. The architectures
 // RDMA_TEST_LAYOUT_ARCHES lists must all be checked; unset, the host's own
 // is checked when its toolchain is found and skipped otherwise.
 func TestLayoutsMatchC(t *testing.T) {
@@ -103,7 +109,7 @@ func checkAgainstC(dir, arch string) (string, error) {
 		return "", err
 	}
 	src := filepath.Join(dir, "layout.c")
-	if err := os.WriteFile(src, []byte(assertions()), 0o644); err != nil {
+	if err := os.WriteFile(src, []byte(assertions(arch)), 0o644); err != nil {
 		return "", err
 	}
 	// The cross compilers do not search /usr/local/include; last, so that
@@ -121,17 +127,18 @@ func checkAgainstC(dir, arch string) (string, error) {
 	return fmt.Sprintf("%s: %s confirms the layout against %s", arch, cc, headers), nil
 }
 
-// findHeaders returns the first include directory holding both rdma-core
-// headers.
+// findHeaders returns the first include directory holding every rdma-core
+// header.
 func findHeaders() (string, error) {
 	for _, dir := range includeDirs {
-		_, errVerbs := os.Stat(filepath.Join(dir, "infiniband", "verbs.h"))
-		_, errCma := os.Stat(filepath.Join(dir, "rdma", "rdma_cma.h"))
-		if errVerbs == nil && errCma == nil {
+		if !slices.ContainsFunc(headers, func(h string) bool {
+			_, err := os.Stat(filepath.Join(dir, h))
+			return err != nil
+		}) {
 			return dir, nil
 		}
 	}
-	return "", fmt.Errorf("%w: infiniband/verbs.h and rdma/rdma_cma.h not under %s", errToolchain, strings.Join(includeDirs, " or "))
+	return "", fmt.Errorf("%w: %s not under %s", errToolchain, strings.Join(headers, ", "), strings.Join(includeDirs, " or "))
 }
 
 // headerPaths picks the rdma-core headers out of the line markers of
@@ -147,7 +154,7 @@ func headerPaths(preprocessed string) []string {
 			continue
 		}
 		p := line[first+1 : last]
-		if (strings.HasSuffix(p, "/infiniband/verbs.h") || strings.HasSuffix(p, "/rdma/rdma_cma.h")) && !slices.Contains(paths, p) {
+		if slices.ContainsFunc(headers, func(h string) bool { return strings.HasSuffix(p, "/"+h) }) && !slices.Contains(paths, p) {
 			paths = append(paths, p)
 		}
 	}
@@ -155,20 +162,43 @@ func headerPaths(preprocessed string) []string {
 }
 
 // assertions renders a C file whose static assertions hold when every
-// mirror has the layout of its C type.
-func assertions() string {
+// mirror has the layout of its C type on arch.
+func assertions(arch string) string {
 	var b strings.Builder
-	b.WriteString("#include <stddef.h>\n#include <infiniband/verbs.h>\n#include <rdma/rdma_cma.h>\n\n")
+	b.WriteString("#include <stddef.h>\n")
+	for _, h := range headers {
+		fmt.Fprintf(&b, "#include <%s>\n", h)
+	}
+	b.WriteString("\n")
 	b.WriteString("#define FIELD(type, member, offset, size) \\\n")
 	b.WriteString("\t_Static_assert(offsetof(type, member) == offset, #type \".\" #member \": offset\"); \\\n")
 	b.WriteString("\t_Static_assert(sizeof(((type *)0)->member) == size, #type \".\" #member \": size\")\n\n")
+	b.WriteString("#define BEFORE(type, member, anchor, distance, size) \\\n")
+	b.WriteString("\t_Static_assert(offsetof(type, anchor) - offsetof(type, member) == distance, #type \".\" #member \": distance to \" #anchor); \\\n")
+	b.WriteString("\t_Static_assert(sizeof(((type *)0)->member) == size, #type \".\" #member \": size\")\n\n")
 	for _, m := range mirrors {
-		for _, f := range fields(m.t) {
-			fmt.Fprintf(&b, "FIELD(%s, %s, %d, %d);\n", m.c, f.name, f.offset, f.size)
+		for _, f := range fields(m) {
+			if m.before != "" {
+				fmt.Fprintf(&b, "BEFORE(%s, %s, %s, %d, %d);\n", m.c, f.name, m.before, m.t.Size()-f.offset, f.size)
+			} else {
+				fmt.Fprintf(&b, "FIELD(%s, %s, %d, %d);\n", m.c, f.name, f.offset, f.size)
+			}
 		}
-		if m.prefix {
+		switch {
+		case m.arches != nil:
+			at := m.arches[arch]
+			fmt.Fprintf(&b, "FIELD(%s, %s, %d, %d);\n", m.c, m.member, at, m.t.Size())
+			if m.last {
+				fmt.Fprintf(&b, "_Static_assert(sizeof(%s) == %d, \"%s: %s does not end it\");\n", m.c, at+m.t.Size(), m.c, m.member)
+			}
+			b.WriteString("\n")
+		case m.member != "":
+			fmt.Fprintf(&b, "FIELD(%s, %s, %d, %d);\n\n", m.c, m.member, m.at, m.t.Size())
+		case m.before != "":
+			fmt.Fprintf(&b, "_Static_assert(offsetof(%s, %s) >= %d, \"%s: shorter before %s than its mirror\");\n\n", m.c, m.before, m.t.Size(), m.c, m.before)
+		case m.prefix:
 			fmt.Fprintf(&b, "_Static_assert(sizeof(%s) >= %d, \"%s: shorter than its mirror\");\n\n", m.c, m.t.Size(), m.c)
-		} else {
+		default:
 			fmt.Fprintf(&b, "_Static_assert(sizeof(%s) == %d, \"%s: size\");\n\n", m.c, m.t.Size(), m.c)
 		}
 	}

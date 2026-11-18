@@ -9,10 +9,9 @@ import (
 	"time"
 )
 
-// Conn is an RDMA stream connection, carried by the engine of the Dialer or
-// Listener that made it. It implements net.Conn: Read and Write may run
-// concurrently with each other, calls in the same direction are serialised,
-// and Close wakes them all.
+// Conn is an RDMA stream connection. It implements net.Conn: Read and Write
+// may run concurrently with each other, calls in the same direction are
+// serialised, and Close wakes them all.
 type Conn struct {
 	s             stream
 	local, remote net.Addr
@@ -169,9 +168,7 @@ func (c *Conn) writeClosedError() error {
 // CloseWrite closes the sending side: the peer reads io.EOF after the data
 // written so far, later Writes fail with EPIPE, and Read keeps working. It
 // waits for a Write in progress but not for ReadFrom, which fails with EPIPE
-// once its source returns or at once when it waits for room. On the
-// librdmacm engine it waits for the posted sends to complete, which may take
-// the transport's retry timeout when the peer has vanished.
+// once its source returns or at once when it waits for room.
 func (c *Conn) CloseWrite() error {
 	c.wcmu.Lock()
 	defer c.wcmu.Unlock()
@@ -195,9 +192,7 @@ func (c *Conn) CloseWrite() error {
 
 // Close closes the connection: blocked Reads and Writes return net.ErrClosed,
 // the peer reads io.EOF after the data written so far, and the connection is
-// released. It waits for the posted sends to complete: at most a second on
-// the native engine, the transport's retry timeout on the librdmacm engine
-// when the peer has vanished.
+// released. It waits for the posted sends to complete, at most a second.
 func (c *Conn) Close() error {
 	c.mu.Lock()
 	if c.closed {

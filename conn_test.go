@@ -12,6 +12,8 @@ import (
 	"net"
 	"os"
 	"runtime"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -93,17 +95,169 @@ func TestConnOnFakeNetwork(t *testing.T) {
 }
 
 // testStream is a deterministic byte stream hashed as it is produced or
-// consumed.
+// consumed. produce and consume note where each chunk starts, and consume
+// checks the bytes against those the seed produces.
 type testStream struct {
+	seed byte
 	rng  *rand.ChaCha8
 	hash hash.Hash32
 	n    int64
+
+	starts []int64 // the offsets the chunks of produce or consume start at
+	want   []byte  // consume's room for the bytes the seed produces
+	diff   divergence
 }
 
 func newStream(seed byte) *testStream {
 	var s [32]byte
 	s[0] = seed
-	return &testStream{rng: rand.NewChaCha8(s), hash: crc32.NewIEEE()}
+	return &testStream{seed: seed, rng: rand.NewChaCha8(s), hash: crc32.NewIEEE()}
+}
+
+// produce fills p with the next bytes of the stream.
+func (s *testStream) produce(p []byte) {
+	s.starts = append(s.starts, s.n)
+	s.rng.Read(p)
+	s.hash.Write(p)
+	s.n += int64(len(p))
+}
+
+// consume takes p, the next bytes received, and checks them against the next
+// bytes of the stream.
+func (s *testStream) consume(p []byte) {
+	s.starts = append(s.starts, s.n)
+	s.hash.Write(p)
+	if cap(s.want) < len(p) {
+		s.want = make([]byte, len(p))
+	}
+	want := s.want[:len(p)]
+	s.rng.Read(want)
+	if !bytes.Equal(p, want) {
+		s.diff.note(s.n, want, p)
+	}
+	s.diff.sample(s.n, want, p)
+	s.n += int64(len(p))
+}
+
+// divergence is where the bytes a stream consumed depart from those its seed
+// produces: runs of bytes that differ, set apart by runGap bytes that agree or
+// more, as random bytes agree by chance one time in 256.
+type divergence struct {
+	runs        int
+	bytes       int64  // that differ, in all
+	first, last int64  // the offsets of the first and the last that differ
+	firstEnd    int64  // one past the last byte of the first run
+	want, got   []byte // up to sampleSize bytes of each side from first
+}
+
+const (
+	runGap     = 32
+	sampleSize = 32
+)
+
+// note counts the bytes of got, consumed at off, that differ from want.
+func (d *divergence) note(off int64, want, got []byte) {
+	for i := range got {
+		if got[i] == want[i] {
+			continue
+		}
+		at := off + int64(i)
+		if d.runs == 0 {
+			d.first = at
+		}
+		if d.runs == 0 || at-d.last > runGap {
+			d.runs++
+		}
+		if d.runs == 1 {
+			d.firstEnd = at + 1
+		}
+		d.bytes++
+		d.last = at
+	}
+}
+
+// sample keeps the bytes of got and want, consumed at off, from the first that
+// differs on until it holds sampleSize of each.
+func (d *divergence) sample(off int64, want, got []byte) {
+	if d.runs == 0 || len(d.got) == sampleSize {
+		return
+	}
+	i := int(max(d.first-off, 0))
+	n := min(sampleSize-len(d.got), len(got)-i)
+	d.want = append(d.want, want[i:i+n]...)
+	d.got = append(d.got, got[i:i+n]...)
+}
+
+// How far from a departure describeTransfer looks for where the bytes
+// received there were sent, and how many chunks it shows on each side.
+const (
+	searchWindow = 1 << 20
+	nearbyChunks = 3
+)
+
+// describeTransfer returns what tells the bytes out consumed from those in
+// produced, empty when they are the same: where they first depart and how, or
+// that the hashes alone disagree.
+func describeTransfer(in, out *testStream) string {
+	d := &out.diff
+	if d.runs == 0 && in.sum() == out.sum() {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "sent %s, received %s", in.sum(), out.sum())
+	if d.runs == 0 {
+		b.WriteString("; every byte received is as sent")
+		return b.String()
+	}
+	fmt.Fprintf(&b, "\nthe bytes received depart from those sent at offset %d (%#x) in a run of %d bytes; %d bytes differ in %d runs, the last at offset %d",
+		d.first, d.first, d.firstEnd-d.first, d.bytes, d.runs, d.last)
+	fmt.Fprintf(&b, "\nsent:     % x\nreceived: % x\n%s", d.want, d.got, in.whereSent(d.first, d.got))
+	for _, side := range []struct {
+		name string
+		s    *testStream
+	}{{"sent", in}, {"received", out}} {
+		if starts := side.s.startsNear(d.first); starts != "" {
+			fmt.Fprintf(&b, "\nchunks %s start at %s from there", side.name, starts)
+		}
+	}
+	return b.String()
+}
+
+// whereSent tells where, within searchWindow bytes of off, the stream holds
+// the first 16 bytes of got.
+func (s *testStream) whereSent(off int64, got []byte) string {
+	lo, hi := max(off-searchWindow, 0), min(off+searchWindow, s.n)
+	if hi > lo {
+		rng := newStream(s.seed).rng
+		skip := make([]byte, 64<<10)
+		for left := lo; left > 0; left -= int64(len(skip)) {
+			rng.Read(skip[:min(left, int64(len(skip)))])
+		}
+		window := make([]byte, hi-lo)
+		rng.Read(window)
+		if i := bytes.Index(window, got[:min(len(got), 16)]); i >= 0 {
+			at := lo + int64(i)
+			return fmt.Sprintf("the bytes received there were sent at offset %d (%+d)", at, at-off)
+		}
+	}
+	return fmt.Sprintf("the bytes received there were not sent within %d bytes of it", searchWindow)
+}
+
+// startsNear returns where the chunk holding off and nearbyChunks chunks on
+// each side of it start, as offsets from off, empty when no chunk holds it.
+func (s *testStream) startsNear(off int64) string {
+	k, found := slices.BinarySearch(s.starts, off)
+	if !found {
+		k--
+	}
+	if k < 0 {
+		return ""
+	}
+	var starts []string
+	for _, start := range s.starts[max(k-nearbyChunks, 0):min(k+nearbyChunks+1, len(s.starts))] {
+		starts = append(starts, fmt.Sprintf("%+d", start-off))
+	}
+	return strings.Join(starts, ", ")
 }
 
 // writeTo writes total bytes to w in chunks of at most chunk bytes.
@@ -139,6 +293,67 @@ func (s *testStream) readFrom(r io.Reader, chunk int) error {
 }
 
 func (s *testStream) sum() string { return fmt.Sprintf("%d bytes, crc %08x", s.n, s.hash.Sum32()) }
+
+// A stream received intact has nothing to report.
+func TestTransferReportIsEmptyForAnIntactStream(t *testing.T) {
+	in, out := newStream(9), newStream(9)
+	b := make([]byte, 64<<10)
+	in.produce(b)
+	out.consume(b[:5000])
+	out.consume(b[5000:])
+	if report := describeTransfer(in, out); report != "" {
+		t.Errorf("describeTransfer() = %q, want empty", report)
+	}
+}
+
+// A stream whose bytes depart from those sent says where they first depart,
+// how long that run is, what each side has there, where the bytes it got
+// were sent, and where the chunks of each side start nearby.
+func TestTransferReportShowsWhereTheBytesDepart(t *testing.T) {
+	const total, sentChunk, receivedChunk = 256 << 10, 32 << 10, 3000
+	const at, size, lap = 100000, 5000, 32 << 10
+	in, out := newStream(9), newStream(9)
+	sent := make([]byte, total)
+	for off := 0; off < total; off += sentChunk {
+		in.produce(sent[off : off+sentChunk])
+	}
+	// A stretch arrives as it was sent a lap of the buffer earlier.
+	got := bytes.Clone(sent)
+	copy(got[at:at+size], sent[at-lap:])
+	if got[at] == sent[at] || got[at+size-1] == sent[at+size-1] {
+		t.Fatal("the stretch replaced begins or ends with a byte that agrees; pick another")
+	}
+	for off := 0; off < total; off += receivedChunk {
+		out.consume(got[off:min(off+receivedChunk, total)])
+	}
+	report := describeTransfer(in, out)
+	for _, want := range []string{
+		fmt.Sprintf("sent %s, received %s", in.sum(), out.sum()),
+		fmt.Sprintf("the bytes received depart from those sent at offset %d (%#x) in a run of %d bytes", at, at, size),
+		fmt.Sprintf("sent:     % x", sent[at:at+sampleSize]),
+		fmt.Sprintf("received: % x", got[at:at+sampleSize]),
+		fmt.Sprintf("the bytes received there were sent at offset %d (%+d)", at-lap, -lap),
+		"chunks sent start at -100000, -67232, -34464, -1696, +31072, +63840, +96608 from there",
+		"chunks received start at -10000, -7000, -4000, -1000, +2000, +5000, +8000 from there",
+	} {
+		if !strings.Contains(report, want) {
+			t.Errorf("report lacks %q:\n%s", want, report)
+		}
+	}
+}
+
+// A stream whose bytes all arrived as sent while its hash disagrees says so.
+func TestTransferReportTellsAHashAloneDisagrees(t *testing.T) {
+	in, out := newStream(9), newStream(9)
+	b := make([]byte, 4096)
+	in.produce(b)
+	out.consume(b)
+	out.hash.Write([]byte{0})
+	want := fmt.Sprintf("sent %s, received %s; every byte received is as sent", in.sum(), out.sum())
+	if report := describeTransfer(in, out); report != want {
+		t.Errorf("describeTransfer() = %q, want %q", report, want)
+	}
+}
 
 // transfer streams total bytes from w to r, closes w's sending side and
 // checks the hashes.

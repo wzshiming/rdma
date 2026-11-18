@@ -3,12 +3,14 @@ package rdmaabi
 import (
 	"flag"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
 	"testing"
+	"unsafe"
 )
 
 var update = flag.Bool("update", false, "rewrite testdata/layout.txt from the Go types")
@@ -20,6 +22,17 @@ type mirror struct {
 	// prefix marks a type that mirrors the leading fields of its C type
 	// only; the library allocates these, never Go code.
 	prefix bool
+	// member designates the member of c that t mirrors instead, one with no
+	// C type of its own, such as "wr.ud"; at is its offset in c, or arches
+	// holds it for each GOARCH where it depends on the architecture.
+	member string
+	at     uintptr
+	arches map[string]uintptr
+	// last marks a member that ends c.
+	last bool
+	// before names the member of c that t ends at, for a type that mirrors
+	// the members preceding it: their offsets count back from it.
+	before string
 }
 
 var mirrors = []mirror{
@@ -30,6 +43,8 @@ var mirrors = []mirror{
 	{c: "union ibv_gid", t: reflect.TypeFor[IbvGid]()},
 	{c: "struct ibv_context_ops", t: reflect.TypeFor[IbvContextOps]()},
 	{c: "struct ibv_context", t: reflect.TypeFor[IbvContext](), prefix: true},
+	{c: "struct ibv_context", member: "abi_compat", arches: IbvContextAbiCompat, last: true, t: reflect.TypeFor[uint64]()},
+	{c: "struct verbs_context", t: reflect.TypeFor[VerbsContext](), before: "context"},
 	{c: "struct ibv_comp_channel", t: reflect.TypeFor[IbvCompChannel]()},
 	{c: "struct ibv_async_event", t: reflect.TypeFor[IbvAsyncEvent]()},
 	{c: "struct ibv_wc", t: reflect.TypeFor[IbvWc]()},
@@ -37,13 +52,22 @@ var mirrors = []mirror{
 	{c: "struct ibv_cq", t: reflect.TypeFor[IbvCq](), prefix: true},
 	{c: "struct ibv_qp", t: reflect.TypeFor[IbvQp](), prefix: true},
 	{c: "struct ibv_qp_init_attr", t: reflect.TypeFor[IbvQpInitAttr]()},
+	{c: "struct ibv_qp_init_attr_ex", t: reflect.TypeFor[IbvQpInitAttrEx]()},
 	{c: "struct ibv_qp_cap", t: reflect.TypeFor[IbvQpCap]()},
 	{c: "struct ibv_qp_attr", t: reflect.TypeFor[IbvQpAttr]()},
 	{c: "struct ibv_ah_attr", t: reflect.TypeFor[IbvAhAttr]()},
 	{c: "struct ibv_global_route", t: reflect.TypeFor[IbvGlobalRoute]()},
 	{c: "struct ibv_send_wr", t: reflect.TypeFor[IbvSendWr]()},
+	{c: "struct ibv_send_wr", member: "wr.ud", at: unsafe.Offsetof(IbvSendWr{}.Wr), t: reflect.TypeFor[IbvSendWrUd]()},
 	{c: "struct ibv_recv_wr", t: reflect.TypeFor[IbvRecvWr]()},
 	{c: "struct ibv_sge", t: reflect.TypeFor[IbvSge]()},
+	{c: "struct ibv_ece", t: reflect.TypeFor[IbvEce]()},
+	{c: "struct ibv_srq", t: reflect.TypeFor[IbvSrq](), prefix: true},
+	{c: "struct ibv_srq_attr", t: reflect.TypeFor[IbvSrqAttr]()},
+	{c: "struct ibv_srq_init_attr", t: reflect.TypeFor[IbvSrqInitAttr]()},
+	{c: "struct ibv_srq_init_attr_ex", t: reflect.TypeFor[IbvSrqInitAttrEx]()},
+	{c: "struct ibv_xrcd", t: reflect.TypeFor[IbvXrcd]()},
+	{c: "struct ibv_xrcd_init_attr", t: reflect.TypeFor[IbvXrcdInitAttr]()},
 	{c: "struct rdma_event_channel", t: reflect.TypeFor[RdmaEventChannel]()},
 	{c: "struct rdma_cm_id", t: reflect.TypeFor[RdmaCmId]()},
 	{c: "struct rdma_route", t: reflect.TypeFor[RdmaRoute]()},
@@ -51,6 +75,35 @@ var mirrors = []mirror{
 	{c: "struct rdma_ib_addr", t: reflect.TypeFor[RdmaIbAddr]()},
 	{c: "struct rdma_cm_event", t: reflect.TypeFor[RdmaCmEvent]()},
 	{c: "struct rdma_conn_param", t: reflect.TypeFor[RdmaConnParam]()},
+	{c: "struct ucma_abi_cmd_hdr", t: reflect.TypeFor[UcmaAbiCmdHdr]()},
+	{c: "struct ucma_abi_create_id", t: reflect.TypeFor[UcmaAbiCreateId]()},
+	{c: "struct ucma_abi_create_id_resp", t: reflect.TypeFor[UcmaAbiCreateIdResp]()},
+	{c: "struct ucma_abi_destroy_id", t: reflect.TypeFor[UcmaAbiDestroyId]()},
+	{c: "struct ucma_abi_destroy_id_resp", t: reflect.TypeFor[UcmaAbiDestroyIdResp]()},
+	{c: "struct ucma_abi_bind", t: reflect.TypeFor[UcmaAbiBind]()},
+	{c: "struct ucma_abi_resolve_addr", t: reflect.TypeFor[UcmaAbiResolveAddr]()},
+	{c: "struct ucma_abi_resolve_route", t: reflect.TypeFor[UcmaAbiResolveRoute]()},
+	{c: "struct ucma_abi_query", t: reflect.TypeFor[UcmaAbiQuery]()},
+	{c: "struct ucma_abi_query_addr_resp", t: reflect.TypeFor[UcmaAbiQueryAddrResp]()},
+	{c: "struct ucma_abi_conn_param", t: reflect.TypeFor[UcmaAbiConnParam]()},
+	{c: "struct ucma_abi_ud_param", t: reflect.TypeFor[UcmaAbiUdParam]()},
+	{c: "struct ucma_abi_ece", t: reflect.TypeFor[UcmaAbiEce]()},
+	{c: "struct ucma_abi_connect", t: reflect.TypeFor[UcmaAbiConnect]()},
+	{c: "struct ucma_abi_listen", t: reflect.TypeFor[UcmaAbiListen]()},
+	{c: "struct ucma_abi_accept", t: reflect.TypeFor[UcmaAbiAccept]()},
+	{c: "struct ucma_abi_reject", t: reflect.TypeFor[UcmaAbiReject]()},
+	{c: "struct ucma_abi_disconnect", t: reflect.TypeFor[UcmaAbiDisconnect]()},
+	{c: "struct ucma_abi_init_qp_attr", t: reflect.TypeFor[UcmaAbiInitQpAttr]()},
+	{c: "struct ucma_abi_notify", t: reflect.TypeFor[UcmaAbiNotify]()},
+	{c: "struct ucma_abi_join_mcast", t: reflect.TypeFor[UcmaAbiJoinMcast]()},
+	{c: "struct ucma_abi_get_event", t: reflect.TypeFor[UcmaAbiGetEvent]()},
+	{c: "struct ucma_abi_event_resp", t: reflect.TypeFor[UcmaAbiEventResp]()},
+	{c: "struct ucma_abi_set_option", t: reflect.TypeFor[UcmaAbiSetOption]()},
+	{c: "struct ucma_abi_migrate_id", t: reflect.TypeFor[UcmaAbiMigrateId]()},
+	{c: "struct ucma_abi_migrate_resp", t: reflect.TypeFor[UcmaAbiMigrateResp]()},
+	{c: "struct ib_uverbs_qp_attr", t: reflect.TypeFor[IbUverbsQpAttr]()},
+	{c: "struct ib_uverbs_ah_attr", t: reflect.TypeFor[IbUverbsAhAttr]()},
+	{c: "struct ib_uverbs_global_route", t: reflect.TypeFor[IbUverbsGlobalRoute]()},
 }
 
 // A field is a mirrored field under its C member designator, such as
@@ -61,9 +114,10 @@ type field struct {
 	size   uintptr
 }
 
-// fields lists the named fields of t in declaration order, anonymous nested
-// structs flattened into their members and padding (_) left out.
-func fields(t reflect.Type) []field {
+// fields lists the named fields of m.t in declaration order under their
+// member designators in m.c, anonymous nested structs flattened into their
+// members and padding (_) left out.
+func fields(m mirror) []field {
 	var out []field
 	var walk func(t reflect.Type, prefix string, base uintptr)
 	walk = func(t reflect.Type, prefix string, base uintptr) {
@@ -80,8 +134,12 @@ func fields(t reflect.Type) []field {
 			out = append(out, field{name, base + f.Offset, f.Type.Size()})
 		}
 	}
-	if t.Kind() == reflect.Struct {
-		walk(t, "", 0)
+	prefix := ""
+	if m.member != "" {
+		prefix = m.member + "."
+	}
+	if m.t.Kind() == reflect.Struct {
+		walk(m.t, prefix, m.at)
 	}
 	return out
 }
@@ -96,12 +154,27 @@ func cName(goName string) string {
 func layoutText() string {
 	var b strings.Builder
 	b.WriteString("# Layout of the rdma-core mirrors in bytes: \"<C type> <size>\" and\n")
-	b.WriteString("# \"<C type>.<member> <offset> <size>\". Regenerate with go test -update\n")
-	b.WriteString("# once TestLayoutsMatchC passes.\n")
+	b.WriteString("# \"<C type>.<member> <offset> <size>\"; \"<member>@<GOARCH>\" holds on that\n")
+	b.WriteString("# architecture, and a negative offset counts back from the member a\n")
+	b.WriteString("# mirror ends at. Regenerate with go test -update once TestLayoutsMatchC\n")
+	b.WriteString("# passes.\n")
 	for _, m := range mirrors {
-		fmt.Fprintf(&b, "%s %d\n", m.c, m.t.Size())
-		for _, f := range fields(m.t) {
-			fmt.Fprintf(&b, "%s.%s %d %d\n", m.c, f.name, f.offset, f.size)
+		switch {
+		case m.arches != nil:
+			for _, arch := range slices.Sorted(maps.Keys(m.arches)) {
+				fmt.Fprintf(&b, "%s.%s@%s %d %d\n", m.c, m.member, arch, m.arches[arch], m.t.Size())
+			}
+		case m.member != "":
+			fmt.Fprintf(&b, "%s.%s %d %d\n", m.c, m.member, m.at, m.t.Size())
+		default:
+			fmt.Fprintf(&b, "%s %d\n", m.c, m.t.Size())
+		}
+		for _, f := range fields(m) {
+			if m.before != "" {
+				fmt.Fprintf(&b, "%s.%s -%d %d\n", m.c, f.name, m.t.Size()-f.offset, f.size)
+			} else {
+				fmt.Fprintf(&b, "%s.%s %d %d\n", m.c, f.name, f.offset, f.size)
+			}
 		}
 	}
 	return b.String()

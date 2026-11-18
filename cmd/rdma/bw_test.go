@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -22,14 +23,14 @@ func TestParseBW(t *testing.T) {
 		},
 		{
 			"client with every flag",
-			[]string{"-connect", "rdma.example:4791", "-engine", "native", "-size", "1048576", "-duration", "2s", "-conns", "4", "-sndbuf", "1048576", "-rcvbuf", "1048576", "-sqsize", "512", "-rqsize", "512", "-inline", "0"},
-			bwOptions{endpoint: endpoint{connect: "rdma.example:4791", engine: "native", sndbuf: 1 << 20, rcvbuf: 1 << 20, sqsize: 512, rqsize: 512}, size: 1 << 20, duration: 2 * time.Second, conns: 4},
+			[]string{"-connect", "rdma.example:4791", "-size", "1048576", "-duration", "2s", "-conns", "4", "-sndbuf", "1048576", "-rcvbuf", "1048576", "-sqsize", "512", "-rqsize", "512", "-inline", "0", "-poll", "5us"},
+			bwOptions{endpoint: endpoint{connect: "rdma.example:4791", sndbuf: 1 << 20, rcvbuf: 1 << 20, sqsize: 512, rqsize: 512, poll: 5 * time.Microsecond}, size: 1 << 20, duration: 2 * time.Second, conns: 4},
 			"",
 		},
 		{
-			"server on the librdmacm engine",
-			[]string{"-listen", ":4791", "-engine", "librdmacm", "-conns", "2"},
-			bwOptions{endpoint: endpoint{listen: ":4791", engine: "librdmacm"}, size: 64 << 10, duration: 10 * time.Second, conns: 2},
+			"server of two connections",
+			[]string{"-listen", ":4791", "-conns", "2"},
+			bwOptions{endpoint: endpoint{listen: ":4791"}, size: 64 << 10, duration: 10 * time.Second, conns: 2},
 			"",
 		},
 		{"-h asks for help", []string{"-h"}, bwOptions{}, "help"},
@@ -39,7 +40,7 @@ func TestParseBW(t *testing.T) {
 		{"zero duration", []string{"-connect", "h:1", "-duration", "0"}, bwOptions{}, "-duration must be positive"},
 		{"malformed duration", []string{"-connect", "h:1", "-duration", "2"}, bwOptions{}, `invalid value "2" for flag -duration`},
 		{"zero connections", []string{"-connect", "h:1", "-conns", "0"}, bwOptions{}, "-conns must be at least 1"},
-		{"unknown engine", []string{"-listen", ":1", "-engine", "rsockets"}, bwOptions{}, "-engine must be native or librdmacm"},
+		{"the engine flag is gone", []string{"-listen", ":1", "-engine", "librdmacm"}, bwOptions{}, "flag provided but not defined: -engine"},
 		{"pingpong's -n is unknown", []string{"-connect", "h:1", "-n", "10"}, bwOptions{}, "flag provided but not defined: -n"},
 		{"stray argument", []string{"-connect", "h:1", "extra"}, bwOptions{}, `unexpected argument "extra"`},
 	}
@@ -63,7 +64,7 @@ func TestBWUsage(t *testing.T) {
 		stderr string
 	}{
 		{"help lists the flags and the fields", []string{"help", "bw"}, exitOK,
-			[]string{"Usage: rdma bw", "-listen", "-connect", "-engine", "-size", "-duration", "-conns", "-sndbuf", "-rcvbuf", "-sqsize", "-rqsize", "-inline", "-keep", "connections", "bytes", "duration", "MiB/s", "Gbit/s"}, ""},
+			[]string{"Usage: rdma bw", "-listen", "-connect", "-size", "-duration", "-conns", "-sndbuf", "-rcvbuf", "-sqsize", "-rqsize", "-inline", "-poll", "-keep", "connections", "bytes", "duration", "MiB/s", "Gbit/s"}, ""},
 		{"no endpoint is a usage error", []string{"bw"}, exitUsage, nil, "rdma bw: one of -listen or -connect is required"},
 		{"a bad flag is a usage error", []string{"bw", "-connect", "h:1", "-conns", "0"}, exitUsage, nil, "-conns must be at least 1"},
 	}
@@ -82,6 +83,24 @@ func TestBWUsage(t *testing.T) {
 				t.Errorf("stderr = %q, want it to contain %q", stderr, tt.stderr)
 			}
 		})
+	}
+}
+
+// instantConn takes writes and confirms at once, so no drain masks a short run.
+type instantConn struct{}
+
+func (instantConn) Read([]byte) (int, error)    { return 0, io.EOF }
+func (instantConn) Write(p []byte) (int, error) { return len(p), nil }
+func (instantConn) CloseWrite() error           { return nil }
+
+func TestStreamDurationIsAtLeastTheRequestedTime(t *testing.T) {
+	const d = 10 * time.Millisecond
+	got, err := stream(instantConn{}, 64<<10, d)
+	if err != nil {
+		t.Fatalf("stream() error: %v", err)
+	}
+	if got.Duration < d {
+		t.Errorf("stream() duration = %v, want at least the %v it was asked to send for", got.Duration, d)
 	}
 }
 

@@ -23,12 +23,18 @@ type nativeEngine struct {
 	transportType func(*verbs.Context) verbs.TransportType
 }
 
+// platformEngine returns the engine of Dial and Listen, the native engine,
+// which fails with an error matching errors.ErrUnsupported on a platform
+// without rdma-core, as no library it runs on can be loaded.
+func platformEngine() engine { return nativeEngine{} }
+
 // errIWARP refuses a device of the iWARP transport, whose mode of rsockets
 // the native engine leaves out.
-var errIWARP = fmt.Errorf("rdma: the native engine does not run on iWARP devices, the librdmacm engine does: %w", errors.ErrUnsupported)
+var errIWARP = fmt.Errorf("rdma: iWARP devices are not supported: %w", errors.ErrUnsupported)
 
-// nativeLibraries are the libraries of rdma-core the native engine runs on.
-var nativeLibraries = []string{"libibverbs.so.1", "librdmacm.so.1"}
+// nativeLibraries are the libraries of rdma-core the native engine runs on:
+// libibverbs alone, as cm needs no librdmacm.
+var nativeLibraries = []string{"libibverbs.so.1"}
 
 // loadLibraries loads the libraries of the engine, which fails with an error
 // matching errors.ErrUnsupported for the first that cannot be loaded.
@@ -154,8 +160,9 @@ func (e nativeEngine) acceptRequest(ctx context.Context, req *cm.Request, c Conf
 	return s, nil
 }
 
-// newQPStream builds a native stream sized for c on a connection set up on
-// id, which it owns from then on: when it fails, id is closed.
+// newQPStream builds a native stream sized for c, polling for c's poll time,
+// on a connection set up on id, which it owns from then on: when it fails,
+// id is closed.
 func newQPStream(id *cm.ID, c Config) (*nativeStream, error) {
 	t, err := newQPTransport(id, c)
 	if err != nil {
@@ -167,6 +174,7 @@ func newQPStream(id *cm.ID, c Config) (*nativeStream, error) {
 		t.release()
 		return nil, err
 	}
+	s.pollFor(c.PollTime)
 	return s, nil
 }
 
@@ -178,13 +186,13 @@ type connSizes struct {
 }
 
 // sizesFor sizes a connection on a device whose queues hold at most maxQueue
-// work requests as rsockets sizes an rsocket that the librdmacm engine set
-// c's non-zero fields on: rsetsockopt doubles the buffer sizes, giving the
-// send buffer 4096 bytes should it fall short of RS_SNDLOWAT, and caps the
-// queue depths and the inline size at 0xFFFE, and rs_set_qp_size keeps the
-// depths within 16 and the device's limit. Zero fields take the compile-time
-// defaults of rsockets, never those of /etc/rdma/rsocket. A buffer beyond the
-// 32-bit sizes of rsockets is refused.
+// work requests as rsockets sizes an rsocket given c's non-zero fields as
+// options: rsetsockopt doubles the buffer sizes, giving the send buffer 4096
+// bytes should it fall short of RS_SNDLOWAT, and caps the queue depths and
+// the inline size at 0xFFFE, and rs_set_qp_size keeps the depths within 16
+// and the device's limit. Zero fields take the compile-time defaults of
+// rsockets, never those of /etc/rdma/rsocket. A buffer beyond the 32-bit
+// sizes of rsockets is refused.
 func sizesFor(c Config, maxQueue int) (connSizes, error) {
 	s := connSizes{
 		sendBuffer:    rsproto.DefaultSendBufferSize,

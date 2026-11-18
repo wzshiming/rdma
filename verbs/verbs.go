@@ -297,6 +297,36 @@ var qpAttrMaskNames = []flagName{
 
 func (m QPAttrMask) String() string { return flagString(uint64(m), qpAttrMaskNames) }
 
+// SRQAttrMask selects the SRQAttr fields that SRQ.Modify applies
+// (IBV_SRQ_*).
+type SRQAttrMask uint32
+
+// Shared receive queue attribute mask bits.
+const (
+	SRQAttrMaxWR SRQAttrMask = 1 << 0
+	SRQAttrLimit SRQAttrMask = 1 << 1
+)
+
+var srqAttrMaskNames = []flagName{
+	{uint64(SRQAttrMaxWR), "MAX_WR"},
+	{uint64(SRQAttrLimit), "LIMIT"},
+}
+
+func (m SRQAttrMask) String() string { return flagString(uint64(m), srqAttrMaskNames) }
+
+// SRQType is the type of a shared receive queue (IBV_SRQT_*).
+type SRQType int
+
+// Shared receive queue types.
+const (
+	SRQTypeBasic SRQType = 0
+	SRQTypeXRC   SRQType = 1
+)
+
+var srqTypeNames = []string{"BASIC", "XRC"}
+
+func (t SRQType) String() string { return enumString("SRQType", int(t), srqTypeNames) }
+
 // WROpcode is the operation of a send work request (IBV_WR_*).
 type WROpcode int
 
@@ -588,15 +618,41 @@ type QPCap struct {
 	MaxInlineData uint32
 }
 
-// QPInitAttr describes a queue pair to create (struct ibv_qp_init_attr).
+// QPInitAttr describes a queue pair to create (struct ibv_qp_init_attr_ex).
 // PD.CreateQP overwrites Cap with the capacities actually granted, which is
-// how libibverbs reports the maximum inline size.
+// how libibverbs reports the maximum inline size. A queue pair with an SRQ
+// receives through it and has no receive queue of its own. A queue pair of
+// type QPTypeXRCRecv belongs to the XRC domain XRCD, which it needs and the
+// other types refuse, and has no CQs: what it receives goes to the XRC SRQs
+// of the domain.
 type QPInitAttr struct {
 	SendCQ    *CQ
 	RecvCQ    *CQ
+	SRQ       *SRQ
+	XRCD      *XRCD
 	Type      QPType
 	Cap       QPCap
 	SignalAll bool // every send work request generates a completion
+}
+
+// SRQAttr holds the attributes of a shared receive queue (struct
+// ibv_srq_attr): how many receives it holds, of how many SGEs each, and the
+// limit that arms the SRQ_LIMIT_REACHED event, 0 when it is not armed.
+type SRQAttr struct {
+	MaxWR  uint32
+	MaxSGE uint32
+	Limit  uint32
+}
+
+// SRQInitAttr describes a shared receive queue to create (struct
+// ibv_srq_init_attr_ex). PD.CreateSRQ overwrites Attr with the capacities
+// actually granted. An SRQ of type SRQTypeXRC belongs to the XRC domain XRCD
+// and completes its receives on CQ; one of type SRQTypeBasic has neither.
+type SRQInitAttr struct {
+	Type SRQType
+	Attr SRQAttr
+	XRCD *XRCD
+	CQ   *CQ
 }
 
 // GlobalRoute is the GRH part of an address (struct ibv_global_route).
@@ -650,6 +706,15 @@ type QPAttr struct {
 	RateLimit        uint32
 }
 
+// ECE is the enhanced connection establishment data of a queue pair (struct
+// ibv_ece): the IEEE OUI of the provider's vendor and options of that
+// vendor's devices, which the two ends of a connection exchange through the
+// connection manager.
+type ECE struct {
+	VendorID uint32
+	Options  uint32
+}
+
 // SGE is a scatter/gather element (struct ibv_sge); build one with MR.SGE.
 type SGE struct {
 	Addr   uint64
@@ -657,9 +722,14 @@ type SGE struct {
 	LKey   uint32
 }
 
-// SendWR is a send work request (struct ibv_send_wr) for an RC or UC queue
-// pair. Imm travels in network byte order and arrives as WC.Imm on the remote
-// side; RemoteAddr and RKey are used by the RDMA operations.
+// SendWR is a send work request (struct ibv_send_wr). Imm travels in network
+// byte order and arrives as WC.Imm on the remote side; RemoteAddr and RKey are
+// used by the RDMA operations of RC, UC and XRC queue pairs. AH, RemoteQPN and
+// RemoteQKey are the destination of a datagram: a send of a UD queue pair
+// names its address handle, the receiving queue pair and that queue pair's
+// qkey, and other queue pairs ignore them. RemoteSRQN is the destination of
+// a send of an XRC send queue pair, the number of an XRC SRQ on the remote
+// side (SRQ.Num), which other queue pairs ignore.
 type SendWR struct {
 	ID         uint64
 	Op         WROpcode
@@ -668,9 +738,15 @@ type SendWR struct {
 	Imm        uint32
 	RemoteAddr uint64
 	RKey       uint32
+	AH         *AH
+	RemoteQPN  uint32
+	RemoteQKey uint32
+	RemoteSRQN uint32
 }
 
-// RecvWR is a receive work request (struct ibv_recv_wr).
+// RecvWR is a receive work request (struct ibv_recv_wr). On a UD queue pair
+// the buffer begins with 40 bytes for the global routing header, which the
+// package documentation describes.
 type RecvWR struct {
 	ID  uint64
 	SGE []SGE
@@ -704,12 +780,14 @@ func (wc WC) Err() error {
 	return &WCError{Status: wc.Status, VendorErr: wc.VendorErr}
 }
 
-// AsyncEvent is an asynchronous event (struct ibv_async_event). QP, CQ or Port
-// identifies the affected object according to Type; the others are zero.
+// AsyncEvent is an asynchronous event (struct ibv_async_event). QP, CQ, SRQ
+// or Port identifies the affected object according to Type; the others are
+// zero.
 type AsyncEvent struct {
 	Type EventType
 	QP   *QP
 	CQ   *CQ
+	SRQ  *SRQ
 	Port uint8
 }
 

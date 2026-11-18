@@ -1,6 +1,8 @@
 # Layout of the rdma-core mirrors in bytes: "<C type> <size>" and
-# "<C type>.<member> <offset> <size>". Regenerate with go test -update
-# once TestLayoutsMatchC passes.
+# "<C type>.<member> <offset> <size>"; "<member>@<GOARCH>" holds on that
+# architecture, and a negative offset counts back from the member a
+# mirror ends at. Regenerate with go test -update once TestLayoutsMatchC
+# passes.
 struct ibv_device 24
 struct ibv_device.node_type 16 4
 struct ibv_device.transport_type 20 4
@@ -79,6 +81,7 @@ union ibv_gid 16
 struct ibv_context_ops 256
 struct ibv_context_ops.poll_cq 88 8
 struct ibv_context_ops.req_notify_cq 96 8
+struct ibv_context_ops.post_srq_recv 160 8
 struct ibv_context_ops.post_send 200 8
 struct ibv_context_ops.post_recv 208 8
 struct ibv_context 280
@@ -87,6 +90,19 @@ struct ibv_context.ops 8 256
 struct ibv_context.cmd_fd 264 4
 struct ibv_context.async_fd 268 4
 struct ibv_context.num_comp_vectors 272 4
+struct ibv_context.abi_compat@amd64 320 8
+struct ibv_context.abi_compat@arm64 328 8
+struct ibv_context.abi_compat@loong64 320 8
+struct ibv_context.abi_compat@ppc64le 320 8
+struct ibv_context.abi_compat@riscv64 320 8
+struct ibv_context.abi_compat@s390x 320 8
+struct verbs_context 56
+struct verbs_context.create_qp_ex -56 8
+struct verbs_context.get_srq_num -48 8
+struct verbs_context.create_srq_ex -40 8
+struct verbs_context.open_xrcd -32 8
+struct verbs_context.close_xrcd -24 8
+struct verbs_context.sz -8 8
 struct ibv_comp_channel 16
 struct ibv_comp_channel.context 0 8
 struct ibv_comp_channel.fd 8 4
@@ -141,6 +157,17 @@ struct ibv_qp_init_attr.srq 24 8
 struct ibv_qp_init_attr.cap 32 20
 struct ibv_qp_init_attr.qp_type 52 4
 struct ibv_qp_init_attr.sq_sig_all 56 4
+struct ibv_qp_init_attr_ex 136
+struct ibv_qp_init_attr_ex.qp_context 0 8
+struct ibv_qp_init_attr_ex.send_cq 8 8
+struct ibv_qp_init_attr_ex.recv_cq 16 8
+struct ibv_qp_init_attr_ex.srq 24 8
+struct ibv_qp_init_attr_ex.cap 32 20
+struct ibv_qp_init_attr_ex.qp_type 52 4
+struct ibv_qp_init_attr_ex.sq_sig_all 56 4
+struct ibv_qp_init_attr_ex.comp_mask 60 4
+struct ibv_qp_init_attr_ex.pd 64 8
+struct ibv_qp_init_attr_ex.xrcd 72 8
 struct ibv_qp_cap 20
 struct ibv_qp_cap.max_send_wr 0 4
 struct ibv_qp_cap.max_recv_wr 4 4
@@ -198,6 +225,11 @@ struct ibv_send_wr.send_flags 32 4
 struct ibv_send_wr.imm_data 36 4
 struct ibv_send_wr.wr.rdma.remote_addr 40 8
 struct ibv_send_wr.wr.rdma.rkey 48 4
+struct ibv_send_wr.qp_type.xrc.remote_srqn 72 4
+struct ibv_send_wr.wr.ud 40 16
+struct ibv_send_wr.wr.ud.ah 40 8
+struct ibv_send_wr.wr.ud.remote_qpn 48 4
+struct ibv_send_wr.wr.ud.remote_qkey 52 4
 struct ibv_recv_wr 32
 struct ibv_recv_wr.wr_id 0 8
 struct ibv_recv_wr.next 8 8
@@ -207,6 +239,36 @@ struct ibv_sge 16
 struct ibv_sge.addr 0 8
 struct ibv_sge.length 8 4
 struct ibv_sge.lkey 12 4
+struct ibv_ece 12
+struct ibv_ece.vendor_id 0 4
+struct ibv_ece.options 4 4
+struct ibv_ece.comp_mask 8 4
+struct ibv_srq 32
+struct ibv_srq.context 0 8
+struct ibv_srq.srq_context 8 8
+struct ibv_srq.pd 16 8
+struct ibv_srq.handle 24 4
+struct ibv_srq_attr 12
+struct ibv_srq_attr.max_wr 0 4
+struct ibv_srq_attr.max_sge 4 4
+struct ibv_srq_attr.srq_limit 8 4
+struct ibv_srq_init_attr 24
+struct ibv_srq_init_attr.srq_context 0 8
+struct ibv_srq_init_attr.attr 8 12
+struct ibv_srq_init_attr_ex 64
+struct ibv_srq_init_attr_ex.srq_context 0 8
+struct ibv_srq_init_attr_ex.attr 8 12
+struct ibv_srq_init_attr_ex.comp_mask 20 4
+struct ibv_srq_init_attr_ex.srq_type 24 4
+struct ibv_srq_init_attr_ex.pd 32 8
+struct ibv_srq_init_attr_ex.xrcd 40 8
+struct ibv_srq_init_attr_ex.cq 48 8
+struct ibv_xrcd 8
+struct ibv_xrcd.context 0 8
+struct ibv_xrcd_init_attr 12
+struct ibv_xrcd_init_attr.comp_mask 0 4
+struct ibv_xrcd_init_attr.fd 4 4
+struct ibv_xrcd_init_attr.oflags 8 4
 struct rdma_event_channel 4
 struct rdma_event_channel.fd 0 4
 struct rdma_cm_id 416
@@ -253,3 +315,216 @@ struct rdma_conn_param.retry_count 12 1
 struct rdma_conn_param.rnr_retry_count 13 1
 struct rdma_conn_param.srq 14 1
 struct rdma_conn_param.qp_num 16 4
+struct ucma_abi_cmd_hdr 8
+struct ucma_abi_cmd_hdr.cmd 0 4
+struct ucma_abi_cmd_hdr.in 4 2
+struct ucma_abi_cmd_hdr.out 6 2
+struct ucma_abi_create_id 32
+struct ucma_abi_create_id.cmd 0 4
+struct ucma_abi_create_id.in 4 2
+struct ucma_abi_create_id.out 6 2
+struct ucma_abi_create_id.uid 8 8
+struct ucma_abi_create_id.response 16 8
+struct ucma_abi_create_id.ps 24 2
+struct ucma_abi_create_id.qp_type 26 1
+struct ucma_abi_create_id_resp 4
+struct ucma_abi_create_id_resp.id 0 4
+struct ucma_abi_destroy_id 24
+struct ucma_abi_destroy_id.cmd 0 4
+struct ucma_abi_destroy_id.in 4 2
+struct ucma_abi_destroy_id.out 6 2
+struct ucma_abi_destroy_id.response 8 8
+struct ucma_abi_destroy_id.id 16 4
+struct ucma_abi_destroy_id_resp 4
+struct ucma_abi_destroy_id_resp.events_reported 0 4
+struct ucma_abi_bind 144
+struct ucma_abi_bind.cmd 0 4
+struct ucma_abi_bind.in 4 2
+struct ucma_abi_bind.out 6 2
+struct ucma_abi_bind.id 8 4
+struct ucma_abi_bind.addr_size 12 2
+struct ucma_abi_bind.addr 16 128
+struct ucma_abi_resolve_addr 280
+struct ucma_abi_resolve_addr.cmd 0 4
+struct ucma_abi_resolve_addr.in 4 2
+struct ucma_abi_resolve_addr.out 6 2
+struct ucma_abi_resolve_addr.id 8 4
+struct ucma_abi_resolve_addr.timeout_ms 12 4
+struct ucma_abi_resolve_addr.src_size 16 2
+struct ucma_abi_resolve_addr.dst_size 18 2
+struct ucma_abi_resolve_addr.src_addr 24 128
+struct ucma_abi_resolve_addr.dst_addr 152 128
+struct ucma_abi_resolve_route 16
+struct ucma_abi_resolve_route.cmd 0 4
+struct ucma_abi_resolve_route.in 4 2
+struct ucma_abi_resolve_route.out 6 2
+struct ucma_abi_resolve_route.id 8 4
+struct ucma_abi_resolve_route.timeout_ms 12 4
+struct ucma_abi_query 24
+struct ucma_abi_query.cmd 0 4
+struct ucma_abi_query.in 4 2
+struct ucma_abi_query.out 6 2
+struct ucma_abi_query.response 8 8
+struct ucma_abi_query.id 16 4
+struct ucma_abi_query.option 20 4
+struct ucma_abi_query_addr_resp 280
+struct ucma_abi_query_addr_resp.node_guid 0 8
+struct ucma_abi_query_addr_resp.port_num 8 1
+struct ucma_abi_query_addr_resp.pkey 10 2
+struct ucma_abi_query_addr_resp.src_size 12 2
+struct ucma_abi_query_addr_resp.dst_size 14 2
+struct ucma_abi_query_addr_resp.src_addr 16 128
+struct ucma_abi_query_addr_resp.dst_addr 144 128
+struct ucma_abi_query_addr_resp.ibdev_index 272 4
+struct ucma_abi_conn_param 272
+struct ucma_abi_conn_param.qp_num 0 4
+struct ucma_abi_conn_param.private_data 8 256
+struct ucma_abi_conn_param.private_data_len 264 1
+struct ucma_abi_conn_param.srq 265 1
+struct ucma_abi_conn_param.responder_resources 266 1
+struct ucma_abi_conn_param.initiator_depth 267 1
+struct ucma_abi_conn_param.flow_control 268 1
+struct ucma_abi_conn_param.retry_count 269 1
+struct ucma_abi_conn_param.rnr_retry_count 270 1
+struct ucma_abi_conn_param.valid 271 1
+struct ucma_abi_ud_param 308
+struct ucma_abi_ud_param.qp_num 0 4
+struct ucma_abi_ud_param.qkey 4 4
+struct ucma_abi_ud_param.ah_attr 8 32
+struct ucma_abi_ud_param.private_data 40 256
+struct ucma_abi_ud_param.private_data_len 296 1
+struct ucma_abi_ece 8
+struct ucma_abi_ece.vendor_id 0 4
+struct ucma_abi_ece.attr_mod 4 4
+struct ucma_abi_connect 296
+struct ucma_abi_connect.cmd 0 4
+struct ucma_abi_connect.in 4 2
+struct ucma_abi_connect.out 6 2
+struct ucma_abi_connect.conn_param 8 272
+struct ucma_abi_connect.id 280 4
+struct ucma_abi_connect.ece 288 8
+struct ucma_abi_listen 16
+struct ucma_abi_listen.cmd 0 4
+struct ucma_abi_listen.in 4 2
+struct ucma_abi_listen.out 6 2
+struct ucma_abi_listen.id 8 4
+struct ucma_abi_listen.backlog 12 4
+struct ucma_abi_accept 304
+struct ucma_abi_accept.cmd 0 4
+struct ucma_abi_accept.in 4 2
+struct ucma_abi_accept.out 6 2
+struct ucma_abi_accept.uid 8 8
+struct ucma_abi_accept.conn_param 16 272
+struct ucma_abi_accept.id 288 4
+struct ucma_abi_accept.ece 296 8
+struct ucma_abi_reject 272
+struct ucma_abi_reject.cmd 0 4
+struct ucma_abi_reject.in 4 2
+struct ucma_abi_reject.out 6 2
+struct ucma_abi_reject.id 8 4
+struct ucma_abi_reject.private_data_len 12 1
+struct ucma_abi_reject.reason 13 1
+struct ucma_abi_reject.private_data 16 256
+struct ucma_abi_disconnect 12
+struct ucma_abi_disconnect.cmd 0 4
+struct ucma_abi_disconnect.in 4 2
+struct ucma_abi_disconnect.out 6 2
+struct ucma_abi_disconnect.id 8 4
+struct ucma_abi_init_qp_attr 24
+struct ucma_abi_init_qp_attr.cmd 0 4
+struct ucma_abi_init_qp_attr.in 4 2
+struct ucma_abi_init_qp_attr.out 6 2
+struct ucma_abi_init_qp_attr.response 8 8
+struct ucma_abi_init_qp_attr.id 16 4
+struct ucma_abi_init_qp_attr.qp_state 20 4
+struct ucma_abi_notify 16
+struct ucma_abi_notify.cmd 0 4
+struct ucma_abi_notify.in 4 2
+struct ucma_abi_notify.out 6 2
+struct ucma_abi_notify.id 8 4
+struct ucma_abi_notify.event 12 4
+struct ucma_abi_join_mcast 160
+struct ucma_abi_join_mcast.cmd 0 4
+struct ucma_abi_join_mcast.in 4 2
+struct ucma_abi_join_mcast.out 6 2
+struct ucma_abi_join_mcast.response 8 8
+struct ucma_abi_join_mcast.uid 16 8
+struct ucma_abi_join_mcast.id 24 4
+struct ucma_abi_join_mcast.addr_size 28 2
+struct ucma_abi_join_mcast.join_flags 30 2
+struct ucma_abi_join_mcast.addr 32 128
+struct ucma_abi_get_event 16
+struct ucma_abi_get_event.cmd 0 4
+struct ucma_abi_get_event.in 4 2
+struct ucma_abi_get_event.out 6 2
+struct ucma_abi_get_event.response 8 8
+struct ucma_abi_event_resp 336
+struct ucma_abi_event_resp.uid 0 8
+struct ucma_abi_event_resp.id 8 4
+struct ucma_abi_event_resp.event 12 4
+struct ucma_abi_event_resp.status 16 4
+struct ucma_abi_event_resp.param.conn 20 272
+struct ucma_abi_event_resp.ece 328 8
+struct ucma_abi_set_option 32
+struct ucma_abi_set_option.cmd 0 4
+struct ucma_abi_set_option.in 4 2
+struct ucma_abi_set_option.out 6 2
+struct ucma_abi_set_option.optval 8 8
+struct ucma_abi_set_option.id 16 4
+struct ucma_abi_set_option.level 20 4
+struct ucma_abi_set_option.optname 24 4
+struct ucma_abi_set_option.optlen 28 4
+struct ucma_abi_migrate_id 24
+struct ucma_abi_migrate_id.cmd 0 4
+struct ucma_abi_migrate_id.in 4 2
+struct ucma_abi_migrate_id.out 6 2
+struct ucma_abi_migrate_id.response 8 8
+struct ucma_abi_migrate_id.id 16 4
+struct ucma_abi_migrate_id.fd 20 4
+struct ucma_abi_migrate_resp 4
+struct ucma_abi_migrate_resp.events_reported 0 4
+struct ib_uverbs_qp_attr 144
+struct ib_uverbs_qp_attr.qp_attr_mask 0 4
+struct ib_uverbs_qp_attr.qp_state 4 4
+struct ib_uverbs_qp_attr.cur_qp_state 8 4
+struct ib_uverbs_qp_attr.path_mtu 12 4
+struct ib_uverbs_qp_attr.path_mig_state 16 4
+struct ib_uverbs_qp_attr.qkey 20 4
+struct ib_uverbs_qp_attr.rq_psn 24 4
+struct ib_uverbs_qp_attr.sq_psn 28 4
+struct ib_uverbs_qp_attr.dest_qp_num 32 4
+struct ib_uverbs_qp_attr.qp_access_flags 36 4
+struct ib_uverbs_qp_attr.ah_attr 40 32
+struct ib_uverbs_qp_attr.alt_ah_attr 72 32
+struct ib_uverbs_qp_attr.max_send_wr 104 4
+struct ib_uverbs_qp_attr.max_recv_wr 108 4
+struct ib_uverbs_qp_attr.max_send_sge 112 4
+struct ib_uverbs_qp_attr.max_recv_sge 116 4
+struct ib_uverbs_qp_attr.max_inline_data 120 4
+struct ib_uverbs_qp_attr.pkey_index 124 2
+struct ib_uverbs_qp_attr.alt_pkey_index 126 2
+struct ib_uverbs_qp_attr.en_sqd_async_notify 128 1
+struct ib_uverbs_qp_attr.sq_draining 129 1
+struct ib_uverbs_qp_attr.max_rd_atomic 130 1
+struct ib_uverbs_qp_attr.max_dest_rd_atomic 131 1
+struct ib_uverbs_qp_attr.min_rnr_timer 132 1
+struct ib_uverbs_qp_attr.port_num 133 1
+struct ib_uverbs_qp_attr.timeout 134 1
+struct ib_uverbs_qp_attr.retry_cnt 135 1
+struct ib_uverbs_qp_attr.rnr_retry 136 1
+struct ib_uverbs_qp_attr.alt_port_num 137 1
+struct ib_uverbs_qp_attr.alt_timeout 138 1
+struct ib_uverbs_ah_attr 32
+struct ib_uverbs_ah_attr.grh 0 24
+struct ib_uverbs_ah_attr.dlid 24 2
+struct ib_uverbs_ah_attr.sl 26 1
+struct ib_uverbs_ah_attr.src_path_bits 27 1
+struct ib_uverbs_ah_attr.static_rate 28 1
+struct ib_uverbs_ah_attr.is_global 29 1
+struct ib_uverbs_ah_attr.port_num 30 1
+struct ib_uverbs_global_route 24
+struct ib_uverbs_global_route.dgid 0 16
+struct ib_uverbs_global_route.flow_label 16 4
+struct ib_uverbs_global_route.sgid_index 20 1
+struct ib_uverbs_global_route.hop_limit 21 1
+struct ib_uverbs_global_route.traffic_class 22 1

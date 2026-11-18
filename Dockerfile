@@ -1,5 +1,5 @@
 # The toolchain tag must satisfy the go directive in go.mod; GOTOOLCHAIN=local fails fast instead of downloading one.
-# The bindings load rdma-core at run time, so the build stage is Debian with the Go toolchain alone and cross-compiles
+# verbs loads libibverbs at run time, so the build stage is Debian with the Go toolchain alone and cross-compiles
 # with CGO_ENABLED=0 on the build platform: the golang image carries a C compiler, and on alpine the linker would take
 # the musl loader as the interpreter of binaries for the build platform's own architecture.
 FROM --platform=$BUILDPLATFORM golang:1.27 AS toolchain
@@ -17,9 +17,10 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     GOARCH=$TARGETARCH go build -trimpath -ldflags='-s -w' -o /out/rdma ./cmd/rdma
 
 FROM debian:trixie-slim
+# libibverbs and its providers are all the binary loads: cm needs no librdmacm.
 # libibverbs1's postinst creates the rdma group, so the user joins it instead of a group of its own.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libibverbs1 librdmacm1t64 ibverbs-providers \
+    && apt-get install -y --no-install-recommends libibverbs1 ibverbs-providers \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -r -u 10001 -g rdma rdma
 COPY --from=build /out/rdma /usr/local/bin/rdma

@@ -1,78 +1,116 @@
 package rdma
 
 import (
-	"context"
-	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io/fs"
 	"path/filepath"
-	"reflect"
+	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
 
-// Config.Engine selects the engine behind the platform entry: the native
-// engine for the zero value and EngineNative, the librdmacm engine for
-// EngineLibrdmacm. A value that names no engine fails Dial and Listen with an
-// error about the Config, which names it, before any engine is asked.
-func TestConfigEngineSelectsTheEngine(t *testing.T) {
-	for _, tt := range []struct {
-		name   string
-		engine Engine
-		want   engine // nil when refused
-	}{
-		{"zero value", "", nativeEngine{}},
-		{"EngineNative", EngineNative, nativeEngine{}},
-		{"EngineLibrdmacm", EngineLibrdmacm, librdmacmEngine{}},
-		{"unknown", "rsocket", nil},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			c := Config{Engine: tt.engine}
-			if tt.want != nil {
-				if err := c.validate(); err != nil {
-					t.Fatalf("Config{Engine: %q}.validate() = %v, want nil", tt.engine, err)
-				}
-				if got := platformEngine(c); reflect.TypeOf(got) != reflect.TypeOf(tt.want) {
-					t.Errorf("platformEngine(Config{Engine: %q}) is a %T, want a %T", tt.engine, got, tt.want)
-				}
-				return
+// engineName names an engine the tests run on: the native engine, which
+// Dial and Listen run on, or the librdmacm engine, its control.
+type engineName string
+
+const (
+	engineNative    engineName = "native"
+	engineLibrdmacm engineName = "librdmacm"
+)
+
+// Dial and Listen run on the native engine.
+func TestPlatformEngineIsNative(t *testing.T) {
+	got := platformEngine()
+	if _, ok := got.(nativeEngine); !ok {
+		t.Errorf("platformEngine() is a %T, want a nativeEngine", got)
+	}
+}
+
+// The bindings of librdmacm, internal/rdmacm of its connection manager and
+// internal/rsocket of its rsockets, serve the tests alone, as the references
+// the package and cm are held against: no non-test file of the module, on
+// any platform, imports them.
+func TestOnlyTheTestsImportTheBindings(t *testing.T) {
+	bindings := []string{
+		"github.com/wzshiming/rdma/internal/rdmacm",
+		"github.com/wzshiming/rdma/internal/rsocket",
+	}
+	fset := token.NewFileSet()
+	checked := 0
+	err := filepath.WalkDir(".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		name := d.Name()
+		if d.IsDir() {
+			// Directories the go command ignores.
+			if path != "." && (name == "testdata" || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_")) {
+				return filepath.SkipDir
 			}
-			d := Dialer{Config: c, eng: untouchedEngine{t}}
-			if _, err := d.Dial("rdma", "10.99.0.1:1"); !isOpError(err, "dial", errConfig) || !strings.Contains(err.Error(), `"rsocket"`) {
-				t.Errorf("Dial() with Config{Engine: %q} error = %v, want a dial *net.OpError matching errConfig that names the value", tt.engine, err)
+			return nil
+		}
+		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			return nil
+		}
+		f, err := parser.ParseFile(fset, path, nil, parser.ImportsOnly)
+		if err != nil {
+			return err
+		}
+		checked++
+		for _, imp := range f.Imports {
+			if p, err := strconv.Unquote(imp.Path.Value); err == nil && slices.Contains(bindings, p) {
+				t.Errorf("%s imports %s", path, p)
 			}
-			lc := ListenConfig{Config: c, eng: untouchedEngine{t}}
-			if _, err := lc.Listen(t.Context(), "rdma", "10.99.0.1:0"); !isOpError(err, "listen", errConfig) || !strings.Contains(err.Error(), `"rsocket"`) {
-				t.Errorf("Listen() with Config{Engine: %q} error = %v, want a listen *net.OpError matching errConfig that names the value", tt.engine, err)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checked == 0 {
+		t.Fatal("no file of the module to check")
+	}
+}
+
+// The package offers no engine, so no text of it names one: no string
+// literal of the files it builds from, on any platform, the texts of its
+// errors among them.
+func TestTextsNameNoEngine(t *testing.T) {
+	names, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := regexp.MustCompile(`(?i)\bengines?\b`)
+	fset := token.NewFileSet()
+	for _, name := range names {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, name, nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			if lit, ok := n.(*ast.BasicLit); ok && lit.Kind == token.STRING && engine.MatchString(lit.Value) {
+				t.Errorf("%s: %s names an engine", fset.Position(lit.Pos()), lit.Value)
 			}
+			return true
 		})
 	}
 }
 
-// untouchedEngine fails the test when it is asked to dial or listen.
-type untouchedEngine struct{ t *testing.T }
-
-func (e untouchedEngine) dial(context.Context, *Addr, *Addr, Config) (stream, error) {
-	e.t.Error("the engine was asked to dial")
-	return nil, errors.ErrUnsupported
-}
-
-func (e untouchedEngine) listen(*Addr, int, Config) (acceptor, error) {
-	e.t.Error("the engine was asked to listen")
-	return nil, errors.ErrUnsupported
-}
-
-// The front end treats the engines alike and leaves the choice to the
-// platform entry: its files neither read Config.Engine nor name an Engine
-// value, and neither build, call, convert to, assert nor switch on anything
-// the files of an engine declare.
+// The front end leaves the engine to the platform entry and to the tests'
+// injection: its files neither build, call, convert to, assert nor switch on
+// anything the files of an engine declare.
 func TestFrontEndHasNoEngineBranch(t *testing.T) {
 	engineFiles, err := filepath.Glob("native*.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	engineFiles = append(engineFiles, "network.go", "network_stub.go", "poll_linux.go")
 	fset := token.NewFileSet()
 	parse := func(name string) *ast.File {
 		f, err := parser.ParseFile(fset, name, nil, parser.SkipObjectResolution)
@@ -127,14 +165,7 @@ func TestFrontEndHasNoEngineBranch(t *testing.T) {
 		}
 		ast.Inspect(f, func(n ast.Node) bool {
 			switch n := n.(type) {
-			case *ast.Ident:
-				if n.Name == "EngineNative" || n.Name == "EngineLibrdmacm" {
-					t.Errorf("%s: %s", fset.Position(n.Pos()), n.Name)
-				}
 			case *ast.SelectorExpr:
-				if n.Sel.Name == "Engine" {
-					t.Errorf("%s: Config.Engine read", fset.Position(n.Pos()))
-				}
 				check(n.X)
 			case *ast.CallExpr:
 				check(n.Fun)

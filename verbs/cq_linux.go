@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"os"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 
 	"github.com/wzshiming/rdma/internal/dynlib"
@@ -24,6 +25,15 @@ type CompChannel struct {
 	ch     *rdmaabi.IbvCompChannel
 	owned  bool
 	waiter fdWaiter
+	next   func() (bool, error)           // nextEvent, made once for every wait
+	event  struct{ cq, cqContext uint64 } // struct ibv_cq *, void *, as nextEvent took them
+}
+
+// newCompChannel wraps ch, with the try of Wait made once.
+func newCompChannel(ch *rdmaabi.IbvCompChannel, owned bool) *CompChannel {
+	c := &CompChannel{ch: ch, owned: owned}
+	c.next = c.nextEvent
+	return c
 }
 
 // CreateCompChannel creates a completion event channel.
@@ -36,13 +46,13 @@ func (c *Context) CreateCompChannel() (*CompChannel, error) {
 	if ch == 0 {
 		return nil, opError("ibv_create_comp_channel", errno)
 	}
-	return &CompChannel{ch: dynlib.Pointer[rdmaabi.IbvCompChannel](ch), owned: true}, nil
+	return newCompChannel(dynlib.Pointer[rdmaabi.IbvCompChannel](ch), true), nil
 }
 
 // CompChannelFromPointer wraps a struct ibv_comp_channel pointer owned by
 // someone else; Close does not destroy it.
 func CompChannelFromPointer(p unsafe.Pointer) *CompChannel {
-	return &CompChannel{ch: (*rdmaabi.IbvCompChannel)(p)}
+	return newCompChannel((*rdmaabi.IbvCompChannel)(p), false)
 }
 
 // Pointer returns the underlying struct ibv_comp_channel pointer.
@@ -77,6 +87,8 @@ type CQ struct {
 	reqNotify dynlib.Func // req_notify_cq of the device context
 	mu        sync.Mutex
 	wcs       []rdmaabi.IbvWc // scratch array of wcBatch entries for Poll
+	events    atomic.Uint32   // taken by Wait, not acknowledged yet
+	closing   atomic.Bool     // set by Close before it acknowledges them
 }
 
 // newCQ wraps cq, taking the inline verbs from its context's ops table.
@@ -117,6 +129,31 @@ func lookupCQ(addr uintptr) *CQ {
 		return v.(*CQ)
 	}
 	return newCQ(dynlib.Pointer[rdmaabi.IbvCq](addr), false)
+}
+
+// ackBatch is how many events of a CQ of CreateCQ Wait acknowledges in one
+// call.
+const ackBatch = 64
+
+// tookEvent counts an event Wait took for q and returns how many events of q
+// to acknowledge now: a whole batch at a time for a CQ of CreateCQ, whose
+// Close acknowledges the rest; each event at once for a CQ made elsewhere,
+// which its owner may destroy any time, and once Close is under way.
+func (q *CQ) tookEvent() uint32 {
+	if !q.owned {
+		return 1
+	}
+	if q.events.Add(1) < ackBatch && !q.closing.Load() {
+		return 0
+	}
+	return q.events.Swap(0)
+}
+
+// closeEvents has Wait acknowledge the events of q at once from now on and
+// returns how many it took and left unacknowledged.
+func (q *CQ) closeEvents() uint32 {
+	q.closing.Store(true)
+	return q.events.Swap(0)
 }
 
 // CQFromPointer wraps a struct ibv_cq pointer owned by someone else; Close
@@ -201,6 +238,10 @@ func (q *CQ) Close() error {
 		f, err := load("ibv_destroy_cq")
 		if err != nil {
 			return err
+		}
+		// ibv_destroy_cq waits until every event of the CQ is acknowledged.
+		if n := q.closeEvents(); n > 0 {
+			f.ackCQEvents.Int(caddr(cq), uintptr(n), 0, 0, 0, 0)
 		}
 		if rc, _ := f.destroyCQ.Int(caddr(cq), 0, 0, 0, 0, 0); rc != 0 {
 			return opErrorRC("ibv_destroy_cq", rc)

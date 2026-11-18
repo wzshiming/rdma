@@ -42,6 +42,16 @@ func TestInvalidArgumentsFailBeforeTheCall(t *testing.T) {
 		{"Resolve/mixed families", func() error { _, err := cm.Resolve(ctx, v6, v4); return err }},
 		{"Listen/zero address", func() error { _, err := cm.Listen(netip.AddrPort{}, 1); return err }},
 		{"Listen/port without address", func() error { _, err := cm.Listen(netip.AddrPortFrom(netip.Addr{}, 4791), 1); return err }},
+		{"Dialer/zero remote", func() error { _, err := cm.Dialer{}.Resolve(ctx, netip.AddrPort{}, netip.AddrPort{}); return err }},
+		{"Dialer/ACK timeout above 31", func() error {
+			_, err := cm.Dialer{AckTimeout: new(uint8(32))}.Resolve(ctx, netip.AddrPort{}, v4)
+			return err
+		}},
+		{"ListenConfig/zero address", func() error { _, err := cm.ListenConfig{}.Listen(netip.AddrPort{}, 1); return err }},
+		{"ListenConfig/ACK timeout above 31", func() error {
+			_, err := cm.ListenConfig{AckTimeout: new(uint8(32))}.Listen(netip.AddrPortFrom(v4.Addr(), 0), 1)
+			return err
+		}},
 		{"Connect/private data too long", func() error {
 			_, err := new(cm.ID).Connect(ctx, tooLong(cm.MaxConnectPrivateData+1))
 			return err

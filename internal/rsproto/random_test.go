@@ -66,8 +66,15 @@ type randomEnd struct {
 	out, in       []byte
 	written, read int // of out, committed; of in, consumed
 	wview, rview  []byte
-	delivered     []rsproto.Msg
+	delivered     []arrival
 	closed        bool
+}
+
+// arrival is a message word a MemEnd delivered, with the bytes its write
+// placed.
+type arrival struct {
+	msg rsproto.Msg
+	n   int
 }
 
 func (x *randomEnd) lendWrite() bool {
@@ -118,9 +125,9 @@ func (x *randomEnd) returnRead(t *testing.T, rng *rand.Rand) bool {
 }
 
 func (x *randomEnd) carry() bool {
-	msg, ok := x.l.Deliver()
+	msg, n, ok := x.l.Deliver()
 	if ok {
-		x.delivered = append(x.delivered, msg)
+		x.delivered = append(x.delivered, arrival{msg, n})
 	}
 	return ok
 }
@@ -129,7 +136,7 @@ func (x *randomEnd) take() bool {
 	if len(x.delivered) == 0 {
 		return false
 	}
-	x.s.Received(x.delivered[0])
+	x.s.Received(x.delivered[0].msg, x.delivered[0].n)
 	x.delivered = x.delivered[1:]
 	return true
 }

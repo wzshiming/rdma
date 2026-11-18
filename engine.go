@@ -5,8 +5,8 @@ import (
 	"net/netip"
 )
 
-// engine carries the connections of Dial and Listen: platformEngine picks the
-// one for a Config, and tests inject theirs through Dialer and ListenConfig.
+// engine carries the connections of Dial and Listen: platformEngine returns
+// the platform's, and tests inject theirs through Dialer and ListenConfig.
 type engine interface {
 	// dial connects from laddr, nil letting the engine pick, to raddr; ctx
 	// cancels the attempt.

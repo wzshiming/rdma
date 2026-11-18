@@ -2,8 +2,9 @@
 // library of rdma-core.
 //
 // It exposes devices, protection domains, memory regions, completion queues
-// and channels, queue pairs, work requests, work completions and asynchronous
-// events with Go types only; no C type appears in the exported API.
+// and channels, queue pairs, shared receive queues, work requests, work
+// completions and asynchronous events with Go types only; no C type appears
+// in the exported API.
 //
 // On Linux (amd64, arm64, loong64, ppc64le, riscv64 and s390x) the package
 // loads libibverbs.so.1 at run time on first use, with or without cgo, so
@@ -21,10 +22,44 @@
 // __be32 of the C API does: a C peer reads a value sent from Go with ntohl
 // and sends one for Go with htonl.
 //
+// An unreliable-datagram (UD) queue pair addresses each send on its own: the
+// SendWR names an address handle (PD.CreateAH), the receiving queue pair and
+// its qkey. QP.AttachMulticast has it receive the datagrams of a multicast
+// group as well. Every receive buffer of a UD queue pair begins with 40 bytes
+// for the global routing header (GRH) of the datagram, which the device
+// writes when the completion has the WCGRH flag (on RoCE v2 over IPv4 the
+// last 20 of them hold the IPv4 header); the payload follows, and WC.Len
+// counts both. The completion names the sender: WC.SrcQP is the number of its
+// queue pair, WC.SLID and WC.SL its LID and service level on InfiniBand, and
+// the source GID of the header, or on RoCE v2 over IPv4 the source address,
+// its port.
+//
+// A shared receive queue (PD.CreateSRQ) is the receive queue of every queue
+// pair created with it in QPInitAttr.SRQ: SRQ.PostRecv posts the receives,
+// and each completes on the receive CQ of the queue pair the message came in
+// on, which WC.QPNum names. SRQ.Modify arms its limit, after which
+// Context.WaitAsyncEvent reports EventSRQLimitReached for it once fewer
+// receives than the limit are left.
+//
+// XRC goes through an XRC domain (Context.OpenXRCD): an XRC send queue pair
+// (QPTypeXRCSend) sends to an SRQ of type SRQTypeXRC in the domain of the
+// remote side by the SRQ's number (SRQ.Num, SendWR.RemoteSRQN), through the
+// XRC receive queue pair it is connected to (QPTypeXRCRecv, created with
+// QPInitAttr.XRCD), and the receive completes on the SRQ's CQ. These verbs
+// come from the extended ops of the device context, which a device or a
+// library may lack: then they report syscall.EOPNOTSUPP, which matches
+// errors.ErrUnsupported, as on rxe and siw, which have no XRC. Finding the
+// ops assumes glibc's pthread_mutex_t, which precedes the member of struct
+// ibv_context that marks it extended: with musl on arm64, whose mutex is 8
+// bytes shorter, the lookup misses that member and these verbs report
+// syscall.EOPNOTSUPP too.
+//
 // Waiting for completion events (CompChannel.Wait) and asynchronous events
 // (Context.WaitAsyncEvent) happens on the Go runtime poller: no OS thread is
-// blocked inside C, cancellation and timeouts come from the context, and every
-// event is acknowledged before Wait returns.
+// blocked inside C, cancellation and timeouts come from the context, and the
+// waits acknowledge the events they return: at once, but for the completion
+// events of a CQ of CreateCQ, which are acknowledged in batches and by
+// CQ.Close.
 //
 // Memory registered with PD.RegisterMemory is pinned with runtime.Pinner until
 // MR.Close; PD.AllocMemory returns page-aligned memory outside the Go heap.

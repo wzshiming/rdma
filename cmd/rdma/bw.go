@@ -115,13 +115,12 @@ func (o *bwOptions) bw(stdout io.Writer) error {
 
 	results := make([]throughput, len(conns))
 	errs := make([]error, len(conns))
-	deadline := time.Now().Add(o.duration)
 	var wg sync.WaitGroup
 	for i, conn := range conns {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			results[i], errs[i] = stream(conn, o.size, deadline)
+			results[i], errs[i] = stream(conn, o.size, o.duration)
 		}()
 	}
 	wg.Wait()
@@ -134,13 +133,21 @@ func (o *bwOptions) bw(stdout io.Writer) error {
 	return nil
 }
 
-// stream writes size bytes at a time until the deadline, closes the sending
-// side and waits for the peer's EOF, which confirms it has read everything.
-func stream(conn *rdma.Conn, size int, deadline time.Time) (throughput, error) {
+// streamConn is the part of *rdma.Conn that stream uses, which a test can
+// stand in for without a device.
+type streamConn interface {
+	io.ReadWriter
+	CloseWrite() error
+}
+
+// stream writes size bytes at a time for duration from its first write,
+// closes the sending side and waits for the peer's EOF, which confirms it
+// has read everything.
+func stream(conn streamConn, size int, duration time.Duration) (throughput, error) {
 	buf := make([]byte, size)
 	var n int64
 	start := time.Now()
-	for time.Now().Before(deadline) {
+	for time.Since(start) < duration {
 		w, err := conn.Write(buf)
 		n += int64(w)
 		if err != nil {

@@ -64,12 +64,12 @@ func newSide(l *rsproto.MemEnd, c rsproto.Config) *side {
 // reports whether there was any.
 func (x *side) deliver() bool {
 	moved := false
-	for msg, ok := x.l.Deliver(); ok; msg, ok = x.l.Deliver() {
+	for msg, n, ok := x.l.Deliver(); ok; msg, n, ok = x.l.Deliver() {
 		x.arrived[msg.Op()]++
 		if msg.Op() == rsproto.OpSGL {
 			x.limit = uint16(msg.Data())
 		}
-		x.s.Received(msg)
+		x.s.Received(msg, n)
 		moved = true
 	}
 	return moved
@@ -366,17 +366,17 @@ func TestControlMessageWaitsForAReceive(t *testing.T) {
 	if a.s.CanSend() {
 		t.Fatalf("a can send with the %d credits of b used up", rsproto.QPMinSize)
 	}
-	var held []rsproto.Msg
-	for msg, ok := b.l.Deliver(); ok; msg, ok = b.l.Deliver() {
-		held = append(held, msg)
+	var held []arrival
+	for msg, n, ok := b.l.Deliver(); ok; msg, n, ok = b.l.Deliver() {
+		held = append(held, arrival{msg, n})
 	}
 	a.s.CloseWrite()
-	if msg, ok := b.l.Deliver(); ok {
+	if msg, _, ok := b.l.Deliver(); ok {
 		t.Fatalf("Deliver() with the %d receives of b used up = %#x, want nothing", len(held), msg)
 	}
 
-	for _, msg := range held {
-		b.s.Received(msg)
+	for _, m := range held {
+		b.s.Received(m.msg, m.n)
 	}
 	pump(a, b)
 	if got, want := recv(b), strings.Repeat("x", rsproto.QPMinSize); got != want || !b.s.EOF() {
