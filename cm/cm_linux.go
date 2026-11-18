@@ -115,6 +115,7 @@ type ID struct {
 	ch     *ucma.Channel
 	handle uint32 // the kernel's number of the identifier
 	uid    uint64
+	svc    service
 	turn   chan struct{} // held by the one wait taking events
 
 	// Known once the address is resolved, and from the start for a request.
@@ -240,6 +241,7 @@ func (c config) resolve(ctx context.Context, local, remote netip.AddrPort) (*ID,
 		return nil, err
 	}
 	id := newID(ch, handle, uid)
+	id.svc = c.service
 	if err := ch.ResolveAddr(handle, local, remote, resolveTimeout(ctx)); err != nil {
 		id.Close()
 		return nil, opError("rdma_resolve_addr", err)
@@ -817,7 +819,12 @@ func (l *Listener) request(uev ucma.Event) (*Request, error) {
 		return nil, err
 	}
 	conn := uev.Conn()
+	if l.cfg.service.qpType == ucma.QPTypeUD {
+		// The datagram form, which has no depths, as ucma_copy_ud_event reads it.
+		conn = ucma.ConnParam{PrivateData: uev.UD().PrivateData}
+	}
 	id := newID(ch, uev.ID, newUID())
+	id.svc = l.cfg.service
 	id.setDevice(dev, info.PortNum)
 	id.local, id.remote = info.Src, info.Dst
 	id.initiatorDepth, id.responderResources = conn.InitiatorDepth, conn.ResponderResources

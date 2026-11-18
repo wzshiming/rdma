@@ -18,6 +18,16 @@ const (
 	MaxRejectPrivateData  = 148
 )
 
+// Private data limits of the SIDR messages rdma_cm sends for the datagram
+// service: a SIDR request has 216 bytes of which rdma_cm uses 36 for its own
+// header, a SIDR reply, which accepts or rejects, 136. The peer receives the
+// whole field, zero padded.
+const (
+	MaxDatagramConnectPrivateData = 180
+	MaxDatagramAcceptPrivateData  = 136
+	MaxDatagramRejectPrivateData  = 136
+)
+
 // Dialer holds the options of the identifier Resolve creates, those of
 // librdmacm's rdma_set_option, which it sets right after creating the
 // identifier, before the address is bound and resolved. The zero Dialer sets
@@ -130,6 +140,15 @@ func (o options) check() error {
 	return nil
 }
 
+// checkDatagram rejects the options no datagram identifier takes: the ACK
+// timeout, which the kernel refuses for UD.
+func (o options) checkDatagram() error {
+	if o.ackTimeout != nil {
+		return invalidArg("rdma_set_option", "an ACK timeout for a datagram identifier")
+	}
+	return nil
+}
+
 // ConnParam holds the parameters of ID.Connect and Request.Accept (struct
 // rdma_conn_param). A zero ResponderResources, InitiatorDepth, RetryCount or
 // RNRRetryCount means the RC default: 1, 1, 7 and 7.
@@ -179,6 +198,16 @@ type Request struct {
 	PrivateData        []byte // MaxConnectPrivateData bytes, zero padded
 	ResponderResources uint8
 	InitiatorDepth     uint8
+}
+
+// DatagramRequest is a request taken from a DatagramListener. ID is the
+// identifier that answers it, already on an event channel of its own; it
+// must be closed by the caller unless the request is rejected. The request
+// carries the peer's private data alone: the peer's queue pair, address and
+// Q_Key come with its datagrams, in their completions.
+type DatagramRequest struct {
+	ID          *DatagramID
+	PrivateData []byte // MaxDatagramConnectPrivateData bytes, zero padded
 }
 
 // RejectedError is the error ID.Connect returns when the peer rejected the
@@ -284,6 +313,15 @@ func checkResolveAddrs(local, remote netip.AddrPort) error {
 func checkListenAddr(local netip.AddrPort) error {
 	if !local.Addr().IsValid() {
 		return invalidArg("rdma_bind_addr", "listen address %v has no IP", local)
+	}
+	return nil
+}
+
+// checkBindAddr rejects an address BindDatagram cannot take: one without an
+// IP or with the unspecified one, which picks no device.
+func checkBindAddr(local netip.AddrPort) error {
+	if !local.Addr().IsValid() || local.Addr().IsUnspecified() {
+		return invalidArg("rdma_bind_addr", "address %v picks no device", local)
 	}
 	return nil
 }

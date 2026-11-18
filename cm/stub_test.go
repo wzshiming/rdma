@@ -17,6 +17,8 @@ func TestStubUnsupported(t *testing.T) {
 	id := new(cm.ID)
 	ln := new(cm.Listener)
 	req := &cm.Request{ID: id}
+	did := new(cm.DatagramID)
+	dln := new(cm.DatagramListener)
 	tests := []struct {
 		name string
 		call func() error
@@ -41,6 +43,18 @@ func TestStubUnsupported(t *testing.T) {
 		{"Listener.Accept", func() error { _, err := ln.Accept(ctx); return err }},
 		{"Request.Accept", func() error { return req.Accept(ctx, &cm.ConnParam{PrivateData: []byte("ok")}) }},
 		{"Request.Reject", func() error { return req.Reject(nil) }},
+		{"ResolveDatagram", func() error { _, err := cm.ResolveDatagram(ctx, netip.AddrPort{}, v4); return err }},
+		{"Dialer.ResolveDatagram", func() error {
+			_, err := cm.Dialer{TOS: new(uint8(0x20))}.ResolveDatagram(ctx, netip.AddrPort{}, v4)
+			return err
+		}},
+		{"BindDatagram", func() error { _, err := cm.BindDatagram(netip.AddrPortFrom(v4.Addr(), 0)); return err }},
+		{"ListenDatagram", func() error { _, err := cm.ListenDatagram(netip.AddrPortFrom(v4.Addr(), 0), 1); return err }},
+		{"ListenConfig.ListenDatagram", func() error {
+			_, err := cm.ListenConfig{ReuseAddr: true}.ListenDatagram(netip.AddrPortFrom(v4.Addr(), 0), 1)
+			return err
+		}},
+		{"DatagramListener.Accept", func() error { _, err := dln.Accept(ctx); return err }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -59,6 +73,15 @@ func TestStubUnsupported(t *testing.T) {
 	}
 	if ln.Addr().IsValid() {
 		t.Errorf("stub Listener.Addr() = %v, want the zero value", ln.Addr())
+	}
+	if did.Device() != nil || did.Port() != 0 || did.LocalAddr().IsValid() || did.RemoteAddr().IsValid() || dln.Addr().IsValid() {
+		t.Error("stub DatagramID and DatagramListener accessors are not zero")
+	}
+	if err := did.Close(); err != nil {
+		t.Errorf("DatagramID.Close() = %v, want nil", err)
+	}
+	if err := dln.Close(); err != nil {
+		t.Errorf("DatagramListener.Close() = %v, want nil", err)
 	}
 	if err := id.Close(); err != nil {
 		t.Errorf("ID.Close() = %v, want nil", err)
