@@ -27,6 +27,7 @@ func TestOptionNotifyMulticastMemoryIsPinnedForTheWrite(t *testing.T) {
 		{"SetReuseAddr", func(c *Channel) error { return c.SetReuseAddr(7, true) }, intValue(1)},
 		{"SetAFOnly", func(c *Channel) error { return c.SetAFOnly(7, true) }, intValue(1)},
 		{"SetAckTimeout", func(c *Channel) error { return c.SetAckTimeout(7, 14) }, []byte{14}},
+		{"SetIBPath", func(c *Channel) error { return c.SetIBPath(7, []PathData{testPath, testAltPath}) }, pathValue(testPathWire(), testAltPathWire())},
 	} {
 		d := newFakeDevice(t)
 		var value []byte

@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"os"
 	"runtime"
+	"slices"
 	"syscall"
 	"testing"
 	"time"
@@ -102,6 +103,8 @@ func commandCalls(t *testing.T, from *Channel) []commandCall {
 			bytesOf(&rdmaabi.UcmaAbiQuery{Cmd: 19, In: 16, Out: 280, Id: 7, Option: 0}), 272},
 		{"QueryGID", func(c *Channel) error { _, err := c.QueryGID(7); return err },
 			bytesOf(&rdmaabi.UcmaAbiQuery{Cmd: 19, In: 16, Out: 280, Id: 7, Option: 2}), 272},
+		{"QueryPath", func(c *Channel) error { _, err := c.QueryPath(7); return err },
+			bytesOf(&rdmaabi.UcmaAbiQuery{Cmd: 19, In: 16, Out: 440, Id: 7, Option: 1}), 8},
 		{"Listen", func(c *Channel) error { return c.Listen(7, 8) },
 			bytesOf(&rdmaabi.UcmaAbiListen{Cmd: 7, In: 8, Id: 7, Backlog: 8}), 0},
 		{"Connect", func(c *Channel) error { return c.Connect(7, testConn, testECE) },
@@ -130,6 +133,8 @@ func commandCalls(t *testing.T, from *Channel) []commandCall {
 			bytesOf(&rdmaabi.UcmaAbiSetOption{Cmd: 14, In: 24, Id: 7, Level: 0, Optname: 2, Optlen: 4}), 0},
 		{"SetAckTimeout", func(c *Channel) error { return c.SetAckTimeout(7, 14) },
 			bytesOf(&rdmaabi.UcmaAbiSetOption{Cmd: 14, In: 24, Id: 7, Level: 0, Optname: 3, Optlen: 1}), 0},
+		{"SetIBPath", func(c *Channel) error { return c.SetIBPath(7, []PathData{testPath, testAltPath}) },
+			bytesOf(&rdmaabi.UcmaAbiSetOption{Cmd: 14, In: 24, Id: 7, Level: 1, Optname: 1, Optlen: 144}), 0},
 		{"Notify", func(c *Channel) error { return c.Notify(7, 4) },
 			bytesOf(&rdmaabi.UcmaAbiNotify{Cmd: 15, In: 8, Id: 7, Event: 4}), 0},
 		{"JoinMulticast", func(c *Channel) error { _, err := c.JoinMulticast(7, 1, testGroup, JoinFullMember); return err },
@@ -399,6 +404,7 @@ func growStack(depth int) byte {
 func TestResponseMemoryIsPinnedForTheWrite(t *testing.T) {
 	addr := testAddrResp()
 	qpAttr := testQPAttr()
+	path := testPathWire()
 	for _, tt := range []struct {
 		name string
 		resp []byte
@@ -409,6 +415,13 @@ func TestResponseMemoryIsPinnedForTheWrite(t *testing.T) {
 		{"DestroyID", bytesOf(&rdmaabi.UcmaAbiDestroyIdResp{Events_reported: 3}), func(c *Channel) (any, error) { return c.DestroyID(7) }, uint32(3)},
 		{"QueryAddr", bytesOf(&addr), func(c *Channel) (any, error) { a, err := c.QueryAddr(7); return a.NodeGUID, err }, uint64(0x020000fffe000001)},
 		{"QueryGID", bytesOf(&addr), func(c *Channel) (any, error) { a, err := c.QueryGID(7); return a.NodeGUID, err }, uint64(0x020000fffe000001)},
+		{"QueryPath", append(slices.Clone(bytesOf(&rdmaabi.UcmaAbiQueryPathResp{Num_paths: 1})), bytesOf(&path)...), func(c *Channel) (any, error) {
+			p, err := c.QueryPath(7)
+			if len(p) != 1 {
+				return len(p), err
+			}
+			return p[0], err
+		}, testPath},
 		{"InitQPAttr", bytesOf(&qpAttr), func(c *Channel) (any, error) { return c.InitQPAttr(7, 2) }, qpAttr},
 		{"MigrateID", bytesOf(&rdmaabi.UcmaAbiMigrateResp{Events_reported: 5}), func(c *Channel) (any, error) {
 			from := newFakeDevice(t)

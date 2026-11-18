@@ -35,6 +35,7 @@ const (
 // The options of a query (UCMA_QUERY_*).
 const (
 	queryAddr = 0
+	queryPath = 1
 	queryGID  = 2
 )
 
