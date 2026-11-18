@@ -311,6 +311,43 @@ func TestUDLoopback(t *testing.T) {
 	})
 }
 
+// The completion of a datagram and its header give the address handle that
+// answers the sender, as udaddy's server answers its client.
+func TestUDReplyThroughTheCompletion(t *testing.T) {
+	p := newUDPair(t)
+	const ask, answer = "ask", "answer"
+	p.postRecv(t, 1)
+	p.postDatagram(t, p.a, p.ah, udQKey, 2, ask)
+	recv := pollOne(t, p.cqB)
+	pollOne(t, p.cqA)
+	ah, err := p.pd.CreateAHFromWC(&recv, p.mrB.Bytes()[:grhLen], p.attr.Port)
+	if err != nil {
+		t.Fatalf("CreateAHFromWC(%+v) error: %v", recv, err)
+	}
+	t.Cleanup(func() {
+		if err := ah.Close(); err != nil {
+			t.Errorf("AH.Close() error: %v", err)
+		}
+	})
+	in := p.mrA.Bytes()[2048 : 2048+grhLen+64]
+	if err := p.a.PostRecv(verbs.RecvWR{ID: 3, SGE: []verbs.SGE{p.mrA.SGE(in)}}); err != nil {
+		t.Fatalf("PostRecv() error: %v", err)
+	}
+	out := p.mrB.Bytes()[2048 : 2048+len(answer)]
+	copy(out, answer)
+	wr := verbs.SendWR{ID: 4, Op: verbs.WRSend, SGE: []verbs.SGE{p.mrB.SGE(out)}, Flags: verbs.SendSignaled, AH: ah, RemoteQPN: recv.SrcQP, RemoteQKey: udQKey}
+	if err := p.b.PostSend(wr); err != nil {
+		t.Fatalf("PostSend() error: %v", err)
+	}
+	reply := pollOne(t, p.cqA)
+	if reply.ID != 3 || reply.SrcQP != p.b.Num() || reply.Len < grhLen || string(in[grhLen:reply.Len]) != answer {
+		t.Errorf("reply completion = %+v with %q, want id 3 from QP %d with %q", reply, in[grhLen:max(reply.Len, grhLen)], p.b.Num(), answer)
+	}
+	if send := pollOne(t, p.cqB); send.ID != 4 || send.Opcode != verbs.WCOpSend {
+		t.Errorf("send completion = %+v, want id 4, SEND", send)
+	}
+}
+
 // checkOpError fails t unless err is an *OpError of op with an errno.
 func checkOpError(t *testing.T, err error, op string) {
 	t.Helper()

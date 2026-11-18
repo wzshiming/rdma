@@ -40,7 +40,7 @@ type funcs struct {
 	allocPD, deallocPD, regMR, deregMR                             dynlib.Func
 	createQP, destroyQP, modifyQP, queryQP                         dynlib.Func
 	createSRQ, destroySRQ, modifySRQ, querySRQ                     dynlib.Func
-	createAH, destroyAH, attachMcast, detachMcast                  dynlib.Func
+	createAH, createAHFromWC, destroyAH, attachMcast, detachMcast  dynlib.Func
 	queryECE, setECE                                               dynlib.Func // zero when the library lacks them
 	wcStatusStr                                                    dynlib.Func
 }
@@ -102,6 +102,7 @@ func load(op string) (*funcs, error) {
 		{"ibv_modify_srq", &f.modifySRQ},
 		{"ibv_query_srq", &f.querySRQ},
 		{"ibv_create_ah", &f.createAH},
+		{"ibv_create_ah_from_wc", &f.createAHFromWC},
 		{"ibv_destroy_ah", &f.destroyAH},
 		{"ibv_attach_mcast", &f.attachMcast},
 		{"ibv_detach_mcast", &f.detachMcast},

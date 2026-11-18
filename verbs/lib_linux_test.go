@@ -151,6 +151,26 @@ func TestCreateAHWithoutLibrary(t *testing.T) {
 	}
 }
 
+func TestCreateAHFromWCWithoutLibrary(t *testing.T) {
+	useLibrary(t, missingLibrary)
+	_, err := PDFromPointer(nil).CreateAHFromWC(&WC{Flags: WCGRH}, make([]byte, 40), 1)
+	var opErr *OpError
+	if !errors.As(err, &opErr) || opErr.Op != "ibv_create_ah_from_wc" || !errors.Is(err, errors.ErrUnsupported) {
+		t.Fatalf("CreateAHFromWC() error = %v, want an *OpError of ibv_create_ah_from_wc matching errors.ErrUnsupported", err)
+	}
+}
+
+// libibverbs reads the whole global routing header, so a shorter buffer is
+// refused before any call.
+func TestCreateAHFromWCWithAShortHeader(t *testing.T) {
+	useLibrary(t, missingLibrary)
+	_, err := PDFromPointer(nil).CreateAHFromWC(&WC{Flags: WCGRH}, make([]byte, 39), 1)
+	var opErr *OpError
+	if !errors.As(err, &opErr) || opErr.Op != "ibv_create_ah_from_wc" || !errors.Is(err, syscall.EINVAL) {
+		t.Fatalf("CreateAHFromWC() with 39 bytes of header error = %v, want an *OpError of ibv_create_ah_from_wc matching EINVAL", err)
+	}
+}
+
 func TestMulticastWithoutLibrary(t *testing.T) {
 	useLibrary(t, missingLibrary)
 	qp := QPFromPointer(nil)

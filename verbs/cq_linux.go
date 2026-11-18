@@ -213,6 +213,25 @@ func wcFromC(w *rdmaabi.IbvWc) WC {
 	}
 }
 
+func wcToC(w *WC) rdmaabi.IbvWc {
+	c := rdmaabi.IbvWc{
+		Wr_id:          w.ID,
+		Status:         uint32(w.Status),
+		Opcode:         uint32(w.Opcode),
+		Vendor_err:     w.VendorErr,
+		Byte_len:       w.Len,
+		Qp_num:         w.QPNum,
+		Src_qp:         w.SrcQP,
+		Wc_flags:       uint32(w.Flags),
+		Pkey_index:     w.PkeyIndex,
+		Slid:           w.SLID,
+		Sl:             w.SL,
+		Dlid_path_bits: w.DLIDPathBits,
+	}
+	binary.BigEndian.PutUint32(c.Imm_data[:], w.Imm)
+	return c
+}
+
 // RequestNotify arms the completion channel for the next completion, or for
 // the next solicited completion only.
 func (q *CQ) RequestNotify(solicitedOnly bool) error {

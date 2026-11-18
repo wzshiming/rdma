@@ -3,6 +3,8 @@
 package verbs
 
 import (
+	"fmt"
+	"syscall"
 	"unsafe"
 
 	"github.com/wzshiming/rdma/internal/dynlib"
@@ -26,6 +28,31 @@ func (p *PD) CreateAH(attr *AHAttr) (*AH, error) {
 	ah, errno := f.createAH.Ptr(uintptr(p.pd), uintptr(unsafe.Pointer(&ca)), 0, 0, 0, 0)
 	if ah == 0 {
 		return nil, opError("ibv_create_ah", errno)
+	}
+	return &AH{ah: unsafe.Pointer(dynlib.Pointer[byte](ah)), owned: true}, nil
+}
+
+// grhSize is the size of the global routing header at the front of a UD
+// receive buffer.
+const grhSize = 40
+
+// CreateAHFromWC creates an address handle for the sender of a datagram, as
+// ibv_create_ah_from_wc does, from the receive completion wc, grh, the 40
+// bytes at the front of its receive buffer, and port, the port that received
+// it.
+func (p *PD) CreateAHFromWC(wc *WC, grh []byte, port uint8) (*AH, error) {
+	const op = "ibv_create_ah_from_wc"
+	if len(grh) < grhSize {
+		return nil, &OpError{Op: op, Err: fmt.Errorf("%d bytes of global routing header, want %d: %w", len(grh), grhSize, syscall.EINVAL)}
+	}
+	f, err := load(op)
+	if err != nil {
+		return nil, err
+	}
+	cw := wcToC(wc)
+	ah, errno := f.createAHFromWC.Ptr(uintptr(p.pd), uintptr(unsafe.Pointer(&cw)), uintptr(unsafe.Pointer(&grh[0])), uintptr(port), 0, 0)
+	if ah == 0 {
+		return nil, opError(op, errno)
 	}
 	return &AH{ah: unsafe.Pointer(dynlib.Pointer[byte](ah)), owned: true}, nil
 }

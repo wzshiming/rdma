@@ -258,6 +258,11 @@ type AH struct{}
 // CreateAH creates an address handle.
 func (p *PD) CreateAH(attr *AHAttr) (*AH, error) { return nil, unsupported("ibv_create_ah") }
 
+// CreateAHFromWC creates an address handle for the sender of a datagram.
+func (p *PD) CreateAHFromWC(wc *WC, grh []byte, port uint8) (*AH, error) {
+	return nil, unsupported("ibv_create_ah_from_wc")
+}
+
 // AHFromPointer wraps a struct ibv_ah pointer without owning it.
 func AHFromPointer(p unsafe.Pointer) *AH { return &AH{} }
 

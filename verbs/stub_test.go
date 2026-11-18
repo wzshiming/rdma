@@ -84,6 +84,10 @@ func TestStubAddressHandlesAreUnsupported(t *testing.T) {
 	if !errors.As(err, &opErr) || !errors.Is(err, errors.ErrUnsupported) {
 		t.Errorf("PD.CreateAH() error = %v, want an *OpError matching errors.ErrUnsupported", err)
 	}
+	_, err = verbs.PDFromPointer(nil).CreateAHFromWC(&verbs.WC{}, make([]byte, 40), 1)
+	if !errors.As(err, &opErr) || !errors.Is(err, errors.ErrUnsupported) {
+		t.Errorf("PD.CreateAHFromWC() error = %v, want an *OpError matching errors.ErrUnsupported", err)
+	}
 	ah := verbs.AHFromPointer(nil)
 	if ah.Pointer() != nil {
 		t.Errorf("AH.Pointer() = %v, want nil", ah.Pointer())

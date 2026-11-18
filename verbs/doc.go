@@ -32,7 +32,8 @@
 // counts both. The completion names the sender: WC.SrcQP is the number of its
 // queue pair, WC.SLID and WC.SL its LID and service level on InfiniBand, and
 // the source GID of the header, or on RoCE v2 over IPv4 the source address,
-// its port.
+// its port; PD.CreateAHFromWC turns the completion and the header into the
+// address handle that answers the sender.
 //
 // A shared receive queue (PD.CreateSRQ) is the receive queue of every queue
 // pair created with it in QPInitAttr.SRQ: SRQ.PostRecv posts the receives,
