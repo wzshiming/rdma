@@ -74,12 +74,22 @@ func commandCalls(t *testing.T, from *Channel) []commandCall {
 			bytesOf(&rdmaabi.UcmaAbiBind{Cmd: 20, In: 136, Id: 7, Addr_size: 16, Addr: sockaddrIn("10.200.0.1", 4791)}), 0},
 		{"Bind IPv6", func(c *Channel) error { return c.Bind(7, netip.MustParseAddrPort("[2001:db8::1]:7471")) },
 			bytesOf(&rdmaabi.UcmaAbiBind{Cmd: 20, In: 136, Id: 7, Addr_size: 28, Addr: sockaddrIn6("2001:db8::1", 7471)}), 0},
+		{"BindIB", func(c *Channel) error { return c.BindIB(7, testIBAddr) },
+			bytesOf(&rdmaabi.UcmaAbiBind{Cmd: 20, In: 136, Id: 7, Addr_size: 48, Addr: sockaddrIb("fe80::248a:703:49:d4f0", 0x8001, 0x12345, 0x0000000001061234, 0xffffffffffffffff, 3)}), 0},
 		{"ResolveAddr", func(c *Channel) error {
 			return c.ResolveAddr(7, netip.MustParseAddrPort("10.200.0.1:0"), netip.MustParseAddrPort("10.200.0.2:7471"), 2*time.Second)
 		}, bytesOf(&rdmaabi.UcmaAbiResolveAddr{Cmd: 21, In: 272, Id: 7, Timeout_ms: 2000, Src_size: 16, Dst_size: 16, Src_addr: sockaddrIn("10.200.0.1", 0), Dst_addr: sockaddrIn("10.200.0.2", 7471)}), 0},
 		{"ResolveAddr without a source", func(c *Channel) error {
 			return c.ResolveAddr(7, netip.AddrPort{}, netip.MustParseAddrPort("[2001:db8::2]:7471"), 1500*time.Millisecond)
 		}, bytesOf(&rdmaabi.UcmaAbiResolveAddr{Cmd: 21, In: 272, Id: 7, Timeout_ms: 1500, Dst_size: 28, Dst_addr: sockaddrIn6("2001:db8::2", 7471)}), 0},
+		{"ResolveIBAddr", func(c *Channel) error {
+			return c.ResolveIBAddr(7, IBAddr{GID: netip.MustParseAddr("fe80::1"), PKey: 0xffff}, testIBAddr, 2*time.Second)
+		}, bytesOf(&rdmaabi.UcmaAbiResolveAddr{Cmd: 21, In: 272, Id: 7, Timeout_ms: 2000, Src_size: 48, Dst_size: 48,
+			Src_addr: sockaddrIb("fe80::1", 0xffff, 0, 0, 0, 0), Dst_addr: sockaddrIb("fe80::248a:703:49:d4f0", 0x8001, 0x12345, 0x0000000001061234, 0xffffffffffffffff, 3)}), 0},
+		{"ResolveIBAddr without a source", func(c *Channel) error {
+			return c.ResolveIBAddr(7, IBAddr{}, testIBAddr, 1500*time.Millisecond)
+		}, bytesOf(&rdmaabi.UcmaAbiResolveAddr{Cmd: 21, In: 272, Id: 7, Timeout_ms: 1500, Dst_size: 48,
+			Dst_addr: sockaddrIb("fe80::248a:703:49:d4f0", 0x8001, 0x12345, 0x0000000001061234, 0xffffffffffffffff, 3)}), 0},
 		{"ResolveRoute", func(c *Channel) error { return c.ResolveRoute(7, 2*time.Second) },
 			bytesOf(&rdmaabi.UcmaAbiResolveRoute{Cmd: 4, In: 8, Id: 7, Timeout_ms: 2000}), 0},
 		{"ResolveRoute rounds up to a millisecond", func(c *Channel) error { return c.ResolveRoute(7, 1500*time.Microsecond) },
@@ -198,6 +208,8 @@ func TestArgumentsTheRequestCannotCarry(t *testing.T) {
 	}{
 		{"Bind without an address", func(c *Channel) error { return c.Bind(7, netip.AddrPort{}) }},
 		{"ResolveAddr without a destination", func(c *Channel) error { return c.ResolveAddr(7, netip.AddrPort{}, netip.AddrPort{}, time.Second) }},
+		{"BindIB without a GID", func(c *Channel) error { return c.BindIB(7, IBAddr{PKey: 0xffff}) }},
+		{"ResolveIBAddr without a destination", func(c *Channel) error { return c.ResolveIBAddr(7, IBAddr{}, IBAddr{}, time.Second) }},
 		{"Connect with 256 bytes of private data", func(c *Channel) error { return c.Connect(7, ConnParam{PrivateData: long}, ECE{}) }},
 		{"Accept with 256 bytes of private data", func(c *Channel) error { return c.Accept(7, 1, &ConnParam{PrivateData: long}, ECE{}) }},
 		{"Reject with 256 bytes of private data", func(c *Channel) error { return c.Reject(7, 0, long) }},
@@ -264,6 +276,29 @@ func TestQueryAddrDecodesTheResponse(t *testing.T) {
 	want := AddrInfo{
 		Src:      netip.MustParseAddrPort("10.200.0.1:4791"),
 		Dst:      netip.MustParseAddrPort("[2001:db8::2]:7471"),
+		NodeGUID: 0x020000fffe000001,
+		PortNum:  1,
+		PKey:     0xffff,
+		DevIndex: 3,
+	}
+	if got != want || err != nil {
+		t.Errorf("QueryAddr() = %+v, %v; want %+v", got, err, want)
+	}
+}
+
+// The addresses of an identifier bound or resolved to InfiniBand addresses
+// come as struct sockaddr_ib, which QueryAddr reads into SrcIB and DstIB.
+func TestQueryAddrDecodesInfiniBandAddresses(t *testing.T) {
+	d := newFakeDevice(t)
+	resp := testAddrResp()
+	resp.Src_size, resp.Dst_size = 48, 48
+	resp.Src_addr = sockaddrIb("fe80::248a:703:49:d4f0", 0x8001, 0x12345, 0x0000000001061234, 0xffffffffffffffff, 3)
+	resp.Dst_addr = sockaddrIb("fe80::248a:703:49:d4f1", 0x8001, 0, 0x0000000001061235, 0xffffffffffffffff, 0)
+	d.answer(bytesOf(&resp))
+	got, err := d.ch.QueryAddr(7)
+	want := AddrInfo{
+		SrcIB:    testIBAddr,
+		DstIB:    IBAddr{GID: netip.MustParseAddr("fe80::248a:703:49:d4f1"), PKey: 0x8001, ServiceID: 0x0000000001061235, ServiceIDMask: 0xffffffffffffffff},
 		NodeGUID: 0x020000fffe000001,
 		PortNum:  1,
 		PKey:     0xffff,

@@ -146,6 +146,18 @@ func (c *Channel) Bind(id uint32, addr netip.AddrPort) error {
 	return command(c, cmdBind, &cmd, 0)
 }
 
+// BindIB binds an identifier to a local InfiniBand address as Bind does to
+// an IP address: the GID picks the device unless it is :: or ::1, and the
+// service ID picks the port space and the port.
+func (c *Channel) BindIB(id uint32, addr IBAddr) error {
+	ss, size, err := addr.sockaddr()
+	if err != nil {
+		return err
+	}
+	cmd := rdmaabi.UcmaAbiBind{Id: id, Addr_size: size, Addr: ss}
+	return command(c, cmdBind, &cmd, 0)
+}
+
 // ResolveAddr starts resolving the address dst from src, or from an address
 // the kernel picks when src is the zero AddrPort. It ends in
 // EventAddrResolved or EventAddrError, after timeout at the latest.
@@ -157,6 +169,21 @@ func (c *Channel) ResolveAddr(id uint32, src, dst netip.AddrPort, timeout time.D
 	}
 	if src.IsValid() {
 		cmd.Src_addr, cmd.Src_size, _ = sockaddr(src)
+	}
+	return command(c, cmdResolveAddr, &cmd, 0)
+}
+
+// ResolveIBAddr starts resolving the InfiniBand address dst as ResolveAddr
+// does an IP address, from src or, when src is the zero IBAddr, from an
+// address the kernel picks.
+func (c *Channel) ResolveIBAddr(id uint32, src, dst IBAddr, timeout time.Duration) error {
+	cmd := rdmaabi.UcmaAbiResolveAddr{Id: id, Timeout_ms: millis(timeout)}
+	var err error
+	if cmd.Dst_addr, cmd.Dst_size, err = dst.sockaddr(); err != nil {
+		return err
+	}
+	if src.GID.IsValid() {
+		cmd.Src_addr, cmd.Src_size, _ = src.sockaddr()
 	}
 	return command(c, cmdResolveAddr, &cmd, 0)
 }
@@ -185,6 +212,9 @@ func millis(d time.Duration) uint32 {
 // ucma_abi_query_addr_resp).
 type AddrInfo struct {
 	Src, Dst netip.AddrPort // the local and the peer's address, zero while unknown
+	// SrcIB and DstIB are the local and the peer's address in place of Src
+	// and Dst when these are InfiniBand addresses (AF_IB), zero otherwise.
+	SrcIB, DstIB IBAddr
 	// The device of the identifier: its node GUID, 0 while the identifier
 	// has no device, which leaves the rest meaningless; the port; the
 	// partition key; the kernel's index of the device, -1 from a kernel
@@ -206,6 +236,8 @@ func (c *Channel) QueryAddr(id uint32) (AddrInfo, error) {
 	info := AddrInfo{
 		Src:      addrPort(&resp.Src_addr),
 		Dst:      addrPort(&resp.Dst_addr),
+		SrcIB:    ibAddr(&resp.Src_addr),
+		DstIB:    ibAddr(&resp.Dst_addr),
 		NodeGUID: binary.BigEndian.Uint64(resp.Node_guid[:]),
 		PortNum:  resp.Port_num,
 		PKey:     binary.BigEndian.Uint16(resp.Pkey[:]),
